@@ -9,11 +9,11 @@ FetchContent_Declare(JUCE
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(DrumSlicer
-    COMPANY_NAME "YourName"
+    COMPANY_NAME "Pouria Motabean"
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
-    PLUGIN_MANUFACTURER_CODE Yrnm
+    PLUGIN_MANUFACTURER_CODE Pmau
     PLUGIN_CODE Dslc
     FORMATS VST3
     PRODUCT_NAME "Drum Slicer"

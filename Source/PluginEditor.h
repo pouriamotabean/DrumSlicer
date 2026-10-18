@@ -423,9 +423,9 @@ public:
             punch[(size_t) i].setBounds(690, 503, 42, 42); sus[(size_t) i].setBounds(796, 503, 42, 42); pitch[(size_t) i].setBounds(902, 503, 42, 42);
         }
         master.setBounds(669, 362, 42, 42); sens.setBounds(749, 362, 42, 42); grid.setBounds(829, 362, 42, 42); bpm.setBounds(909, 362, 42, 42);
-        dragMidi.setBounds(666, 440, 136, 36);
-        modeBtn[0].setBounds(808, 446, 50, 24); modeBtn[1].setBounds(857, 446, 50, 24);
-        exportBtn.setBounds(914, 440, 56, 36);
+        dragMidi.setBounds(666, 440, 134, 36);
+        modeBtn[0].setBounds(806, 440, 52, 36); modeBtn[1].setBounds(862, 440, 52, 36);
+        exportBtn.setBounds(918, 440, 52, 36);
         srcBtn[0].setBounds(32, 450, 102, 22); srcBtn[1].setBounds(133, 450, 102, 22);
         dragWav.setBounds(552, 450, 80, 22);
         shape.setBounds(30, 478, 604, 96);

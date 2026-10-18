@@ -11,7 +11,7 @@
 namespace ds
 {
 static constexpr int kPads = 8;
-static const char* kEngineVersion = "drumpeel-4";
+static const char* kEngineVersion = "drumpeel-5";
 
 struct Pad
 {
