@@ -3,7 +3,8 @@
 
 juce::AudioProcessor::BusesProperties DrumSlicerProcessor::makeBuses()
 {
-    auto b = BusesProperties().withOutput("Main", juce::AudioChannelSet::stereo(), true);
+    auto b = BusesProperties().withInput("Capture (side-chain)", juce::AudioChannelSet::stereo(), false)
+                              .withOutput("Main", juce::AudioChannelSet::stereo(), true);
     for (int i = 0; i < ds::kPads; ++i)
         b = b.withOutput("PAD " + juce::String(i + 1), juce::AudioChannelSet::stereo(), false);
     return b;
@@ -100,8 +101,28 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double s
     return o;
 }
 
+void DrumSlicerProcessor::finishCapture()
+{
+    const int n = capLen.load();
+    capState = 0;
+    float pk = 0; for (int i = 0; i < n; ++i) pk = std::max(pk, std::max(std::abs(capL[(size_t) i]), std::abs(capR[(size_t) i])));
+    if (pk < 1e-4f) { setStatus("COULD NOT ANALYSE: NOTHING ON THE SIDE-CHAIN INPUT"); ++resultVersion; return; }
+    // trim silence at both ends
+    int a = 0, b = n; const float thr = pk * 0.001f;
+    while (a < b && std::max(std::abs(capL[(size_t) a]), std::abs(capR[(size_t) a])) < thr) ++a;
+    while (b > a && std::max(std::abs(capL[(size_t) (b - 1)]), std::abs(capR[(size_t) (b - 1)])) < thr) --b;
+    a = std::max(0, a - (int) (0.002 * hostSR));
+    juce::AudioBuffer<float> rec(2, b - a);
+    rec.copyFrom(0, 0, capL.data() + a, b - a); rec.copyFrom(1, 0, capR.data() + a, b - a);
+    auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("DrumSlicer").getChildFile("Captures");
+    dir.createDirectory();
+    auto f = dir.getChildFile("capture_" + juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S") + ".wav");
+    if (ds::writeWav24(f, rec, hostSR)) startAnalysis(f, true);
+}
+
 void DrumSlicerProcessor::timerCallback()
 {
+    if (capState.load() == 3) finishCapture();
     auto r = getResult();
     if (!r) return;
     std::array<ShapeParams, ds::kPads> now;
@@ -126,6 +147,7 @@ DrumSlicerProcessor::~DrumSlicerProcessor()
 bool DrumSlicerProcessor::isBusesLayoutSupported(const BusesLayout& l) const
 {
     if (l.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
+    for (auto& in : l.inputBuses) if (!in.isDisabled() && in != juce::AudioChannelSet::stereo() && in != juce::AudioChannelSet::mono()) return false;
     for (int i = 1; i < l.outputBuses.size(); ++i)
     {
         auto s = l.getChannelSet(false, i);
@@ -159,6 +181,29 @@ double DrumSlicerProcessor::midiBpm() const
 void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals nd;
+    bool playing = false;
+    if (auto* ph = getPlayHead()) if (auto pos = ph->getPosition()) playing = pos->getIsPlaying();
+    {   // CAPTURE: take the side-chain input before the buffer is cleared for our output
+        const int st = capState.load();
+        if (st == 1 && playing) capState = 2;
+        if (capState.load() == 2)
+        {
+            if (!playing) capState = capLen.load() > (int) (0.5 * hostSR) ? 3 : 1;
+            else if (getBusCount(true) > 0 && getBus(true, 0) != nullptr && getBus(true, 0)->isEnabled())
+            {
+                auto in = getBusBuffer(buf, true, 0);
+                const int n = std::min(in.getNumSamples(), (int) capL.size() - capLen.load());
+                if (n > 0 && in.getNumChannels() > 0)
+                {
+                    const int o = capLen.load();
+                    std::memcpy(capL.data() + o, in.getReadPointer(0), sizeof(float) * (size_t) n);
+                    std::memcpy(capR.data() + o, in.getReadPointer(std::min(1, in.getNumChannels() - 1)), sizeof(float) * (size_t) n);
+                    capLen = o + n;
+                }
+                if (n <= 0) capState = 3;
+            }
+        }
+    }
     buf.clear();
     {
         juce::SpinLock::ScopedTryLockType l(lock);

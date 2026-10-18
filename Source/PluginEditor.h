@@ -282,11 +282,12 @@ private:
 };
 
 // -----------------------------------------------------------------------------------------------------
-class DrumSlicerEditor : public juce::AudioProcessorEditor, public juce::FileDragAndDropTarget,
-                         public juce::DragAndDropContainer, private juce::Timer
+// the whole UI at its design size 1000 x 600; the editor scales it (resizable window)
+class DrumSlicerPanel : public juce::Component, public juce::FileDragAndDropTarget, public juce::TextDragAndDropTarget,
+                        public juce::DragAndDropContainer, private juce::Timer
 {
 public:
-    explicit DrumSlicerEditor(DrumSlicerProcessor& p) : juce::AudioProcessorEditor(p), proc(p), shape(p)
+    explicit DrumSlicerPanel(DrumSlicerProcessor& p) : proc(p), shape(p)
     {
         setSize(1000, 600);
         look.knobImg = skin.knob;
@@ -325,8 +326,10 @@ public:
         grid.setTooltip("TIGHT MIDI: 100% = fully on the grid, lower keeps some of the loop's groove");
         bpm.setTooltip("Tempo used for the MIDI when the host does not report one");
 
-        for (auto* b : { &loadBtn, &reBtn }) addAndMakeVisible(b);
-        loadBtn.setButtonText("LOAD"); reBtn.setButtonText("RE-ANALYSE");
+        for (auto* b : { &loadBtn, &reBtn, &capBtn }) addAndMakeVisible(b);
+        loadBtn.setButtonText("LOAD"); reBtn.setButtonText("RE-ANALYSE"); capBtn.setButtonText("CAPTURE");
+        capBtn.setTooltip("Record the loop from the DAW: send the drum track to Drum Slicer's side-chain input, press CAPTURE, then play the part. Analysis starts when you stop.");
+        capBtn.onClick = [this] { proc.armCapture(!proc.isCaptureArmed()); repaint(); };
         loadBtn.onClick = [this]
         {
             chooser = std::make_unique<juce::FileChooser>("Select drum loop", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3");
@@ -377,12 +380,34 @@ public:
         updateVisibility();
         startTimerHz(30);
     }
-    ~DrumSlicerEditor() override { setLookAndFeel(nullptr); }
+    ~DrumSlicerPanel() override { setLookAndFeel(nullptr); }
 
-    bool isInterestedInFileDrag(const juce::StringArray& f) override { return f.size() > 0 && juce::File(f[0]).hasFileExtension("wav;aif;aiff;flac;mp3"); }
+    // drops: files from Explorer / MediaBay / Pool, and hosts that hand over a path or file:// URL as text
+    static bool isAudio(const juce::File& f) { return f.existsAsFile() && f.hasFileExtension("wav;wave;aif;aiff;flac;mp3;ogg"); }
+    static juce::File fileFromText(const juce::String& t)
+    {
+        juce::StringArray lines; lines.addLines(t);
+        for (auto l : lines)
+        {
+            l = l.trim().unquoted();
+            if (l.startsWithIgnoreCase("file:")) l = juce::URL(l).getLocalFile().getFullPathName();
+            if (juce::File::isAbsolutePath(l) && isAudio(juce::File(l))) return juce::File(l);
+        }
+        return {};
+    }
+    bool isInterestedInFileDrag(const juce::StringArray& f) override { for (auto& p : f) if (isAudio(juce::File(p))) return true; return false; }
     void fileDragEnter(const juce::StringArray&, int, int) override { hover = true; repaint(); }
     void fileDragExit(const juce::StringArray&) override { hover = false; repaint(); }
-    void filesDropped(const juce::StringArray& f, int, int) override { hover = false; proc.startAnalysis(juce::File(f[0]), true); repaint(); }
+    void filesDropped(const juce::StringArray& f, int, int) override
+    {
+        hover = false;
+        for (auto& p : f) if (isAudio(juce::File(p))) { proc.startAnalysis(juce::File(p), true); break; }
+        repaint();
+    }
+    bool isInterestedInTextDrag(const juce::String& t) override { return fileFromText(t).existsAsFile(); }
+    void textDragEnter(const juce::String&, int, int) override { hover = true; repaint(); }
+    void textDragExit(const juce::String&) override { hover = false; repaint(); }
+    void textDropped(const juce::String& t, int, int) override { hover = false; auto f = fileFromText(t); if (f.existsAsFile()) proc.startAnalysis(f, true); repaint(); }
 
     // ---------------------------------------------------------------- layout (1000 x 600)
     const juce::Rectangle<int> display { 20, 76, 960, 140 }, padsPanel { 20, 226, 624, 206 }, editPanel { 20, 440, 624, 140 },
@@ -392,6 +417,7 @@ public:
 
     void resized() override
     {
+        capBtn.setBounds(display.getRight() - 254, display.getY() + 10, 76, 22);
         loadBtn.setBounds(display.getRight() - 172, display.getY() + 10, 60, 22);
         reBtn.setBounds(display.getRight() - 106, display.getY() + 10, 94, 22);
         for (int i = 0; i < ds::kPads; ++i)
@@ -436,7 +462,8 @@ public:
         const bool hasPad = res && res->pads[(size_t) selected].valid;
         for (juce::Component* c : std::initializer_list<juce::Component*> { &dragMidi, &exportBtn, &modeBtn[0], &modeBtn[1], &reBtn }) c->setEnabled(res != nullptr);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &srcBtn[0], &srcBtn[1], &dragWav }) c->setEnabled(hasPad);
-        if (lit || proc.isBusy() || wasBusy) repaint();
+        capBtn.setToggleState(proc.isCaptureArmed(), juce::dontSendNotification);
+        if (lit || proc.isBusy() || wasBusy || proc.isCaptureArmed()) repaint();
         wasBusy = proc.isBusy();
         shape.repaint();
     }
@@ -497,6 +524,15 @@ private:
         auto d = display.toFloat().reduced(1.f);
         g.setColour(ui::well.withAlpha(0.7f)); g.fillRoundedRectangle(d.reduced(6.f), 8.f);
         if (hover) { g.setColour(ui::amber.withAlpha(0.8f)); g.drawRoundedRectangle(d.reduced(4.f), 10.f, 1.5f); }
+        if (proc.isCaptureArmed())
+        {
+            const bool rec = proc.isCapturing();
+            g.setColour(rec ? juce::Colour(0xffff5a4f) : ui::amber); g.setFont(ui::font(14.f, true, 0.3f));
+            g.drawText(rec ? "RECORDING   " + juce::String(proc.captureSeconds(), 1) + " s" : juce::String("CAPTURE ARMED  -  PLAY THE PART"), d.withTrimmedBottom(16).toNearestInt(), juce::Justification::centred);
+            g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.25f));
+            g.drawText(rec ? juce::String("STOP THE TRANSPORT TO ANALYSE") : juce::String("SEND THE DRUM TRACK TO DRUM SLICER'S SIDE-CHAIN INPUT"), d.withTrimmedTop(36).toNearestInt(), juce::Justification::centred);
+            return;
+        }
         if (proc.isBusy())
         {
             const auto bar = juce::Rectangle<float>(d.getX() + 120, d.getCentreY() + 8, d.getWidth() - 240, 6);
@@ -514,7 +550,7 @@ private:
             g.setColour(ui::amber.withAlpha(0.9f)); g.setFont(ui::font(14.f, true, 0.3f));
             g.drawText(st.startsWith("COULD NOT") ? st : juce::String("DROP A DRUM LOOP HERE"), d.withTrimmedBottom(16).toNearestInt(), juce::Justification::centred);
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.3f));
-            g.drawText("WAV  /  AIFF  /  FLAC  /  MP3     -     OR CLICK TO BROWSE", d.withTrimmedTop(36).toNearestInt(), juce::Justification::centred);
+            g.drawText("DRAG A FILE FROM EXPLORER / MEDIABAY  -  CLICK TO BROWSE  -  OR CAPTURE FROM THE TRACK", d.withTrimmedTop(36).toNearestInt(), juce::Justification::centred);
             return;
         }
         const float x0 = d.getX() + 18, w = d.getWidth() - 36, mid = d.getY() + 58, hh = 38.f;
@@ -652,12 +688,37 @@ private:
     std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch;
     juce::Slider master, sens, grid, bpm;
     std::vector<std::unique_ptr<juce::SliderParameterAttachment>> atts;
-    juce::TextButton loadBtn, reBtn, exportBtn;
+    juce::TextButton loadBtn, reBtn, exportBtn, capBtn;
     std::array<juce::TextButton, 2> modeBtn, srcBtn;
     ui::DragButton dragMidi, dragWav;
     ShapeView shape;
     juce::TooltipWindow tips { this, 700 };
     std::unique_ptr<juce::FileChooser> chooser;
 
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DrumSlicerPanel)
+};
+
+// resizable window (fixed 5:3), the panel is scaled - everything stays sharp because it is drawn in code
+class DrumSlicerEditor : public juce::AudioProcessorEditor
+{
+public:
+    explicit DrumSlicerEditor(DrumSlicerProcessor& p) : juce::AudioProcessorEditor(p), proc(p), panel(p)
+    {
+        addAndMakeVisible(panel);
+        setResizable(true, true);
+        setResizeLimits(700, 420, 2000, 1200);
+        if (auto* c = getConstrainer()) c->setFixedAspectRatio(1000.0 / 600.0);
+        const int w = juce::jlimit(700, 2000, (int) proc.apvts.state.getProperty("uiWidth", 1000));
+        setSize(w, juce::roundToInt(w * 0.6));
+    }
+    void resized() override
+    {
+        panel.setBounds(0, 0, 1000, 600);
+        panel.setTransform(juce::AffineTransform::scale((float) getWidth() / 1000.f));
+        proc.apvts.state.setProperty("uiWidth", getWidth(), nullptr);
+    }
+private:
+    DrumSlicerProcessor& proc;
+    DrumSlicerPanel panel;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DrumSlicerEditor)
 };
