@@ -63,7 +63,8 @@ int main(int argc, char** argv)
     std::string name = argv[1]; name = name.substr(name.find_last_of("/\\") + 1); name = name.substr(0, name.find_last_of('.'));
     auto t0 = std::chrono::steady_clock::now();
     dp::Peeler peel(x, sr, 8, argc > 3 ? std::atoi(argv[3]) : 9);
-    auto r = peel.run([](float p, const std::string& s) { std::cout << "[" << (int) (p * 100) << "%] " << s << std::endl; });
+    if (const char* e = std::getenv("DP_EXTRA")) peel.extraClusters = std::atoi(e);
+    auto r = peel.runBest([](float p, const std::string& s) { std::cout << "[" << (int) (p * 100) << "%] " << s << std::endl; });
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     for (auto& p : r.pads)
     {

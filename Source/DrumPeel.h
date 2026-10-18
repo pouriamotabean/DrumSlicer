@@ -253,10 +253,12 @@ public:
 
     double onsetThreshold = 0.03;               // spectral-flux peak height (lower = more hits)
     bool kitMode = true;                        // one pad per instrument (variants of a kick are merged)
+    int extraClusters = 0;                      // more / fewer sound groups to start from (second try)
 
     Output run(const Progress& progress = {}, const std::atomic<bool>* cancel = nullptr)
     {
         Output out; out.sr = sr;
+        snd.clear(); lastLeaders.clear();                // run() may be called again (another try)
         auto prog = [&](float p, const std::string& s) { if (progress) progress(p, s); out.log += s + "\n"; };
         auto cancelled = [&] { return cancel != nullptr && cancel->load(); };
         N = x.n;
@@ -268,7 +270,7 @@ public:
         on = onsets(onsetThreshold);
         if (on.size() < 2) return out;
         std::vector<std::array<double, 10>> F; for (double o : on) F.push_back(feats(o));
-        const int K = std::min<int>(std::max(2, nPads - 3), (int) on.size());
+        const int K = std::min<int>(std::max(2, nPads - 3 + extraClusters), (int) on.size());
         auto lab = kmeans(F, K);
         Lw = (int) (0.8 * sr); Lf = nframes(Lw);
         const int h0 = (int) (0.06 * sr);
@@ -319,6 +321,17 @@ public:
         for (int k = 0; k < STB; ++k) { const double f = k * sr / STN; qlow[(size_t) k] = std::clamp((f - 100.0) / 50.0, 0.0, 1.0); }
         {   Spec Sx; stft(x, Sx); Vx.init(Sx.F, Sx.B); for (size_t i = 0; i < Sx.d.size(); ++i) Vx.d[i] = std::norm(Sx.d[i]) + 1e-14f; }
         thirdOct(x, Bx);
+        {   // how far up the loop really goes (an MP3 64 / 96 is cut at 11 - 16 kHz): the highest frequency still
+            // within 40 dB of the 2 - 6 kHz level
+            std::vector<double> m((size_t) Vx.B, 0.0);
+            for (int f = 0; f < Vx.F; ++f) for (int ch = 0; ch < 2; ++ch) { const float* v = Vx.at(ch, f); for (int k = 0; k < Vx.B; ++k) m[(size_t) k] += v[k]; }
+            double ref = 0; int nr = 0;
+            for (int k = 0; k < Vx.B; ++k) { const double fr = k * sr / STN; if (fr >= 2000 && fr <= 6000) { ref += m[(size_t) k]; ++nr; } }
+            ref /= std::max(1, nr);
+            cutoffHz = sr / 2;
+            for (int k = Vx.B - 1; k > 0; --k) if (m[(size_t) k] > 1e-4 * ref) { cutoffHz = k * sr / STN; break; }
+            if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "cutoff %.0f Hz\n", cutoffHz);
+        }
 
         const int lastSplit = iters - 4;
         double bestScore = -1e9; std::vector<Snd> best;
@@ -406,6 +419,25 @@ public:
         return out;
     }
 
+    // the analysis, and when the result is weak (a band under 86 %), up to two more tries that start from
+    // fewer / more sound groups; the result you hear best wins. A good loop costs nothing extra.
+    Output runBest(const Progress& progress = {}, const std::atomic<bool>* cancel = nullptr)
+    {
+        auto score = [](const Output& o) { const double m = *std::min_element(o.hearing, o.hearing + 5); return 0.25 * o.nullMatch + 0.75 * m; };
+        Output best = run(progress, cancel);
+        const int base = extraClusters;
+        for (int extra : { -1, 2 })
+        {
+            if (cancel != nullptr && cancel->load()) break;
+            if (best.pads.empty() || *std::min_element(best.hearing, best.hearing + 5) >= 0.86) break;
+            extraClusters = base + extra;
+            Output o = run([&](float p, const std::string& m) { if (progress) progress(p, "another try: " + m); }, cancel);
+            if (!o.pads.empty() && score(o) > score(best) + 0.005) best = std::move(o);
+        }
+        extraClusters = base;
+        return best;
+    }
+
     // ---------- helpers also used by the plugin / CLI
     static double estimateBpm(const std::vector<double>& times, int n, double sr)
     {
@@ -453,6 +485,7 @@ private:
     Pow Vx;
     std::vector<std::vector<double>> Bx;          // third-octave envelope of the loop
     std::vector<double> thirdCents;
+    double cutoffHz = 22050;                      // top of the loop's spectrum (lower for low-bitrate MP3)
 
     static std::string pct(double v) { char b[32]; std::snprintf(b, sizeof b, "%.1f%%", v * 100); return b; }
     static double median(std::vector<double> v)
@@ -1224,9 +1257,14 @@ private:
         const int n = 1 << 16; std::vector<cd> z((size_t) n);
         for (int i = 0; i < std::min(n, T.n); ++i) z[(size_t) i] = cd(0.5 * (T.c[0][(size_t) i] + T.c[1][(size_t) i]), 0);
         fftOf(n).run(z.data(), false);
-        double tot = 1e-20, low = 0, high = 0;
-        for (int k = 0; k <= n / 2; ++k) { const double f = k * sr / n, p = std::norm(z[(size_t) k]); tot += p; if (f < 150) low += p; if (f > 5000) high += p; }
-        low /= tot; high /= tot;
+        // a band-limited loop (low-bitrate MP3) leaves a hat little above 5 kHz: the split moves down with the
+        // loop's top, and then a hat must also have no body (150 - 600 Hz), unlike a snare
+        const bool limited = cutoffHz < 16000;
+        const double split = limited ? std::max(2500.0, 5000.0 * cutoffHz / 16000.0) : 5000.0;
+        double tot = 1e-20, low = 0, high = 0, body = 0;
+        for (int k = 0; k <= n / 2; ++k) { const double f = k * sr / n, p = std::norm(z[(size_t) k]); tot += p; if (f < 150) low += p; if (f > split) high += p; if (f >= 150 && f < 600) body += p; }
+        low /= tot; high /= tot; body /= tot;
+        if (std::getenv("DP_CAT")) std::fprintf(stderr, "cat: low %.3f high %.3f body %.3f split %.0f\n", low, high, body, split);
         const int w = std::max(1, (int) (0.01 * sr));
         std::vector<double> e((size_t) T.n, 0.0); double run = 0;
         for (int i = 0; i < T.n; ++i)
@@ -1238,7 +1276,7 @@ private:
         const int pk = (int) (std::max_element(e.begin(), e.end()) - e.begin());
         int k = pk; while (k < T.n && e[(size_t) k] >= e[(size_t) pk] * 1e-3) ++k;
         const double dec = (k - pk) / sr;
-        if (high > 0.5) return dec < 0.15 ? "chat" : "ohat";
+        if (high > 0.5 && (!limited || body < 0.08)) return dec < 0.15 ? "chat" : "ohat";
         if (low > 0.45) return "kick";
         return "snare";
     }
@@ -1379,7 +1417,14 @@ private:
     // and a long gap before the next hit (the real part of the shot ends there)
     int bestHit(size_t c, const Buf& yAll, const Buf& full) const
     {
-        const auto& s = snd[c]; double bestS = -1e300; int bi = -1;
+        const auto v = rankHits(c, yAll, full);
+        return v.empty() ? -1 : v.front().second;
+    }
+    // every strong hit of sound c with its "clean" score, best first
+    std::vector<std::pair<double, int>> rankHits(size_t c, const Buf& yAll, const Buf& full) const
+    {
+        std::vector<std::pair<double, int>> out;
+        const auto& s = snd[c];
         const int W = std::min(Lw, (int) (0.3 * sr));
         double gmax = 1e-12; for (double g : s.g) gmax = std::max(gmax, g);
         for (size_t i = 0; i < s.t.size(); ++i)
@@ -1397,9 +1442,10 @@ private:
             const double fit = 1 - ex / std::max(1e-20, er), clean = eo / (eo + 4 * ei + 1e-20);
             const double gap = std::min(1.0, (nextEventAfter(s.t[i]) - s.t[i]) / (0.25 * sr));
             const double sc = std::max(0.0, fit) * clean * std::sqrt(g / gmax) * (0.3 + 0.7 * gap);
-            if (sc > bestS) { bestS = sc; bi = (int) i; }
+            out.push_back({ sc, (int) i });
         }
-        return bi;
+        std::sort(out.begin(), out.end(), [](const std::pair<double, int>& a, const std::pair<double, int>& b) { return a.first > b.first; });
+        return out;
     }
 
     // the hat that rang on top of a kick lived inside the kick's sound; with the kick cleaned it must be
@@ -1638,23 +1684,55 @@ private:
             const double pk = p.audio.peak();
             if (pk > 0.99) { p.audio.scale(0.99 / pk); scale *= 0.99 / pk; }
             // "best hit" version on the same velocity scale: real hit = g_i * T  ->  shot = hit * scale / g_i
-            const int bi = bestHit(c, yAll, full[c]);
-            if (bi >= 0)
+            // "best" = the cleanest real hits (up to 4 that score close to the best one), each with the other
+            // drums subtracted and brought to the same level, averaged: what is really the drum stays, the
+            // ringing / separation hash that differs from hit to hit averages down
+            const auto ranked = rankHits(c, yAll, full[c]);
+            if (!ranked.empty())
             {
-                const double g = snd[c].g[(size_t) bi]; const int i0 = (int) std::floor(snd[c].t[(size_t) bi] + 0.5);
-                p.best.resize(Lw); p.bestTime = i0;
-                // real audio (others subtracted) until the next hit, then the learned tail (cross-fade 6 ms)
-                const int cut = std::max((int) (0.02 * sr), (int) (nextEventAfter(i0) - i0) - (int) (0.001 * sr));
+                std::vector<int> use;
+                for (const auto& rk : ranked) if ((int) use.size() < 4 && (use.empty() || rk.first >= 0.6 * ranked.front().first)) use.push_back(rk.second);
+                p.bestTime = (int) std::floor(snd[c].t[(size_t) use.front()] + 0.5);
                 const int xf = (int) (0.006 * sr);
-                for (int ch = 0; ch < 2; ++ch) for (int k = 0; k < Lw; ++k)
+                double gUse = 0; for (int bi : use) gUse += snd[c].g[(size_t) bi] / (double) use.size();
+                std::vector<Buf> takes;
+                for (int bi : use)
                 {
-                    const double learned = full[c].c[ch][(size_t) k] * scale;
-                    double real = learned;
-                    if (i0 + k < N) real = (x.c[ch][(size_t) (i0 + k)] - (yAll.c[ch][(size_t) (i0 + k)] - g * full[c].c[ch][(size_t) k])) * scale / g;
-                    const double w = k < cut - xf ? 1.0 : (k >= cut ? 0.0 : (double) (cut - k) / xf);
-                    p.best.c[ch][(size_t) k] = w * real + (1 - w) * learned;
+                    Buf tk(Lw);
+                    const double g = snd[c].g[(size_t) bi]; const int i0 = (int) std::floor(snd[c].t[(size_t) bi] + 0.5);
+                    // real audio (others subtracted) until the next hit, then the learned tail (cross-fade 6 ms)
+                    const int cut = std::max((int) (0.02 * sr), (int) (nextEventAfter(i0) - i0) - (int) (0.001 * sr));
+                    for (int ch = 0; ch < 2; ++ch) for (int k = 0; k < Lw; ++k)
+                    {
+                        const double learned = full[c].c[ch][(size_t) k] * scale;
+                        double real = learned;
+                        if (i0 + k < N) real = (x.c[ch][(size_t) (i0 + k)] - (yAll.c[ch][(size_t) (i0 + k)] - g * full[c].c[ch][(size_t) k])) * scale / g;
+                        const double w = k < cut - xf ? 1.0 : (k >= cut ? 0.0 : (double) (cut - k) / xf);
+                        tk.c[ch][(size_t) k] = w * real + (1 - w) * learned;
+                    }
+                    takes.push_back(std::move(tk));
                 }
-                denoise(p.best, floorP, scale / g);
+                // the timing and attack of the best take; the level per frequency and moment of all of them
+                // (power average): averaging the waveforms would smear the highs, this does not
+                if (takes.size() == 1) p.best = takes[0];
+                else
+                {
+                    std::vector<Spec> S(takes.size());
+                    for (size_t j = 0; j < takes.size(); ++j) stft(takes[j], S[j]);
+                    Spec& S0 = S[0];
+                    for (int ch = 0; ch < 2; ++ch) for (int f = 0; f < S0.F; ++f)
+                    {
+                        cf* v0 = S0.at(ch, f);
+                        for (int k = 0; k < S0.B; ++k)
+                        {
+                            double pw = 0; for (auto& Sj : S) pw += std::norm(Sj.at(ch, f)[k]);
+                            const double m = std::sqrt(pw / (double) S.size()), m0 = std::abs(v0[k]);
+                            v0[k] = m0 > 1e-20 ? v0[k] * (float) (m / m0) : cf((float) m, 0.f);
+                        }
+                    }
+                    Buf y; istft(S0, y, Lw); p.best = std::move(y);
+                }
+                denoise(p.best, floorP, scale / gUse / std::sqrt((double) use.size()));   // the floor averages down too
                 if (!snd[c].mask.empty())                       // a hat keeps no low end (leftovers of kick / snare)
                 {
                     Spec S; stft(p.best, S);

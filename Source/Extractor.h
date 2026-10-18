@@ -1,12 +1,14 @@
 #pragma once
 // JUCE glue around the DrumPeel engine: audio loading, result for the plugin, cache on disk, MIDI bytes.
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_data_structures/juce_data_structures.h>
 #include "DrumPeel.h"
 #include <array>
 #include <vector>
 #include <memory>
 #include <atomic>
 #include <functional>
+#include <cstring>
 
 namespace ds
 {
@@ -60,49 +62,82 @@ inline bool loadAudio(const juce::File& file, juce::AudioBuffer<float>& out, dou
     juce::AudioFormatManager fm;
     fm.registerBasicFormats();
     std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(file));
-    if (rd == nullptr || rd->lengthInSamples < 4096) return false;
+    if (rd == nullptr || rd->lengthInSamples < 4096 || rd->sampleRate <= 0) return false;
     sr = rd->sampleRate;
     const int n = (int) std::min<juce::int64>(rd->lengthInSamples, (juce::int64) (sr * maxSeconds));
     out.setSize(2, n);
-    rd->read(&out, 0, n, 0, true, true);
+    if (!rd->read(&out, 0, n, 0, true, true)) return false;
     if (rd->numChannels < 2) out.copyFrom(1, 0, out, 0, 0, n);
     return true;
 }
 
-inline juce::File cacheDir(const juce::File& loop)
+// ---------------------------------------------------------------- folders
+// Documents/ReKit  (the folder of the old name "DrumSlicer" is moved once, so caches and kits stay)
+inline juce::File root()
 {
-    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("DrumSlicer").getChildFile(loop.getFileNameWithoutExtension());
+    static const juce::File r = []
+    {
+        const auto docs = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+        auto now = docs.getChildFile("ReKit"), old = docs.getChildFile("DrumSlicer");
+        if (!now.exists() && old.isDirectory() && !old.moveFileTo(now)) return old;   // could not move: keep using it
+        return now;
+    }();
+    return r;
 }
-inline juce::File shotFile(const juce::File& loop, const juce::String& padName, bool best = false)
+// cache + exports of one loop: Documents/ReKit/<loop>_<id>/ - the id comes from the full path, so two
+// stems both called "Drums.wav" from different projects never share (or overwrite) a folder
+inline juce::String pathId(const juce::File& f) { return juce::String::toHexString(f.getFullPathName().toLowerCase().hashCode64()).paddedLeft('0', 16).substring(0, 6); }
+inline juce::File cacheDir(const juce::File& loop) { return root().getChildFile(loop.getFileNameWithoutExtension() + "_" + pathId(loop)); }
+inline juce::File legacyCacheDir(const juce::File& loop) { return root().getChildFile(loop.getFileNameWithoutExtension()); }
+inline juce::File shotFileIn(const juce::File& dir, const juce::File& loop, const juce::String& padName, bool best = false)
 {
-    return cacheDir(loop).getChildFile(loop.getFileNameWithoutExtension() + "_" + padName.removeCharacters(" ") + (best ? "_BEST" : "") + ".wav");
+    return dir.getChildFile(loop.getFileNameWithoutExtension() + "_" + padName.removeCharacters(" ") + (best ? "_BEST" : "") + ".wav");
 }
-inline juce::File cacheInfo(const juce::File& loop)
-{
-    return cacheDir(loop).getChildFile(loop.getFileNameWithoutExtension() + "_drumslicer.txt");
-}
+inline juce::File cacheInfoIn(const juce::File& dir, const juce::File& loop) { return dir.getChildFile(loop.getFileNameWithoutExtension() + "_drumslicer.txt"); }
+inline juce::File cacheInfo(const juce::File& loop) { return cacheInfoIn(cacheDir(loop), loop); }
+// same file = same size + same modification time. The engine version is written too, but an older analysis
+// is still used: a project keeps sounding the way it did (RE-ANALYSE uses the new engine)
 inline juce::String sourceKey(const juce::File& loop)
 {
-    return juce::String(kEngineVersion) + "|" + juce::String(loop.getSize()) + "|" + juce::String(loop.getLastModificationTime().toMilliseconds());
+    return juce::String(loop.getSize()) + "|" + juce::String(loop.getLastModificationTime().toMilliseconds());
+}
+inline bool keyMatches(const juce::String& line, const juce::File& loop)
+{
+    if (!line.startsWith("key=")) return false;
+    auto k = line.fromFirstOccurrenceOf("=", false, false);
+    if (k.startsWith("drumpeel-")) k = k.fromFirstOccurrenceOf("|", false, false);     // older files carried the version here
+    return k == sourceKey(loop);
 }
 
+// written to a temporary file first: an existing file is only replaced by a complete new one
 inline bool writeWav24(const juce::File& f, const juce::AudioBuffer<float>& a, double sr)
 {
-    f.deleteFile();
-    auto fos = std::make_unique<juce::FileOutputStream>(f);
-    if (!fos->openedOk()) return false;
-    juce::WavAudioFormat wav;
-    std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(fos.get(), sr, 2, 24, {}, 0));
-    if (w == nullptr) return false;
-    fos.release();                                      // the writer owns the stream now
-    return w->writeFromAudioSampleBuffer(a, 0, a.getNumSamples());
+    if (a.getNumSamples() <= 0 || sr <= 0) return false;
+    if (!f.getParentDirectory().createDirectory()) return false;
+    juce::TemporaryFile tmp(f);
+    {
+        auto fos = std::make_unique<juce::FileOutputStream>(tmp.getFile());
+        if (!fos->openedOk()) return false;
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(fos.get(), sr, 2, 24, {}, 0));
+        if (w == nullptr) return false;
+        fos.release();                                  // the writer owns the stream now
+        if (!w->writeFromAudioSampleBuffer(a, 0, a.getNumSamples())) return false;
+    }
+    return tmp.overwriteTargetFileWithTemporary();
 }
+inline bool writeData(const juce::File& f, const void* d, size_t n)
+{
+    if (!f.getParentDirectory().createDirectory()) return false;
+    juce::TemporaryFile tmp(f);
+    return tmp.getFile().replaceWithData(d, n) && tmp.overwriteTargetFileWithTemporary();
+}
+inline bool writeText(const juce::File& f, const juce::String& t) { const auto u = t.toUTF8(); return writeData(f, u.getAddress(), std::strlen(u.getAddress())); }
 
 // the exact playback of the plugin (whole-sample start, gain = velocity / 100), used for the rebuild file
-inline void renderRebuild(const Result& r, juce::AudioBuffer<float>& y)
+inline void renderRebuild(const Result& r, juce::AudioBuffer<float>& y, int length = -1)
 {
-    y.setSize(2, r.loop.getNumSamples()); y.clear();
+    y.setSize(2, length > 0 ? length : r.loop.getNumSamples()); y.clear();
     for (const auto& h : r.hits)
     {
         const auto& s = r.pads[(size_t) h.pad].audio;
@@ -112,12 +147,10 @@ inline void renderRebuild(const Result& r, juce::AudioBuffer<float>& y)
     }
 }
 
-// one-shots, rebuild and analysis next to each other in Documents/DrumSlicer/<loop>/  (also the cache)
-inline void saveCache(const juce::File& loop, const Result& r)
+// analysis lines shared by the cache and the kits
+inline juce::StringArray infoLines(const Result& r)
 {
-    auto dir = cacheDir(loop); dir.createDirectory();
     juce::StringArray lines;
-    lines.add("key=" + sourceKey(loop));
     lines.add("sr=" + juce::String(r.sr, 3));
     lines.add("bpm=" + juce::String(r.bpm, 4));
     lines.add("null=" + juce::String(r.nullMatch, 6));
@@ -125,76 +158,108 @@ inline void saveCache(const juce::File& loop, const Result& r)
     for (int p = 0; p < kPads; ++p)
     {
         const auto& pd = r.pads[(size_t) p];
-        if (!pd.valid) continue;
-        writeWav24(shotFile(loop, pd.name), pd.audio, r.sr);
-        writeWav24(shotFile(loop, pd.name, true), pd.best, r.sr);
-        lines.add("pad=" + juce::String(p) + "|" + pd.name + "|" + juce::String(pd.note) + "|" + juce::String(pd.hits));
+        if (pd.valid) lines.add("pad=" + juce::String(p) + "|" + pd.name + "|" + juce::String(pd.note) + "|" + juce::String(pd.hits));
     }
     for (const auto& h : r.hits) lines.add("hit=" + juce::String((juce::int64) h.time) + "|" + juce::String(h.pad) + "|" + juce::String(h.velocity));
-    cacheInfo(loop).replaceWithText(lines.joinIntoString("\n"));
-    juce::AudioBuffer<float> y; renderRebuild(r, y);
-    writeWav24(dir.getChildFile(loop.getFileNameWithoutExtension() + "_rebuilt.wav"), y, r.sr);
+    return lines;
 }
-
-inline std::shared_ptr<Result> loadCache(const juce::File& loop, const juce::AudioBuffer<float>& audio, double sr)
+// fills r from the lines; shot(pad, best) gives the file of a one-shot
+inline bool parseInfo(const juce::StringArray& lines, Result& r, const std::function<juce::File(const juce::String&, bool)>& shot)
 {
-    auto info = cacheInfo(loop);
-    if (!info.existsAsFile()) return nullptr;
-    juce::StringArray lines; lines.addLines(info.loadFileAsString());
-    if (lines.isEmpty() || lines[0] != "key=" + sourceKey(loop)) return nullptr;
-    auto r = std::make_shared<Result>();
-    r->loop = audio; r->sr = sr; r->fromCache = true;
     juce::AudioFormatManager fm; fm.registerBasicFormats();
     for (auto& l : lines)
     {
         const auto k = l.upToFirstOccurrenceOf("=", false, false), v = l.fromFirstOccurrenceOf("=", false, false);
         juce::StringArray f; f.addTokens(v, "|", "");
-        if (k == "bpm") r->bpm = v.getDoubleValue();
-        else if (k == "null") r->nullMatch = v.getDoubleValue();
-        else if (k == "hearing") { juce::StringArray t; t.addTokens(v, " ", ""); for (int i = 0; i < 5 && i < t.size(); ++i) r->hearing[i] = t[i].getDoubleValue(); }
+        if (k == "bpm") r.bpm = v.getDoubleValue();
+        else if (k == "null") r.nullMatch = v.getDoubleValue();
+        else if (k == "hearing") { juce::StringArray t; t.addTokens(v, " ", ""); for (int i = 0; i < 5 && i < t.size(); ++i) r.hearing[i] = t[i].getDoubleValue(); }
         else if (k == "pad" && f.size() >= 4)
         {
-            const int p = f[0].getIntValue(); if (p < 0 || p >= kPads) return nullptr;
-            auto& pd = r->pads[(size_t) p];
-            pd.name = f[1]; pd.note = f[2].getIntValue(); pd.hits = f[3].getIntValue();
+            const int p = f[0].getIntValue(); if (p < 0 || p >= kPads) return false;
+            auto& pd = r.pads[(size_t) p];
+            pd.name = f[1]; pd.note = juce::jlimit(0, 127, f[2].getIntValue()); pd.hits = f[3].getIntValue();
             for (int b = 0; b < 2; ++b)
             {
-                std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(shotFile(loop, pd.name, b == 1)));
-                if (rd == nullptr) return nullptr;
+                std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(shot(pd.name, b == 1)));
+                if (rd == nullptr || rd->lengthInSamples <= 0) return false;
                 auto& buf = b == 1 ? pd.best : pd.audio;
                 buf.setSize(2, (int) rd->lengthInSamples);
-                rd->read(&buf, 0, (int) rd->lengthInSamples, 0, true, true);
+                if (!rd->read(&buf, 0, (int) rd->lengthInSamples, 0, true, true)) return false;
             }
             pd.valid = true;
         }
-        else if (k == "hit" && f.size() >= 3) r->hits.push_back({ (double) f[0].getLargeIntValue(), f[1].getIntValue(), f[2].getIntValue() });
+        else if (k == "hit" && f.size() >= 3) r.hits.push_back({ (double) f[0].getLargeIntValue(), f[1].getIntValue(), juce::jlimit(1, 127, f[2].getIntValue()) });
     }
-    for (auto& h : r->hits) if (h.pad < 0 || h.pad >= kPads || !r->pads[(size_t) h.pad].valid) return nullptr;
+    for (auto& h : r.hits) if (h.pad < 0 || h.pad >= kPads || !r.pads[(size_t) h.pad].valid) return false;
+    return true;
+}
+
+// one-shots, rebuild and analysis next to each other in Documents/ReKit/<loop>_<id>/  (also the cache).
+// The analysis text is written last, and only when every sound was written.
+inline bool saveCache(const juce::File& loop, const Result& r)
+{
+    auto dir = cacheDir(loop);
+    if (!dir.createDirectory()) return false;
+    bool ok = true;
+    for (int p = 0; p < kPads; ++p)
+    {
+        const auto& pd = r.pads[(size_t) p];
+        if (!pd.valid) continue;
+        ok = writeWav24(shotFileIn(dir, loop, pd.name), pd.audio, r.sr) && ok;
+        ok = writeWav24(shotFileIn(dir, loop, pd.name, true), pd.best.getNumSamples() > 0 ? pd.best : pd.audio, r.sr) && ok;
+    }
+    if (!ok) { cacheInfoIn(dir, loop).deleteFile(); return false; }
+    auto lines = infoLines(r);
+    lines.insert(0, "key=" + sourceKey(loop));
+    lines.insert(1, "engine=" + juce::String(kEngineVersion));
+    if (!writeText(cacheInfoIn(dir, loop), lines.joinIntoString("\n"))) return false;
+    juce::AudioBuffer<float> y; renderRebuild(r, y);
+    writeWav24(dir.getChildFile(loop.getFileNameWithoutExtension() + "_rebuilt.wav"), y, r.sr);
+    return true;
+}
+
+inline std::shared_ptr<Result> loadCacheFrom(const juce::File& dir, const juce::File& loop, const juce::AudioBuffer<float>& audio, double sr)
+{
+    auto info = cacheInfoIn(dir, loop);
+    if (!info.existsAsFile()) return nullptr;
+    juce::StringArray lines; lines.addLines(info.loadFileAsString());
+    if (lines.isEmpty() || !keyMatches(lines[0], loop)) return nullptr;
+    auto r = std::make_shared<Result>();
+    r->loop = audio; r->sr = sr; r->fromCache = true;
+    if (!parseInfo(lines, *r, [&](const juce::String& n, bool b) { return shotFileIn(dir, loop, n, b); })) return nullptr;
     r->buildNoteMap();
     return r;
 }
+inline std::shared_ptr<Result> loadCache(const juce::File& loop, const juce::AudioBuffer<float>& audio, double sr)
+{
+    if (auto r = loadCacheFrom(cacheDir(loop), loop, audio, sr)) return r;
+    return loadCacheFrom(legacyCacheDir(loop), loop, audio, sr);     // analysed by an older version
+}
 
 // ---------------------------------------------------------------- kits (presets)
-// Documents/DrumSlicer/Kits/<name>/          final one-shots (as heard) + exact / tight MIDI, for any use
-// Documents/DrumSlicer/Kits/<name>/_data/    what the plugin needs to reopen the kit: loop, A / B shots, hits, settings
-inline juce::File kitsRoot()
-{
-    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("DrumSlicer").getChildFile("Kits");
-}
+// Documents/ReKit/Kits/<name>/          final one-shots (as heard) + exact / tight MIDI, for any use
+// Documents/ReKit/Kits/<name>/_data/    what the plugin needs to reopen the kit: loop, A / B shots, hits, settings
+inline juce::File kitsRoot() { return root().getChildFile("Kits"); }
 inline juce::File kitData(const juce::File& kit) { return kit.getChildFile("_data"); }
-inline juce::File kitLoop(const juce::File& kit) { return kitData(kit).getChildFile(kit.getFileName() + ".wav"); }
+inline juce::File kitLoop(const juce::File& kit)
+{
+    const auto named = kitData(kit).getChildFile(kit.getFileName() + ".wav");     // kits saved by version 1.0
+    return named.existsAsFile() ? named : kitData(kit).getChildFile("loop.wav");
+}
 inline bool isKit(const juce::File& dir) { return kitData(dir).getChildFile("kit.txt").existsAsFile(); }
+// a kit saved in a project but moved since: look for one with the same name in the kits folder
+inline juce::File findKit(const juce::File& saved)
+{
+    if (isKit(saved)) return saved;
+    const auto byName = kitsRoot().getChildFile(saved.getFileName());
+    return isKit(byName) ? byName : juce::File();
+}
 
 inline bool saveKitData(const juce::File& kit, const Result& r)
 {
     auto d = kitData(kit);
     if (!d.createDirectory()) return false;
-    juce::StringArray lines;
-    lines.add("kit=1");
-    lines.add("sr=" + juce::String(r.sr, 3));
-    lines.add("bpm=" + juce::String(r.bpm, 4));
-    lines.add("null=" + juce::String(r.nullMatch, 6));
-    juce::String hs = "hearing="; for (double h : r.hearing) hs << juce::String(h, 6) << " "; lines.add(hs.trim());
     bool ok = writeWav24(kitLoop(kit), r.loop, r.sr);
     for (int p = 0; p < kPads; ++p)
     {
@@ -203,10 +268,9 @@ inline bool saveKitData(const juce::File& kit, const Result& r)
         const auto base = pd.name.removeCharacters(" ");
         ok = writeWav24(d.getChildFile(base + "_A.wav"), pd.audio, r.sr) && ok;
         ok = writeWav24(d.getChildFile(base + "_B.wav"), pd.best.getNumSamples() > 0 ? pd.best : pd.audio, r.sr) && ok;
-        lines.add("pad=" + juce::String(p) + "|" + pd.name + "|" + juce::String(pd.note) + "|" + juce::String(pd.hits));
     }
-    for (const auto& h : r.hits) lines.add("hit=" + juce::String((juce::int64) h.time) + "|" + juce::String(h.pad) + "|" + juce::String(h.velocity));
-    return d.getChildFile("kit.txt").replaceWithText(lines.joinIntoString("\n")) && ok;
+    auto lines = infoLines(r); lines.insert(0, "kit=1");
+    return ok && writeText(d.getChildFile("kit.txt"), lines.joinIntoString("\n"));
 }
 
 inline std::shared_ptr<Result> loadKitData(const juce::File& kit)
@@ -218,33 +282,121 @@ inline std::shared_ptr<Result> loadKitData(const juce::File& kit)
     double sr = 44100;
     if (!loadAudio(kitLoop(kit), r->loop, sr)) return nullptr;
     r->sr = sr; r->fromCache = true;
+    if (!parseInfo(lines, *r, [&](const juce::String& n, bool b) { return d.getChildFile(n.removeCharacters(" ") + (b ? "_B.wav" : "_A.wav")); })) return nullptr;
+    r->buildNoteMap();
+    return r;
+}
+
+// a few seconds of the kit playing its own pattern (its final, shaped sounds) to listen to before loading
+inline bool renderKitPreview(const juce::File& kit, juce::AudioBuffer<float>& out, double& sr)
+{
+    juce::StringArray lines; lines.addLines(kitData(kit).getChildFile("kit.txt").loadFileAsString());
+    if (lines.isEmpty() || lines[0] != "kit=1") return false;
     juce::AudioFormatManager fm; fm.registerBasicFormats();
+    std::array<juce::AudioBuffer<float>, kPads> shots; std::vector<Hit> hits; double bpm = 120; sr = 44100;
     for (auto& l : lines)
     {
         const auto k = l.upToFirstOccurrenceOf("=", false, false), v = l.fromFirstOccurrenceOf("=", false, false);
         juce::StringArray f; f.addTokens(v, "|", "");
-        if (k == "bpm") r->bpm = v.getDoubleValue();
-        else if (k == "null") r->nullMatch = v.getDoubleValue();
-        else if (k == "hearing") { juce::StringArray t; t.addTokens(v, " ", ""); for (int i = 0; i < 5 && i < t.size(); ++i) r->hearing[i] = t[i].getDoubleValue(); }
-        else if (k == "pad" && f.size() >= 4)
+        if (k == "sr") sr = v.getDoubleValue();
+        else if (k == "bpm") bpm = v.getDoubleValue();
+        else if (k == "pad" && f.size() >= 2)
         {
-            const int p = f[0].getIntValue(); if (p < 0 || p >= kPads) return nullptr;
-            auto& pd = r->pads[(size_t) p];
-            pd.name = f[1]; pd.note = f[2].getIntValue(); pd.hits = f[3].getIntValue();
-            for (int b = 0; b < 2; ++b)
-            {
-                std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(d.getChildFile(pd.name.removeCharacters(" ") + (b == 1 ? "_B.wav" : "_A.wav"))));
-                if (rd == nullptr) return nullptr;
-                auto& buf = b == 1 ? pd.best : pd.audio;
-                buf.setSize(2, (int) rd->lengthInSamples);
-                rd->read(&buf, 0, (int) rd->lengthInSamples, 0, true, true);
-            }
-            pd.valid = true;
+            const int p = f[0].getIntValue(); if (p < 0 || p >= kPads) continue;
+            const auto base = f[1].removeCharacters(" ");
+            auto file = kit.getChildFile(kit.getFileName() + "_" + base + ".wav");          // as heard (shaped)
+            if (!file.existsAsFile()) file = kitData(kit).getChildFile(base + "_A.wav");
+            std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(file));
+            if (rd == nullptr) continue;
+            shots[(size_t) p].setSize(2, (int) rd->lengthInSamples);
+            rd->read(&shots[(size_t) p], 0, (int) rd->lengthInSamples, 0, true, true);
         }
-        else if (k == "hit" && f.size() >= 3) r->hits.push_back({ (double) f[0].getLargeIntValue(), f[1].getIntValue(), f[2].getIntValue() });
+        else if (k == "hit" && f.size() >= 3) hits.push_back({ (double) f[0].getLargeIntValue(), f[1].getIntValue(), f[2].getIntValue() });
     }
+    if (hits.empty() || sr <= 0) return false;
+    const double t0 = hits.front().time;
+    const int len = (int) (sr * juce::jlimit(3.0, 8.0, 2 * 240.0 / std::max(40.0, bpm)));      // two bars
+    out.setSize(2, len + (int) sr); out.clear();
+    for (const auto& h : hits)
+    {
+        const int i0 = (int) std::floor(h.time - t0 + 0.5);
+        if (i0 >= len) break;
+        if (h.pad < 0 || h.pad >= kPads) continue;
+        const auto& s = shots[(size_t) h.pad];
+        const int n = std::min(s.getNumSamples(), out.getNumSamples() - i0);
+        if (n > 0) for (int c = 0; c < 2; ++c) out.addFrom(c, i0, s, c, 0, n, (float) h.velocity / 100.f);
+    }
+    const int fade = std::min(out.getNumSamples(), (int) (0.3 * sr));
+    out.applyGainRamp(out.getNumSamples() - fade, fade, 1.f, 0.f);
+    return true;
+}
+
+// ---------------------------------------------------------------- the sounds inside the project
+// A and B of every pad (FLAC), the hits and the tempo travel with the Cubase project: it opens with the
+// same sounds on another computer or after the loop / kit was deleted, and an engine update never changes it.
+inline juce::ValueTree embedResult(const Result& r)
+{
+    juce::ValueTree e("EMBED");
+    e.setProperty("sr", r.sr, nullptr); e.setProperty("bpm", r.bpm, nullptr); e.setProperty("len", r.loop.getNumSamples(), nullptr);
+    e.setProperty("null", r.nullMatch, nullptr);
+    juce::String hs; for (double h : r.hearing) hs << juce::String(h, 6) << " "; e.setProperty("hearing", hs.trim(), nullptr);
+    juce::FlacAudioFormat flac;
+    auto enc = [&](const juce::AudioBuffer<float>& b) -> juce::String {
+        juce::MemoryBlock mb;
+        {
+            auto* mos = new juce::MemoryOutputStream(mb, false);
+            std::unique_ptr<juce::AudioFormatWriter> w(flac.createWriterFor(mos, r.sr, 2, 24, {}, 5));
+            if (w == nullptr) { delete mos; return {}; }
+            w->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());
+        }
+        return mb.toBase64Encoding(); };
+    for (int p = 0; p < kPads; ++p)
+    {
+        const auto& pd = r.pads[(size_t) p];
+        if (!pd.valid) continue;
+        juce::ValueTree t("PAD");
+        t.setProperty("i", p, nullptr); t.setProperty("name", pd.name, nullptr); t.setProperty("note", pd.note, nullptr); t.setProperty("hits", pd.hits, nullptr);
+        t.setProperty("a", enc(pd.audio), nullptr);
+        t.setProperty("b", pd.best.getNumSamples() > 0 ? enc(pd.best) : juce::String(), nullptr);
+        e.appendChild(t, nullptr);
+    }
+    juce::String hits; for (const auto& h : r.hits) hits << (juce::int64) h.time << ":" << h.pad << ":" << h.velocity << " ";
+    e.setProperty("hitlist", hits.trim(), nullptr);
+    return e;
+}
+
+inline std::shared_ptr<Result> unembedResult(const juce::ValueTree& e)
+{
+    if (!e.isValid() || !e.hasType("EMBED")) return nullptr;
+    auto r = std::make_shared<Result>();
+    r->sr = (double) e.getProperty("sr", 44100.0); r->bpm = (double) e.getProperty("bpm", 120.0); r->nullMatch = (double) e.getProperty("null", 0.0);
+    { juce::StringArray t; t.addTokens(e.getProperty("hearing").toString(), " ", ""); for (int i = 0; i < 5 && i < t.size(); ++i) r->hearing[i] = t[i].getDoubleValue(); }
+    juce::FlacAudioFormat flac;
+    auto dec = [&](const juce::String& b64, juce::AudioBuffer<float>& out) {
+        juce::MemoryBlock mb; if (b64.isEmpty() || !mb.fromBase64Encoding(b64)) return false;
+        std::unique_ptr<juce::AudioFormatReader> rd(flac.createReaderFor(new juce::MemoryInputStream(mb, true), true));
+        if (rd == nullptr || rd->lengthInSamples <= 0) return false;
+        out.setSize(2, (int) rd->lengthInSamples);
+        return rd->read(&out, 0, (int) rd->lengthInSamples, 0, true, true); };
+    for (int i = 0; i < e.getNumChildren(); ++i)
+    {
+        const auto t = e.getChild(i); const int p = t.getProperty("i", -1);
+        if (p < 0 || p >= kPads) return nullptr;
+        auto& pd = r->pads[(size_t) p];
+        pd.name = t.getProperty("name").toString(); pd.note = juce::jlimit(0, 127, (int) t.getProperty("note", 36)); pd.hits = t.getProperty("hits", 0);
+        if (!dec(t.getProperty("a").toString(), pd.audio)) return nullptr;
+        if (!dec(t.getProperty("b").toString(), pd.best)) pd.best.makeCopyOf(pd.audio);
+        pd.valid = true;
+    }
+    juce::StringArray hl; hl.addTokens(e.getProperty("hitlist").toString(), " ", "");
+    for (auto& h : hl) { juce::StringArray f; f.addTokens(h, ":", ""); if (f.size() == 3) r->hits.push_back({ (double) f[0].getLargeIntValue(), f[1].getIntValue(), juce::jlimit(1, 127, f[2].getIntValue()) }); }
     for (auto& h : r->hits) if (h.pad < 0 || h.pad >= kPads || !r->pads[(size_t) h.pad].valid) return nullptr;
+    r->fromCache = true;
     r->buildNoteMap();
+    // the loop itself is not in the project: the display shows the rebuild until the loop file is found
+    int len = (int) e.getProperty("len", 0);
+    if (len <= 0) { for (auto& h : r->hits) len = std::max(len, (int) h.time); len += (int) r->sr; }
+    renderRebuild(*r, r->loop, len);
     return r;
 }
 
@@ -261,7 +413,7 @@ inline std::shared_ptr<Result> analyse(const juce::File& file, float sensitivity
     for (int c = 0; c < 2; ++c) { const float* p = audio.getReadPointer(c); for (int i = 0; i < x.n; ++i) x.c[c][(size_t) i] = p[i]; }
     dp::Peeler peel(x, sr, kPads, 9);
     peel.onsetThreshold = 0.06 - 0.06 * juce::jlimit(0.f, 1.f, sensitivity);   // SENS 0.5 -> 0.03
-    auto out = peel.run([&](float p, const std::string& s) { if (progress) progress(p, juce::String(s)); }, cancel);
+    auto out = peel.runBest([&](float p, const std::string& s) { if (progress) progress(p, juce::String(s)); }, cancel);
     if (cancel != nullptr && cancel->load()) return nullptr;
     if (out.pads.empty()) return nullptr;
 

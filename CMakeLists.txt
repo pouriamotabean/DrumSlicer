@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(DrumSlicer VERSION 1.0.0)
+project(DrumSlicer VERSION 1.2.0)
 set(CMAKE_CXX_STANDARD 17)
 
 include(FetchContent)
@@ -16,7 +16,7 @@ juce_add_plugin(DrumSlicer
     PLUGIN_MANUFACTURER_CODE Pmau
     PLUGIN_CODE Dslc
     FORMATS VST3
-    PRODUCT_NAME "Drum Slicer"
+    PRODUCT_NAME "ReKit"
     VST3_CATEGORIES Instrument Drum
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE

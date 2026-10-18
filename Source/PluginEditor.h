@@ -8,7 +8,7 @@
 #endif
 
 // =====================================================================================================
-//  DRUM SLICER UI  -  dark graphite, one amber accent.   by Pouria Motabean
+//  REKIT UI  -  dark graphite, one amber accent.   by Pouria Motabean
 //  1000 x 600.  Text, waveforms, arcs and buttons are drawn in code; PNG skin (optional) in /Assets:
 //  background.png, knob.png, pad_off.png, pad_on.png (pad_on is tinted to each pad's colour).
 // =====================================================================================================
@@ -142,6 +142,9 @@ struct DragButton : juce::TextButton
 // -----------------------------------------------------------------------------------------------------
 // bottom editor: the selected pad's sound with start / end trim and an attack - hold - decay envelope
 // -----------------------------------------------------------------------------------------------------
+// sound editor of the selected pad: START / END flags, FADE IN / FADE OUT squares.
+// Drag a square sideways = fade length, up / down = its curve. Double-click a handle = reset it.
+// Click the sound = listen.  Right-click = reset menu.  FIT / FULL (top right) = zoom to the used part.
 class ShapeView : public juce::Component, public juce::SettableTooltipClient
 {
 public:
@@ -163,81 +166,102 @@ public:
         const auto sp = proc.shapeParams(pad);
         refreshPeaks(*res, sp.best);
         const auto col = ui::padColour(res->pads[(size_t) pad].name);
-        const auto w = wave(); const float mid = w.getCentreY(), hh = w.getHeight() * 0.48f;
-        const float xs = msToX(sp.start), xe = msToX(std::min(sp.end, totalMs));
+        const auto w = wave(); const float mid = w.getCentreY(), hh = w.getHeight() * 0.47f;
+        const float endMs = std::min(sp.end, totalMs);
+        const float xs = msToX(sp.start), xe = msToX(endMs);
+        // the sound: as heard (shaped) in colour, the untouched take faint behind it
         for (int i = 0; i < (int) peaks.size(); ++i)
         {
-            const float x = w.getX() + (float) i;
-            const bool in = x >= xs && x <= xe;
-            g.setColour(in ? col.withAlpha(0.95f) : ui::faint);
-            g.drawVerticalLine((int) x, mid - peaks[(size_t) i].second * hh, mid - peaks[(size_t) i].first * hh + 1.f);
+            const float x = w.getX() + (float) i, ms = xToMs(x + 0.5f);
+            const auto pk = peaks[(size_t) i];
+            g.setColour(ui::faint.withAlpha(0.55f));
+            g.drawVerticalLine((int) x, mid - pk.second * hh, mid - pk.first * hh + 1.f);
+            if (ms < sp.start || ms > endMs) continue;
+            const float e = level(sp, ms);
+            g.setColour(col.withAlpha(0.95f));
+            g.drawVerticalLine((int) x, mid - pk.second * hh * e, mid - pk.first * hh * e + 1.f);
         }
-        // envelope
-        const float top = w.getY() + 6.f, bot = w.getBottom() - 4.f;
-        const float xa = msToX(sp.start + sp.attack), xh = msToX(sp.start + sp.attack + sp.hold);
-        juce::Path env; env.startNewSubPath(xs, bot); env.lineTo(xa, top); env.lineTo(std::min(xh, xe), top);
-        if (xh < xe)
-            for (float x = xh; x <= xe; x += 2.f)
-            {
-                const float t = xToMs(x) - (sp.start + sp.attack + sp.hold);
-                const float lvl = std::pow(10.f, -3.f * t / std::max(1.f, sp.decay));
-                env.lineTo(x, bot - (bot - top) * std::sqrt(lvl));
-            }
-        g.setColour(ui::text.withAlpha(0.9f)); g.strokePath(env, juce::PathStrokeType(1.5f));
-        // trims
-        for (float x : { xs, xe }) { g.setColour(ui::text.withAlpha(0.85f)); g.drawLine(x, w.getY(), x, w.getBottom(), 1.5f); }
-        juce::Path flag; flag.addTriangle(xs, w.getY(), xs + 9.f, w.getY() + 4.f, xs, w.getY() + 8.f); g.fillPath(flag);
-        g.fillEllipse(xe - 3.f, mid - 3.f, 6.f, 6.f);
-        // handles + labels
-        const float xd = msToX(sp.start + sp.attack + sp.hold + sp.decay);
-        float lx[3]; int nl = 0; const char* names[3]; bool act[3];
-        auto handle = [&](float x, float y, const char* name, bool active)
+        // envelope: filled + line
+        const float top = w.getY() + 2.f, bot = w.getBottom() - 1.f;
+        juce::Path env, fill;
+        fill.startNewSubPath(xs, bot);
+        for (float x = xs; x <= xe + 0.5f; x += 1.f)
         {
-            x = juce::jlimit(w.getX() + 5.f, w.getRight() - 5.f, x);
-            g.setColour(ui::well); g.fillEllipse(x - 5, y - 5, 10, 10);
-            g.setColour(active ? ui::amber : ui::text); g.drawEllipse(x - 5, y - 5, 10, 10, 1.5f);
-            lx[nl] = x - 30.f; names[nl] = name; act[nl] = active; ++nl;
+            const float y = bot - (bot - top) * level(sp, xToMs(std::min(x, xe)));
+            if (x == xs) env.startNewSubPath(x, y); else env.lineTo(x, y);
+            fill.lineTo(x, y);
+        }
+        fill.lineTo(xe, bot); fill.closeSubPath();
+        g.setColour(col.withAlpha(0.10f)); g.fillPath(fill);
+        g.setColour(ui::text.withAlpha(0.85f)); g.strokePath(env, juce::PathStrokeType(1.4f));
+        // START / END flags
+        const bool hs = hot == 1 || drag == 1, he = hot == 5 || drag == 5;
+        g.setColour((hs ? ui::amber : ui::text).withAlpha(0.9f)); g.drawLine(xs, w.getY(), xs, w.getBottom(), hs ? 2.f : 1.4f);
+        juce::Path fs; fs.addTriangle(xs, w.getY(), xs + 11.f, w.getY() + 6.f, xs, w.getY() + 12.f); g.fillPath(fs);
+        g.setColour((he ? ui::amber : ui::text).withAlpha(0.9f)); g.drawLine(xe, w.getY(), xe, w.getBottom(), he ? 2.f : 1.4f);
+        juce::Path fe; fe.addTriangle(xe, w.getBottom(), xe - 11.f, w.getBottom() - 6.f, xe, w.getBottom() - 12.f); g.fillPath(fe);
+        // fade squares
+        auto square = [&](juce::Point<float> c, bool on, bool rising)
+        {
+            const auto q = juce::Rectangle<float>(13.f, 13.f).withCentre(c);
+            g.setColour(on ? ui::amber : ui::text.withAlpha(0.9f)); g.fillRoundedRectangle(q, 2.f);
+            g.setColour(ui::well); g.drawLine(q.getX() + 3, rising ? q.getBottom() - 3 : q.getY() + 3, q.getRight() - 3, rising ? q.getY() + 3 : q.getBottom() - 3, 1.4f);
         };
-        // handles that sit at "off" (full length) wait at the right end, so they can always be grabbed
-        handle(xa, top, "ATTACK", drag == 2);
-        handle(std::min(xh, w.getRight() - 30.f), top, "HOLD", drag == 3);
-        handle(std::min(xd, w.getRight() - 12.f), xd < w.getRight() ? bot - 2.f : top + 14.f, "DECAY", drag == 4);
-        for (int i = 0; i < nl; ++i) lx[i] = std::max(i ? lx[i - 1] + 62.f : 2.f, lx[i]);      // labels never overlap
-        lx[nl - 1] = std::min(lx[nl - 1], (float) getWidth() - 62.f);
-        for (int i = nl - 2; i >= 0; --i) lx[i] = std::min(lx[i], lx[i + 1] - 62.f);
-        g.setFont(ui::font(9.f, true, 0.18f));
-        for (int i = 0; i < nl; ++i) { g.setColour(act[i] ? ui::amber : ui::dim); g.drawText(names[i], juce::Rectangle<float>(lx[i], (float) getHeight() - 15.f, 60, 12), juce::Justification::centred); }
+        square(fadeInHandle(sp), hot == 2 || drag == 2, true);
+        square(fadeOutHandle(sp), hot == 6 || drag == 6, false);
+        // values
+        g.setFont(ui::font(8.5f, true, 0.15f));
+        auto label = [&](int id, const juce::String& t, juce::Rectangle<float> rr, juce::Justification j)
+        { g.setColour(drag == id || hot == id ? ui::amber : ui::dim); g.drawText(t, rr, j); };
+        const float ly = (float) getHeight() - 15.f, lw = ((float) getWidth() - 20.f) / 4.f;
+        label(1, "START  " + ms(sp.start), { 10.f, ly, lw, 12.f }, juce::Justification::centredLeft);
+        label(2, "FADE IN  " + ms(sp.attack) + curveText(sp.attackCurve), { 10.f + lw, ly, lw, 12.f }, juce::Justification::centred);
+        label(6, "FADE OUT  " + ms(sp.fadeOut) + curveText(sp.fadeOutCurve), { 10.f + 2 * lw, ly, lw, 12.f }, juce::Justification::centred);
+        label(5, "END  " + ms(endMs), { 10.f + 3 * lw, ly, lw, 12.f }, juce::Justification::centredRight);
         g.setColour(ui::dim); g.setFont(ui::font(9.f, false, 0.1f));
-        g.drawText(juce::String(juce::roundToInt(std::min(sp.end, totalMs) - sp.start)) + " ms", juce::Rectangle<float>(w.getCentreX() - 40, w.getY(), 80, 12).toNearestInt(), juce::Justification::centred);
+        g.drawText(ms(endMs - sp.start), juce::Rectangle<float>(w.getCentreX() - 40, w.getY() + 1, 80, 12).toNearestInt(), juce::Justification::centred);
+        // zoom
+        const auto zb = zoomRect();
+        g.setColour(zoomFit ? ui::amber : ui::dim); g.setFont(ui::font(8.5f, true, 0.25f));
+        g.drawRoundedRectangle(zb, 6.f, 1.f); g.drawText(zoomFit ? "FULL" : "FIT", zb, juce::Justification::centred);
     }
 
+    void mouseMove(const juce::MouseEvent& e) override { const int h = hit(e.position); if (h != hot) { hot = h; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { if (hot) { hot = 0; repaint(); } }
     void mouseDown(const juce::MouseEvent& e) override
     {
         auto res = proc.getResult(); if (!res || !res->pads[(size_t) pad].valid) return;
-        const auto sp = proc.shapeParams(pad); const auto p = e.position;
-        const float xs = msToX(sp.start), xe = msToX(std::min(sp.end, totalMs));
-        const auto w = wave();
-        const float xa = juce::jmax(w.getX() + 5.f, msToX(sp.start + sp.attack)), xh = std::min(msToX(sp.start + sp.attack + sp.hold), w.getRight() - 30.f),
-                    xd = std::min(msToX(sp.start + sp.attack + sp.hold + sp.decay), w.getRight() - 12.f);
-        drag = 0; float best = 9.f;
-        auto test = [&](float x, int id) { if (std::abs(p.x - x) < best) { best = std::abs(p.x - x); drag = id; } };
-        test(xe, 5); test(xd, 4); test(xh, 3); test(xa, 2); test(xs, 1);
+        if (zoomRect().contains(e.position)) { zoomFit = !zoomFit; peakKey = -1; repaint(); return; }
+        if (e.mods.isPopupMenu()) { resetMenu(); return; }
+        drag = hit(e.position);
         if (drag && e.getNumberOfClicks() > 1) { resetHandle(drag); drag = 0; }
-        else if (drag) beginGesture();
+        else if (drag) { beginGesture(); startSp = proc.shapeParams(pad); startPos = e.position; }
         else proc.previewPad[(size_t) pad] = 1;            // click on the sound = listen
         repaint();
     }
     void mouseDrag(const juce::MouseEvent& e) override
     {
         if (!drag) return;
-        const auto sp = proc.shapeParams(pad); const float ms = juce::jlimit(0.f, totalMs, xToMs(e.position.x));
+        const auto sp = proc.shapeParams(pad);
+        const float m = juce::jlimit(0.f, totalMs, xToMs(e.position.x)), endMs = std::min(sp.end, totalMs), len = endMs - sp.start;
+        const auto w = wave(); const float top = w.getY() + 2.f, bot = w.getBottom() - 1.f;
+        // moves are relative to where the drag started: grabbing a square never makes it jump
+        const float m0 = juce::jlimit(0.f, totalMs, xToMs(startPos.x)), dy = e.position.y - startPos.y;
+        auto curveFrom = [&](float c0) {                    // the square sits on the curve's middle: its height sets the curve
+            const float L0 = (float) std::pow(0.5, std::pow(2.0, -3.0 * c0));
+            const float L = juce::jlimit(0.03f, 0.97f, L0 - dy / (bot - top));
+            const float pw = std::log(L) / std::log(0.5f);
+            return juce::jlimit(-1.f, 1.f, -std::log2(pw) / 3.f); };
         switch (drag)
         {
-            case 1: set("st", std::min(ms, std::min(sp.end, totalMs) - 5.f)); break;
-            case 5: set("en", ms >= totalMs - 1.f ? 2000.f : std::max(ms, sp.start + 5.f)); break;
-            case 2: set("atk", ms - sp.start); break;
-            case 3: set("hold", ms >= totalMs * 0.97f ? 2000.f : ms - sp.start - sp.attack); break;
-            case 4: set("dcy", ms >= totalMs * 0.99f ? 2000.f : std::max(5.f, ms - sp.start - sp.attack - std::min(sp.hold, ms))); break;
+            case 1: set("st", juce::jlimit(0.f, endMs - 5.f - sp.attack - sp.fadeOut, m)); break;
+            case 5: set("en", m >= totalMs - 0.5f ? 2000.f : std::max(m, sp.start + 5.f + sp.attack + sp.fadeOut)); break;
+            case 2: set("atk", juce::jlimit(0.f, std::max(0.f, len - sp.fadeOut), startSp.attack + 2.f * (m - m0)));
+                    if (std::abs(dy) > 1.f) set("fic", curveFrom(startSp.attackCurve));
+                    break;
+            case 6: set("fo", juce::jlimit(0.f, std::max(0.f, len - sp.attack), startSp.fadeOut - 2.f * (m - m0)));
+                    if (std::abs(dy) > 1.f) set("foc", curveFrom(startSp.fadeOutCurve));
+                    break;
             default: break;
         }
         repaint();
@@ -246,30 +270,88 @@ public:
     void invalidate() { peakKey = -1; repaint(); }
 
 private:
-    juce::Rectangle<float> wave() const { return getLocalBounds().toFloat().reduced(10.f, 0).withTrimmedTop(8.f).withTrimmedBottom(18.f); }
-    float msToX(float ms) const { const auto w = wave(); return w.getX() + juce::jlimit(0.f, 1.f, ms / std::max(1.f, totalMs)) * w.getWidth(); }
-    float xToMs(float x) const { const auto w = wave(); return (x - w.getX()) / w.getWidth() * totalMs; }
+    // gain of the shaped sound at a time (ms in the take) - the same maths as shapeShot()
+    float fadeOutLevel(const ShapeParams& sp, float msIn) const
+    {
+        const float endMs = std::min(sp.end, totalMs);
+        if (sp.fadeOut <= 0 || msIn < endMs - sp.fadeOut) return 1.f;
+        return (float) std::pow(std::max(0.0, (double) (endMs - msIn) / sp.fadeOut), std::pow(2.0, -3.0 * sp.fadeOutCurve));
+    }
+    float level(const ShapeParams& sp, float msIn) const;
+    juce::Point<float> fadeInHandle(const ShapeParams& sp) const
+    {
+        const auto w = wave(); const float top = w.getY() + 2.f, bot = w.getBottom() - 1.f;
+        const float L = (float) std::pow(0.5, std::pow(2.0, -3.0 * sp.attackCurve));
+        return { std::max(msToX(sp.start) + 10.f, msToX(sp.start + 0.5f * sp.attack)), bot - (bot - top) * L };   // never under the flag
+    }
+    juce::Point<float> fadeOutHandle(const ShapeParams& sp) const
+    {
+        const auto w = wave(); const float top = w.getY() + 2.f, bot = w.getBottom() - 1.f;
+        const float L = (float) std::pow(0.5, std::pow(2.0, -3.0 * sp.fadeOutCurve));
+        return { std::min(msToX(std::min(sp.end, totalMs)) - 10.f, msToX(std::min(sp.end, totalMs) - 0.5f * sp.fadeOut)), bot - (bot - top) * L };
+    }
+    int hit(juce::Point<float> p) const
+    {
+        auto res = proc.getResult(); if (!res || !res->pads[(size_t) pad].valid) return 0;
+        const auto sp = proc.shapeParams(pad); const auto w = wave();
+        if (p.getDistanceFrom(fadeInHandle(sp)) < 10.f) return 2;
+        if (p.getDistanceFrom(fadeOutHandle(sp)) < 10.f) return 6;
+        const float xs = msToX(sp.start), xe = msToX(std::min(sp.end, totalMs));
+        const float ds = std::abs(p.x - xs), de = std::abs(p.x - xe);
+        if (std::min(ds, de) < 7.f && p.y >= w.getY() - 4 && p.y <= w.getBottom() + 4) return ds <= de ? 1 : 5;
+        return 0;
+    }
+    juce::Rectangle<float> wave() const { return getLocalBounds().toFloat().reduced(10.f, 0).withTrimmedTop(8.f).withTrimmedBottom(20.f); }
+    juce::Rectangle<float> zoomRect() const { return { (float) getWidth() - 50.f, 4.f, 40.f, 14.f }; }
+    float viewMs() const
+    {
+        if (!zoomFit) return totalMs;
+        const auto sp = proc.shapeParams(pad);
+        return juce::jlimit(20.f, totalMs, std::min(sp.end, totalMs) * 1.12f + 5.f);
+    }
+    float msToX(float m) const { const auto w = wave(); return w.getX() + juce::jlimit(0.f, 1.f, m / std::max(1.f, viewMs())) * w.getWidth(); }
+    float xToMs(float x) const { const auto w = wave(); return (x - w.getX()) / w.getWidth() * viewMs(); }
+    static juce::String ms(float v) { return v >= 100.f ? juce::String(juce::roundToInt(v)) + " ms" : juce::String(v, 1) + " ms"; }
+    static juce::String curveText(float c) { return std::abs(c) < 0.02f ? juce::String() : (c > 0 ? "  +" : "  ") + juce::String(juce::roundToInt(c * 100)); }
     juce::RangedAudioParameter* prm(const char* id) { return proc.apvts.getParameter(juce::String(id) + juce::String(pad)); }
     void set(const char* id, float v)
     {
         if (auto* p = prm(id)) { const auto& nr = p->getNormalisableRange(); p->setValueNotifyingHost(p->convertTo0to1(juce::jlimit(nr.start, nr.end, v))); }
     }
-    static const char* idOf(int d) { static const char* ids[6] = { "", "st", "atk", "hold", "dcy", "en" }; return ids[d]; }
-    void beginGesture() { if (auto* p = prm(idOf(drag))) p->beginChangeGesture(); }
-    void endGesture() { if (auto* p = prm(idOf(drag))) p->endChangeGesture(); }
-    void resetHandle(int d) { if (auto* p = prm(idOf(d))) p->setValueNotifyingHost(p->getDefaultValue()); }
+    static std::vector<const char*> idsOf(int d)
+    {
+        switch (d) { case 1: return { "st" }; case 5: return { "en" }; case 2: return { "atk", "fic" }; case 6: return { "fo", "foc" }; default: return {}; }
+    }
+    void beginGesture() { for (auto* id : idsOf(drag)) if (auto* p = prm(id)) p->beginChangeGesture(); }
+    void endGesture() { for (auto* id : idsOf(drag)) if (auto* p = prm(id)) p->endChangeGesture(); }
+    void resetIds(std::initializer_list<const char*> ids) { for (auto* id : ids) if (auto* p = prm(id)) p->setValueNotifyingHost(p->getDefaultValue()); repaint(); }
+    void resetHandle(int d) { for (auto* id : idsOf(d)) if (auto* p = prm(id)) p->setValueNotifyingHost(p->getDefaultValue()); }
+    void resetMenu()
+    {
+        juce::PopupMenu m;
+        m.addItem(1, "RESET FADES"); m.addItem(2, "RESET START / END"); m.addItem(3, "RESET THE WHOLE SHAPE");
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this), [this, sp = juce::Component::SafePointer<ShapeView>(this)](int id)
+        {
+            if (sp == nullptr) return;
+            if (id == 1) resetIds({ "atk", "fic", "fo", "foc", "hold", "dcy" });
+            if (id == 2) resetIds({ "st", "en" });
+            if (id == 3) resetIds({ "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy" });
+        });
+    }
     void refreshPeaks(const ds::Result& r, bool best)
     {
-        const int key = pad * 2 + (best ? 1 : 0) + 100 * proc.getResultVersion();
-        const int W = (int) wave().getWidth();
-        if (key == peakKey && (int) peaks.size() == W) return;
-        peakKey = key; peaks.clear();
         const auto& a = r.pads[(size_t) pad].get(best);
         const int n = a.getNumSamples(); totalMs = (float) (n / r.sr * 1000.0);
+        const float vm = viewMs();
+        const int key = pad * 2 + (best ? 1 : 0) + 100 * proc.getResultVersion();
+        const int W = (int) wave().getWidth();
+        if (key == peakKey && (int) peaks.size() == W && vm == peakView) return;
+        peakKey = key; peakView = vm; peaks.clear();
+        const int nv = std::min(n, (int) (vm * 0.001 * r.sr) + 1);
         float mx = 1e-6f; for (int c = 0; c < 2; ++c) mx = std::max(mx, a.getMagnitude(c, 0, n));
         for (int x = 0; x < W; ++x)
         {
-            const int s0 = (int) ((juce::int64) x * n / W), s1 = std::max(s0 + 1, (int) ((juce::int64) (x + 1) * n / W));
+            const int s0 = (int) ((juce::int64) x * nv / W), s1 = std::max(s0 + 1, (int) ((juce::int64) (x + 1) * nv / W));
             float lo = 0, hi = 0;
             for (int s = s0; s < std::min(n, s1); ++s) { const float v = 0.5f * (a.getSample(0, s) + a.getSample(1, s)) / mx; lo = std::min(lo, v); hi = std::max(hi, v); }
             peaks.push_back({ lo, hi });
@@ -277,12 +359,155 @@ private:
     }
     DrumSlicerProcessor& proc;
     std::vector<std::pair<float, float>> peaks;
-    int peakKey = -1, drag = 0;
-    float totalMs = 800.f;
+    int peakKey = -1, drag = 0, hot = 0;
+    float totalMs = 800.f, peakView = -1.f;
+    bool zoomFit = false;
+    ShapeParams startSp; juce::Point<float> startPos;
 };
+inline float ShapeView::level(const ShapeParams& sp, float msIn) const
+{
+    const float t = msIn - sp.start;
+    double env = 1.0;
+    if (t < sp.attack) env = std::pow(std::max(0.f, t) / std::max(0.001f, sp.attack), std::pow(2.0, -3.0 * sp.attackCurve));
+    else if (t > sp.attack + sp.hold) env = std::pow(10.0, -3.0 * (t - sp.attack - sp.hold) / std::max(1.f, sp.decay));
+    return (float) juce::jlimit(0.0, 1.0, env * fadeOutLevel(sp, msIn));
+}
 
 // -----------------------------------------------------------------------------------------------------
 // the whole UI at its design size 1000 x 600; the editor scales it (resizable window)
+// ---------------------------------------------------------------- kit browser (overlay)
+class KitBrowser : public juce::Component, private juce::ListBoxModel, private juce::Timer
+{
+public:
+    std::function<void(const juce::File&)> onLoad;
+    std::function<void()> onSave, onClose;
+
+    explicit KitBrowser(DrumSlicerProcessor& p) : proc(p)
+    {
+        addAndMakeVisible(list);
+        list.setModel(this); list.setRowHeight(40); list.setOutlineThickness(0);
+        list.setColour(juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
+        for (auto* b : { &saveBtn, &folderBtn, &deleteBtn, &closeBtn }) addAndMakeVisible(b);
+        saveBtn.setButtonText("SAVE CURRENT KIT"); saveBtn.getProperties().set("primary", true);
+        folderBtn.setButtonText("OPEN FOLDER"); deleteBtn.setButtonText("DELETE"); closeBtn.setButtonText("CLOSE");
+        saveBtn.onClick = [this] { if (onSave) onSave(); };
+        folderBtn.onClick = [] { ds::kitsRoot().createDirectory(); ds::kitsRoot().startAsProcess(); };
+        closeBtn.onClick = [this] { if (onClose) onClose(); };
+        deleteBtn.onClick = [this] { deleteSelected(); };
+        saveBtn.setTooltip("Save the sounds, settings and MIDI you have now as a kit");
+        deleteBtn.setTooltip("Move the selected kit to the Recycle Bin");
+    }
+    void refresh()
+    {
+        kits.clear();
+        for (const auto& d : ds::kitsRoot().findChildFiles(juce::File::findDirectories, false))
+            if (ds::isKit(d) && !d.getFileName().startsWithChar('.')) kits.add(d);
+        std::sort(kits.begin(), kits.end(), [](const juce::File& a, const juce::File& b) {
+            return ds::kitData(a).getChildFile("kit.txt").getLastModificationTime() > ds::kitData(b).getChildFile("kit.txt").getLastModificationTime(); });
+        saveBtn.setEnabled(proc.getResult() != nullptr && !proc.isBusy());
+        list.updateContent(); list.deselectAllRows();
+        const int cur = kits.indexOf(proc.getKitDir()); if (cur >= 0) list.selectRow(cur);
+        repaint();
+    }
+    void visibilityChanged() override { if (isVisible()) startTimerHz(10); else { stopTimer(); proc.stopPreview(); } }
+
+    const juce::Rectangle<int> card { 230, 64, 540, 480 };
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(juce::Colours::black.withAlpha(0.62f));
+        const auto c = card.toFloat();
+        g.setColour(juce::Colour(0xff15161a)); g.fillRoundedRectangle(c, 12.f);
+        g.setColour(ui::panelEdge.brighter(0.3f)); g.drawRoundedRectangle(c.reduced(0.5f), 12.f, 1.f);
+        g.setColour(ui::text); g.setFont(ui::font(16.f, true, 0.35f));
+        g.drawText("KITS", card.getX() + 22, card.getY() + 16, 200, 22, juce::Justification::centredLeft);
+        g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
+        g.drawText(juce::String(kits.size()) + (kits.size() == 1 ? " KIT" : " KITS") + "   |   DOCUMENTS / REKIT / KITS", card.getX() + 90, card.getY() + 16, 400, 22, juce::Justification::centredLeft);
+        if (kits.isEmpty())
+        {
+            g.setColour(ui::dim); g.setFont(ui::font(11.f, true, 0.25f));
+            g.drawText("NO SAVED KITS YET  -  ANALYSE A LOOP, THEN SAVE CURRENT KIT", list.getBounds(), juce::Justification::centred);
+        }
+    }
+    void resized() override
+    {
+        list.setBounds(card.getX() + 12, card.getY() + 50, card.getWidth() - 24, card.getHeight() - 112);
+        const int y = card.getBottom() - 50;
+        saveBtn.setBounds(card.getX() + 20, y, 170, 32);
+        folderBtn.setBounds(card.getX() + 200, y, 110, 32);
+        deleteBtn.setBounds(card.getX() + 320, y, 90, 32);
+        closeBtn.setBounds(card.getRight() - 110, y, 90, 32);
+    }
+    void mouseDown(const juce::MouseEvent& e) override { if (!card.contains(e.getPosition()) && onClose) onClose(); }
+
+private:
+    DrumSlicerProcessor& proc;
+    juce::ListBox list;
+    juce::TextButton saveBtn, folderBtn, deleteBtn, closeBtn;
+    juce::Array<juce::File> kits;
+    bool wasPlaying = false;
+
+    juce::Rectangle<int> playZone(int w, int h) const { return { w - 128, (h - 26) / 2, 26, 26 }; }
+    juce::Rectangle<int> loadZone(int w, int h) const { return { w - 92, (h - 26) / 2, 80, 26 }; }
+
+    int getNumRows() override { return kits.size(); }
+    void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool sel) override
+    {
+        if (row < 0 || row >= kits.size()) return;
+        const auto& k = kits[row];
+        const bool loaded = k == proc.getKitDir(), playing = proc.isPreviewing() && proc.previewingKit() == k;
+        const auto r = juce::Rectangle<float>(2.f, 2.f, (float) w - 4.f, (float) h - 4.f);
+        g.setColour(sel ? juce::Colours::white.withAlpha(0.07f) : juce::Colours::white.withAlpha(0.025f)); g.fillRoundedRectangle(r, 7.f);
+        if (loaded) { g.setColour(ui::amber.withAlpha(0.8f)); g.fillRoundedRectangle(r.withWidth(3.f), 1.5f); }
+        g.setColour(loaded ? ui::amber : ui::text); g.setFont(ui::font(12.5f, true, 0.08f));
+        g.drawText(k.getFileName(), 16, h / 2 - 15, w - 170, 16, juce::Justification::centredLeft);
+        g.setColour(ui::dim); g.setFont(ui::font(9.f, false, 0.1f));
+        const auto t = ds::kitData(k).getChildFile("kit.txt").getLastModificationTime();
+        g.drawText(t.formatted("%d %b %Y  %H:%M") + (loaded ? "   -   LOADED" : ""), 16, h / 2 + 2, w - 170, 12, juce::Justification::centredLeft);
+        // play / stop
+        const auto pz = playZone(w, h).toFloat();
+        g.setColour(playing ? ui::amber : ui::dim.withAlpha(0.9f)); g.drawEllipse(pz.reduced(1.f), 1.2f);
+        juce::Path ic;
+        if (playing) ic.addRectangle(pz.getCentreX() - 4.f, pz.getCentreY() - 4.f, 8.f, 8.f);
+        else ic.addTriangle(pz.getCentreX() - 3.f, pz.getCentreY() - 5.f, pz.getCentreX() - 3.f, pz.getCentreY() + 5.f, pz.getCentreX() + 5.f, pz.getCentreY());
+        g.fillPath(ic);
+        // load
+        const auto lz = loadZone(w, h).toFloat();
+        g.setColour(ui::amber.withAlpha(0.9f)); g.drawRoundedRectangle(lz.reduced(0.5f), 13.f, 1.1f);
+        g.setFont(ui::font(9.5f, true, 0.3f)); g.drawText("LOAD", lz.toNearestInt(), juce::Justification::centred);
+    }
+    void listBoxItemClicked(int row, const juce::MouseEvent& e) override
+    {
+        if (row < 0 || row >= kits.size()) return;
+        const int w = list.getVisibleRowWidth(), h = list.getRowHeight();
+        const auto pos = e.getEventRelativeTo(list.getComponentForRowNumber(row)).getPosition();
+        if (playZone(w, h).contains(pos))
+        {
+            if (proc.isPreviewing() && proc.previewingKit() == kits[row]) proc.stopPreview();
+            else proc.previewKit(kits[row]);
+            list.repaint();
+        }
+        else if (loadZone(w, h).contains(pos)) { if (onLoad) onLoad(kits[row]); }
+    }
+    void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override { if (row >= 0 && row < kits.size() && onLoad) onLoad(kits[row]); }
+    void timerCallback() override { const bool p = proc.isPreviewing(); if (p || p != wasPlaying) list.repaint(); wasPlaying = p; }
+
+    void deleteSelected()
+    {
+        const int row = list.getSelectedRow();
+        if (row < 0 || row >= kits.size()) return;
+        const auto k = kits[row];
+        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon, "DELETE KIT", "Move the kit \"" + k.getFileName() + "\" to the Recycle Bin?",
+            "DELETE", "CANCEL", this, juce::ModalCallbackFunction::create([this, k, sp = juce::Component::SafePointer<KitBrowser>(this)](int ok)
+            {
+                if (sp == nullptr || !ok) return;
+                proc.stopPreview();
+                if (k.moveToTrash() || k.deleteRecursively()) proc.kitRemoved(k);
+                refresh();
+            }));
+    }
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(KitBrowser)
+};
+
 class DrumSlicerPanel : public juce::Component, public juce::FileDragAndDropTarget, public juce::TextDragAndDropTarget,
                         public juce::DragAndDropContainer, private juce::Timer
 {
@@ -336,8 +561,12 @@ public:
         };
         addAndMakeVisible(kitsBtn);
         kitsBtn.setButtonText("KITS");
-        kitsBtn.setTooltip("Save this kit (sounds, settings, MIDI) or open a saved one - Documents/DrumSlicer/Kits");
-        kitsBtn.onClick = [this] { showKitsMenu(); };
+        kitsBtn.setTooltip("Save this kit (sounds, settings, MIDI) or open a saved one - Documents/ReKit/Kits");
+        kitsBtn.onClick = [this] { openKits(); };
+        addChildComponent(kitBrowser);
+        kitBrowser.onClose = [this] { kitBrowser.setVisible(false); };
+        kitBrowser.onSave = [this] { askKitName(); };
+        kitBrowser.onLoad = [this](const juce::File& k) { proc.stopPreview(); proc.loadKit(k); toast("KIT  " + k.getFileName()); kitBrowser.setVisible(false); };
         reBtn.onClick = [this] { proc.reanalyse(); };
         reBtn.setTooltip("Analyse the loop again (ignores the cache)");
 
@@ -359,7 +588,7 @@ public:
         }
         addAndMakeVisible(exportBtn);
         exportBtn.setButtonText("EXPORT");
-        exportBtn.setTooltip("Shaped one-shots (A or B as chosen) + MIDI into Documents/DrumSlicer/<loop>/EXPORT");
+        exportBtn.setTooltip("Shaped one-shots (A or B as chosen) + MIDI into Documents/ReKit/<loop>/EXPORT");
         exportBtn.onClick = [this] { auto d = proc.exportFinal(); if (d.exists()) d.revealToUser(); };
 
         for (int b = 0; b < 2; ++b)
@@ -378,7 +607,7 @@ public:
             if (f.existsAsFile()) juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, this);
         };
         addAndMakeVisible(shape);
-        shape.setTooltip("Click: listen.  Drag the flag / end line to trim, the dots for ATTACK, HOLD, DECAY.  Double-click a handle to reset.");
+        shape.setTooltip("Click: listen.  Flags: START / END.  Squares: drag sideways = fade length, up / down = curve.  Double-click a handle = reset.  Right-click = reset menu.");
         updateVisibility();
         startTimerHz(30);
     }
@@ -439,32 +668,11 @@ public:
     // ---------------------------------------------------------------- kits
     void toast(const juce::String& t) { toastText = t; toastUntil = juce::Time::getMillisecondCounter() + 2500; repaint(); }
 
-    void showKitsMenu()
-    {
-        juce::Array<juce::File> kits;
-        for (const auto& d : ds::kitsRoot().findChildFiles(juce::File::findDirectories, false))
-            if (ds::isKit(d)) kits.add(d);
-        std::sort(kits.begin(), kits.end(), [](const juce::File& a, const juce::File& b) {
-            return ds::kitData(a).getChildFile("kit.txt").getLastModificationTime() > ds::kitData(b).getChildFile("kit.txt").getLastModificationTime(); });
-        juce::PopupMenu m;
-        m.addItem(1, "SAVE THIS KIT...", proc.getResult() != nullptr && !proc.isBusy());
-        m.addItem(2, "OPEN KITS FOLDER");
-        m.addSeparator();
-        m.addSectionHeader(kits.isEmpty() ? "NO SAVED KITS YET" : "LOAD A KIT");
-        for (int i = 0; i < kits.size(); ++i) m.addItem(100 + i, kits[i].getFileName(), true, kits[i] == proc.getKitDir());
-        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&kitsBtn),
-            [this, kits, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
-            {
-                if (sp == nullptr || id == 0) return;
-                if (id == 1) askKitName();
-                else if (id == 2) { ds::kitsRoot().createDirectory(); ds::kitsRoot().startAsProcess(); }
-                else if (id >= 100 && id - 100 < kits.size()) { proc.loadKit(kits[id - 100]); toast("KIT  " + kits[id - 100].getFileName()); }
-            });
-    }
+    void openKits() { kitBrowser.setBounds(getLocalBounds()); kitBrowser.refresh(); kitBrowser.setVisible(true); kitBrowser.toFront(false); }
 
     void askKitName()
     {
-        auto* w = new juce::AlertWindow("SAVE KIT", "Name of the kit (a folder in Documents/DrumSlicer/Kits):", juce::MessageBoxIconType::NoIcon, this);
+        auto* w = new juce::AlertWindow("SAVE KIT", "Name of the kit (a folder in Documents/ReKit/Kits):", juce::MessageBoxIconType::NoIcon, this);
         w->addTextEditor("name", proc.baseName());
         w->addButton("SAVE", 1, juce::KeyPress(juce::KeyPress::returnKey));
         w->addButton("CANCEL", 0, juce::KeyPress(juce::KeyPress::escapeKey));
@@ -489,6 +697,7 @@ public:
     {
         const auto k = proc.saveKit(name);
         toast(k.isDirectory() ? "KIT SAVED  " + k.getFileName() : juce::String("COULD NOT SAVE THE KIT"));
+        if (kitBrowser.isVisible()) kitBrowser.refresh();
     }
 
     void mouseDown(const juce::MouseEvent& e) override
@@ -570,7 +779,17 @@ private:
     void drawHeader(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
     {
         g.setColour(ui::text); g.setFont(ui::font(25.f, true, 0.32f));
-        g.drawText("DRUM SLICER", 32, 18, 400, 30, juce::Justification::centredLeft);
+        g.drawText("REKIT", 32, 18, 400, 30, juce::Justification::centredLeft);
+        {   // version, small, next to the name
+           #ifdef JucePlugin_VersionString
+            const juce::String ver = "v" JucePlugin_VersionString;
+           #else
+            const juce::String ver = "v1.2";
+           #endif
+            const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
+            g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
+            g.drawText(ver, juce::Rectangle<float>(32.f + tw + 8.f, 30.f, 60.f, 12.f).toNearestInt(), juce::Justification::centredLeft);
+        }
         g.setColour(ui::dim); g.setFont(ui::font(9.f, true, 0.55f));
         g.drawText("BY POURIA MOTABEAN", 34, 50, 400, 12, juce::Justification::centredLeft);
         const juce::Rectangle<float> pill(842.f, 27.f, 138.f, 26.f);
@@ -745,6 +964,7 @@ private:
     juce::Slider master, sens, grid, bpm;
     std::vector<std::unique_ptr<juce::SliderParameterAttachment>> atts;
     juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn;
+    KitBrowser kitBrowser { proc };
     juce::String toastText; juce::uint32 toastUntil = 0; bool wasToasting = false;
     std::array<juce::TextButton, 2> modeBtn, srcBtn;
     ui::DragButton dragMidi, dragWav;
