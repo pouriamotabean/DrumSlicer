@@ -326,10 +326,8 @@ public:
         grid.setTooltip("TIGHT MIDI: 100% = fully on the grid, lower keeps some of the loop's groove");
         bpm.setTooltip("Tempo used for the MIDI when the host does not report one");
 
-        for (auto* b : { &loadBtn, &reBtn, &capBtn }) addAndMakeVisible(b);
-        loadBtn.setButtonText("LOAD"); reBtn.setButtonText("RE-ANALYSE"); capBtn.setButtonText("CAPTURE");
-        capBtn.setTooltip("Record the loop from the DAW: send the drum track to Drum Slicer's side-chain input, press CAPTURE, then play the part. Analysis starts when you stop.");
-        capBtn.onClick = [this] { proc.armCapture(!proc.isCaptureArmed()); repaint(); };
+        for (auto* b : { &loadBtn, &reBtn }) addAndMakeVisible(b);
+        loadBtn.setButtonText("LOAD"); reBtn.setButtonText("RE-ANALYSE");
         loadBtn.onClick = [this]
         {
             chooser = std::make_unique<juce::FileChooser>("Select drum loop", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3");
@@ -417,7 +415,6 @@ public:
 
     void resized() override
     {
-        capBtn.setBounds(display.getRight() - 254, display.getY() + 10, 76, 22);
         loadBtn.setBounds(display.getRight() - 172, display.getY() + 10, 60, 22);
         reBtn.setBounds(display.getRight() - 106, display.getY() + 10, 94, 22);
         for (int i = 0; i < ds::kPads; ++i)
@@ -462,8 +459,7 @@ public:
         const bool hasPad = res && res->pads[(size_t) selected].valid;
         for (juce::Component* c : std::initializer_list<juce::Component*> { &dragMidi, &exportBtn, &modeBtn[0], &modeBtn[1], &reBtn }) c->setEnabled(res != nullptr);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &srcBtn[0], &srcBtn[1], &dragWav }) c->setEnabled(hasPad);
-        capBtn.setToggleState(proc.isCaptureArmed(), juce::dontSendNotification);
-        if (lit || proc.isBusy() || wasBusy || proc.isCaptureArmed()) repaint();
+        if (lit || proc.isBusy() || wasBusy) repaint();
         wasBusy = proc.isBusy();
         shape.repaint();
     }
@@ -524,15 +520,6 @@ private:
         auto d = display.toFloat().reduced(1.f);
         g.setColour(ui::well.withAlpha(0.7f)); g.fillRoundedRectangle(d.reduced(6.f), 8.f);
         if (hover) { g.setColour(ui::amber.withAlpha(0.8f)); g.drawRoundedRectangle(d.reduced(4.f), 10.f, 1.5f); }
-        if (proc.isCaptureArmed())
-        {
-            const bool rec = proc.isCapturing();
-            g.setColour(rec ? juce::Colour(0xffff5a4f) : ui::amber); g.setFont(ui::font(14.f, true, 0.3f));
-            g.drawText(rec ? "RECORDING   " + juce::String(proc.captureSeconds(), 1) + " s" : juce::String("CAPTURE ARMED  -  PLAY THE PART"), d.withTrimmedBottom(16).toNearestInt(), juce::Justification::centred);
-            g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.25f));
-            g.drawText(rec ? juce::String("STOP THE TRANSPORT TO ANALYSE") : juce::String("SEND THE DRUM TRACK TO DRUM SLICER'S SIDE-CHAIN INPUT"), d.withTrimmedTop(36).toNearestInt(), juce::Justification::centred);
-            return;
-        }
         if (proc.isBusy())
         {
             const auto bar = juce::Rectangle<float>(d.getX() + 120, d.getCentreY() + 8, d.getWidth() - 240, 6);
@@ -550,7 +537,7 @@ private:
             g.setColour(ui::amber.withAlpha(0.9f)); g.setFont(ui::font(14.f, true, 0.3f));
             g.drawText(st.startsWith("COULD NOT") ? st : juce::String("DROP A DRUM LOOP HERE"), d.withTrimmedBottom(16).toNearestInt(), juce::Justification::centred);
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.3f));
-            g.drawText("DRAG A FILE FROM EXPLORER / MEDIABAY  -  CLICK TO BROWSE  -  OR CAPTURE FROM THE TRACK", d.withTrimmedTop(36).toNearestInt(), juce::Justification::centred);
+            g.drawText("DRAG A FILE FROM THE POOL / MEDIABAY / EXPLORER  -  OR CLICK TO BROWSE", d.withTrimmedTop(36).toNearestInt(), juce::Justification::centred);
             return;
         }
         const float x0 = d.getX() + 18, w = d.getWidth() - 36, mid = d.getY() + 58, hh = 38.f;
@@ -688,7 +675,7 @@ private:
     std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch;
     juce::Slider master, sens, grid, bpm;
     std::vector<std::unique_ptr<juce::SliderParameterAttachment>> atts;
-    juce::TextButton loadBtn, reBtn, exportBtn, capBtn;
+    juce::TextButton loadBtn, reBtn, exportBtn;
     std::array<juce::TextButton, 2> modeBtn, srcBtn;
     ui::DragButton dragMidi, dragWav;
     ShapeView shape;

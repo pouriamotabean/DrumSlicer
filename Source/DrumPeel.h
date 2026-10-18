@@ -685,7 +685,7 @@ private:
                 int kb = (int) (std::max_element(cc.begin(), cc.end()) - cc.begin());
                 double e = 0; for (int ch = 0; ch < 2; ++ch) for (int k = 0; k < Lc; ++k) e += res.c[ch][(size_t) (kb + k)] * res.c[ch][(size_t) (kb + k)];
                 const double ncc = cc[(size_t) kb] / std::sqrt(e * tw2 + 1e-20);
-                if (ncc > 0.5) s.t[i] = base + kb;
+                if (ncc > 0.5) s.t[i] = std::max(0, base + kb);
                 const int i0 = rnd(s.t[i]); const int a = std::max(0, i0), b = std::min(N, i0 + Lw);
                 double num = 0, rr = 0;
                 for (int ch = 0; ch < 2; ++ch) for (int t = a; t < b; ++t) { const double rv = x.c[ch][(size_t) t] - y.c[ch][(size_t) t]; num += rv * s.T.c[ch][(size_t) (t - i0)]; rr += rv * rv; }
@@ -734,7 +734,7 @@ private:
                         double e = 0, nn = 0;
                         for (int ch = 0; ch < 2; ++ch) for (int q = 0; q < W; ++q) { const double rv = r.c[ch][(size_t) (k + q)]; const double dd = rv - gg * snd[d].T.c[ch][(size_t) q]; e += dd * dd; nn += rv * rv; }
                         const double ex = 1 - e / std::max(1e-12, nn);
-                        if (gg > 0 && ex > bex) { bex = ex; bc = (int) d; bg = gg; bt = a0 - maxlag + k; }
+                        if (gg > 0 && ex > bex) { bex = ex; bc = (int) d; bg = gg; bt = std::max(0, a0 - maxlag + k); }
                     }
                     if (bc >= 0) { adds.push_back({ (size_t) bc, bt, bg }); ++moved; addShifted(y, snd[(size_t) bc].T, rnd(bt), bg); }
                 }
@@ -761,7 +761,7 @@ private:
                     double e = 0, nn = 0;
                     for (int ch = 0; ch < 2; ++ch) for (int q = 0; q < W; ++q) { const double rv = r.c[ch][(size_t) (k + q)]; const double dd = rv - gg * snd[d].T.c[ch][(size_t) q]; e += dd * dd; nn += rv * rv; }
                     const double ex = 1 - e / std::max(1e-12, nn);
-                    if (gg > 0 && ex > bex + 0.15) { bex = ex; bc = d; bg = gg; bt = a0 - maxlag + k; }
+                    if (gg > 0 && ex > bex + 0.15) { bex = ex; bc = d; bg = gg; bt = std::max(0, a0 - maxlag + k); }
                 }
                 if (bc != c || bt != s.t[i])
                 {
@@ -784,7 +784,7 @@ private:
     }
 
     // ---------------------------------------------------------------- noise model (power domain)
-    static int frameOf(double t) { return (int) std::floor(t / STH + 0.5); }
+    static int frameOf(double t) { return std::max(0, (int) std::floor(t / STH + 0.5)); }
 
     void noiseNMF(const Pow& V, int nIter)
     {
@@ -883,7 +883,7 @@ private:
         for (size_t c = 0; c < snd.size(); ++c)
             for (size_t i = 0; i < snd[c].t.size(); ++i)
             {
-                int f0 = (int) std::floor(snd[c].t[i] / STH); int o = (int) std::floor((snd[c].t[i] - f0 * STH) / 64.0 + 0.5);
+                int f0 = std::max(0, (int) std::floor(snd[c].t[i] / STH)); int o = (int) std::floor((snd[c].t[i] - f0 * STH) / 64.0 + 0.5);
                 if (o >= 4) { ++f0; o = 0; }
                 if (f0 >= Fn) continue;
                 items.push_back({ c, i, f0, o, std::pow(std::max(snd[c].g[i], 1e-3), 2) });
@@ -1008,7 +1008,7 @@ private:
                 (void) ss;
                 const double g = num / std::max(1e-12, sp);
                 if (g <= 0) continue;
-                if (g * g * sp / (loc + 1e-12) > 0.15) { addShifted(y, s.T, i0, g); s.t.push_back(i0); s.g.push_back(g); ++added; }
+                if (i0 >= 0 && g * g * sp / (loc + 1e-12) > 0.15) { addShifted(y, s.T, i0, g); s.t.push_back(i0); s.g.push_back(g); ++added; }
             }
             std::vector<std::pair<double, double>> v; for (size_t i = 0; i < s.t.size(); ++i) v.push_back({ s.t[i], s.g[i] });
             std::sort(v.begin(), v.end()); s.t.clear(); s.g.clear(); for (auto& p : v) { s.t.push_back(p.first); s.g.push_back(p.second); }
@@ -1651,9 +1651,8 @@ inline std::vector<uint8_t> makeMidiFile(const Output& r, double bpm, int ppq = 
     std::stable_sort(ev.begin(), ev.end(), [](const MidiEv& a, const MidiEv& b) { return a.tick != b.tick ? a.tick < b.tick : a.order < b.order; });
     std::vector<uint8_t> trk;
     auto vlq = [&](uint32_t v) { uint8_t b[5]; int n = 0; b[n++] = v & 0x7F; v >>= 7; while (v) { b[n++] = (uint8_t) ((v & 0x7F) | 0x80); v >>= 7; } while (n) trk.push_back(b[--n]); };
-    const int us = (int) std::lround(60e6 / bpm);
-    vlq(0); trk.insert(trk.end(), { 0xFF, 0x51, 0x03, (uint8_t) (us >> 16), (uint8_t) (us >> 8), (uint8_t) us });
-    vlq(0); trk.insert(trk.end(), { 0xFF, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08 });
+    // no tempo / time-signature events: the DAW would put them on an extra (empty) track and the notes
+    // would land one track lower. Positions are already right for the project tempo.
     int lastT = 0;
     for (const auto& e : ev) { vlq((uint32_t) (e.tick - lastT)); lastT = e.tick; trk.push_back(e.st); trk.push_back(e.a); trk.push_back(e.b); }
     vlq(0); trk.insert(trk.end(), { 0xFF, 0x2F, 0x00 });

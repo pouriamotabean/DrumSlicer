@@ -20,11 +20,7 @@ public:
     DrumSlicerProcessor();
     ~DrumSlicerProcessor() override;
 
-    void prepareToPlay(double sr, int) override
-    {
-        hostSR = sr; for (auto& v : voices) v.on = false;
-        if ((int) capL.size() < (int) (sr * 90)) { capL.assign((size_t) (sr * 90), 0.f); capR.assign((size_t) (sr * 90), 0.f); }
-    }
+    void prepareToPlay(double sr, int) override { hostSR = sr; for (auto& v : voices) v.on = false; }
     void releaseResources() override {}
     bool isBusesLayoutSupported(const BusesLayout&) const override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
@@ -61,11 +57,6 @@ public:
     ShapeParams shapeParams(int pad) const;
     juce::File exportFinal();                        // shaped, chosen one-shots + MIDI into <loop>/EXPORT
     int getResultVersion() const { return resultVersion.load(); }
-    // CAPTURE: record the side-chain input while the transport plays, analyse when it stops
-    void armCapture(bool on) { capLen = 0; capState = on ? 1 : 0; }
-    bool isCaptureArmed() const { return capState.load() == 1 || capState.load() == 2; }
-    bool isCapturing() const { return capState.load() == 2; }
-    double captureSeconds() const { return capLen.load() / hostSR; }
 
     juce::AudioProcessorValueTreeState apvts;
     std::array<std::atomic<int>, 8>   previewPad;
@@ -78,9 +69,6 @@ private:
     std::array<ShapeParams, ds::kPads> lastShape {};
     int lastShapedVersion = -1;
     std::shared_ptr<Shaped> shaped, audioShaped;
-    std::vector<float> capL, capR;
-    std::atomic<int> capState { 0 }, capLen { 0 };          // 0 off, 1 armed, 2 recording, 3 finished
-    void finishCapture();
     void startVoice(int pad, float gain, int wait);
     void setStatus(const juce::String& s) { juce::SpinLock::ScopedLockType l(statusLock); status = s; }
 
