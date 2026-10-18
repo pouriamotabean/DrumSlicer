@@ -1,4 +1,4 @@
-name: Build VST3 (Windows)
+name: Build VST3 + installer (Windows)
 
 on:
   push:
@@ -24,8 +24,23 @@ jobs:
           Copy-Item -Recurse -Force "build/DrumSlicer_artefacts/Release/VST3/Drum Slicer.vst3" "dist/"
           Get-ChildItem -Recurse dist | Select-Object -First 20 FullName
 
-      - name: Upload
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc installer\DrumSlicer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem setup\*.exe
+
+      - name: Upload VST3
         uses: actions/upload-artifact@v4
         with:
           name: DrumSlicer-VST3-Windows
           path: dist/
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: DrumSlicer-Setup-Windows
+          path: setup/*.exe
