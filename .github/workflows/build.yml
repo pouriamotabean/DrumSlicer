@@ -22,7 +22,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item -Recurse -Force "build/DrumSlicer_artefacts/Release/VST3/Drum Slicer.vst3" "dist/"
-          Copy-Item -Force "build/Release/peel_cli.exe" "dist/" -ErrorAction SilentlyContinue
           Get-ChildItem -Recurse dist | Select-Object -First 20 FullName
 
       - name: Upload
