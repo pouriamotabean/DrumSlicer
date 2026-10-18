@@ -3,7 +3,9 @@
 
 juce::AudioProcessor::BusesProperties DrumSlicerProcessor::makeBuses()
 {
-    auto b = BusesProperties().withInput("Capture (side-chain)", juce::AudioChannelSet::stereo(), false)
+    // VST3: the first input is the "main" bus, the second one an aux bus = Cubase shows the side-chain button
+    auto b = BusesProperties().withInput("Input", juce::AudioChannelSet::stereo(), false)
+                              .withInput("Sidechain", juce::AudioChannelSet::stereo(), false)
                               .withOutput("Main", juce::AudioChannelSet::stereo(), true);
     for (int i = 0; i < ds::kPads; ++i)
         b = b.withOutput("PAD " + juce::String(i + 1), juce::AudioChannelSet::stereo(), false);
@@ -189,9 +191,9 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
         if (capState.load() == 2)
         {
             if (!playing) capState = capLen.load() > (int) (0.5 * hostSR) ? 3 : 1;
-            else if (getBusCount(true) > 0 && getBus(true, 0) != nullptr && getBus(true, 0)->isEnabled())
+            else if (const int ib = (getBusCount(true) > 1 && getBus(true, 1)->isEnabled()) ? 1 : ((getBusCount(true) > 0 && getBus(true, 0)->isEnabled()) ? 0 : -1); ib >= 0)
             {
-                auto in = getBusBuffer(buf, true, 0);
+                auto in = getBusBuffer(buf, true, ib);
                 const int n = std::min(in.getNumSamples(), (int) capL.size() - capLen.load());
                 if (n > 0 && in.getNumChannels() > 0)
                 {

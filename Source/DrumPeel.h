@@ -27,6 +27,7 @@
 #include <limits>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 
 namespace dp
 {
@@ -380,7 +381,12 @@ public:
         if (kitMode && mergeByCategory())
         {
             prog(0.90f, "one pad per instrument: " + std::to_string(snd.size()) + " sounds, polishing");
-            for (int k = 0; k < 3 && !cancelled(); ++k) polishPass();
+            for (int k = 0; k < 3 && !cancelled(); ++k)
+            {
+                polishPass();
+                if (std::getenv("DP_DEBUG")) for (size_t c = 0; c < snd.size(); ++c) { double gm = 0; for (double g : snd[c].g) gm = std::max(gm, g); double q = 0; for (float v : snd[c].Q.d) q += v;
+                    std::fprintf(stderr, "polish %d sound %zu hits %zu noisy %d gmax %.4f Tn %.3f Q %.3g\n", k, c, snd[c].t.size(), (int) snd[c].noisy, gm, snd[c].Tn.energy(), q); }
+            }
         }
         if (cancelled()) return out;
         prog(0.93f, "building one-shots + MIDI");
@@ -1237,6 +1243,13 @@ private:
             groups[cat == "other" ? "other" + std::to_string(c) : cat].push_back(c);
         }
         if (groups.size() == snd.size()) return false;
+        if (std::getenv("DP_DEBUG"))
+            for (auto& kv : groups) for (size_t c : kv.second)
+            {
+                double g2 = 0, gm = 0; for (double g : snd[c].g) { g2 += g * g; gm = std::max(gm, g); }
+                double q = 0; for (float v : snd[c].Q.d) q += v;
+                std::fprintf(stderr, "%-8s sound %zu hits %zu noisy %d Tcoh %.3f Tn %.3f Qsum %.3g gmax %.4f sum g2 %.4f\n", kv.first.c_str(), c, snd[c].t.size(), (int) snd[c].noisy, snd[c].T.energy(), snd[c].Tn.energy(), q, gm, g2);
+            }
         std::vector<Snd> merged;
         for (auto& kv : groups)
         {
@@ -1324,6 +1337,27 @@ private:
         return nx;
     }
 
+    // hats ring on top of most kicks: above 5 kHz a kick keeps only its click (first ~8 ms), then fades out
+    void tameHighTail(Buf& s) const
+    {
+        if (s.n < STN) return;
+        Spec S; stft(s, S);
+        const int f0 = std::max(1, (int) (0.008 * sr / STH)), f1 = f0 + std::max(1, (int) (0.015 * sr / STH));
+        for (int ch = 0; ch < 2; ++ch) for (int f = f0; f < S.F; ++f)
+        {
+            const double t = std::min(1.0, (double) (f - f0) / (f1 - f0)), gl = std::pow(10.0, -30.0 * t / 20.0);
+            cf* v = S.at(ch, f);
+            for (int k = 0; k < S.B; ++k)
+            {
+                const double fr = k * sr / STN;
+                if (fr < 3500) continue;
+                const double w = std::min(1.0, (fr - 3500) / 1500.0);
+                v[k] *= (float) (1.0 - w * (1.0 - gl));
+            }
+        }
+        Buf y; istft(S, y, s.n); s = std::move(y);
+    }
+
     // the cleanest real hit of sound c: explained well by its own model, little of the others around it,
     // and a long gap before the next hit (the real part of the shot ends there)
     int bestHit(size_t c, const Buf& yAll, const Buf& full) const
@@ -1333,7 +1367,7 @@ private:
         double gmax = 1e-12; for (double g : s.g) gmax = std::max(gmax, g);
         for (size_t i = 0; i < s.t.size(); ++i)
         {
-            const double g = s.g[i]; if (g <= 0) continue;
+            const double g = s.g[i]; if (g < 0.5 * gmax) continue;      // only strong hits: a ghost note blown up is noise
             const int i0 = (int) std::floor(s.t[i] + 0.5); if (i0 < 0 || i0 + W > N) continue;
             double eo = 0, ei = 0, er = 0, ex = 0;
             for (int ch = 0; ch < 2; ++ch) for (int k = 0; k < W; ++k)
@@ -1351,8 +1385,56 @@ private:
         return bi;
     }
 
+    // the hat that rang on top of a kick lived inside the kick's sound; with the kick cleaned it must be
+    // played by the hat pad: add a hat note where the loop has clearly more highs than the model explains
+    void moveHatsOffKicks()
+    {
+        int hat = -1, kick = -1;
+        std::vector<Buf> full(snd.size());
+        for (size_t c = 0; c < snd.size(); ++c)
+        {
+            full[c].resize(Lw); for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < Lw; ++i) full[c].c[ch][(size_t) i] = snd[c].T.c[ch][(size_t) i] + snd[c].Tn.c[ch][(size_t) i];
+            const auto cat = category(full[c]);
+            if (cat == "chat" && (hat < 0 || snd[c].t.size() > snd[(size_t) hat].t.size())) hat = (int) c;
+            if (cat == "kick" && (kick < 0 || snd[c].t.size() > snd[(size_t) kick].t.size())) kick = (int) c;
+        }
+        if (hat < 0 || kick < 0) return;
+        const int W = (int) (0.06 * sr);
+        auto hp = [&](const Buf& b, int i0) {        // energy above 5 kHz in [i0, i0+W) - simple 2nd-order difference filter
+            double e = 0;
+            for (int ch = 0; ch < 2; ++ch) for (int i = std::max(2, i0); i < std::min(b.n, i0 + W); ++i)
+            { const double d = b.c[ch][(size_t) i] - 2 * b.c[ch][(size_t) (i - 1)] + b.c[ch][(size_t) (i - 2)]; e += d * d; }
+            return e; };
+        Buf hatShot = full[(size_t) hat]; const double eh = hp(hatShot, 0);
+        Buf kickTamed = full[(size_t) kick]; tameHighTail(kickTamed);
+        if (eh <= 0) return;
+        std::vector<double> hg = snd[(size_t) hat].g; const double gmed = median(hg);
+        Buf yOthers = synthFull();                    // everything as modelled now
+        auto& K = snd[(size_t) kick]; auto& H = snd[(size_t) hat];
+        std::vector<std::pair<double, double>> add;
+        for (size_t i = 0; i < K.t.size(); ++i)
+        {
+            const double t = K.t[i], g = K.g[i];
+            bool near = false; for (double u : H.t) if (std::abs(u - t) < 0.006 * sr) { near = true; break; }
+            if (near || g <= 0) continue;
+            const int i0 = rnd(t);
+            // model without the kick's own highs that the cleanup removes
+            Buf kOld(W), kNew(W);
+            for (int ch = 0; ch < 2; ++ch) for (int k = 0; k < W; ++k) { kOld.c[ch][(size_t) k] = g * full[(size_t) kick].c[ch][(size_t) k]; kNew.c[ch][(size_t) k] = g * kickTamed.c[ch][(size_t) k]; }
+            Buf loopW(W), modW(W);
+            for (int ch = 0; ch < 2; ++ch) for (int k = 0; k < W && i0 + k < N; ++k)
+            { loopW.c[ch][(size_t) k] = x.c[ch][(size_t) (i0 + k)]; modW.c[ch][(size_t) k] = yOthers.c[ch][(size_t) (i0 + k)] - kOld.c[ch][(size_t) k] + kNew.c[ch][(size_t) k]; }
+            const double missing = hp(loopW, 0) - hp(modW, 0);
+            if (missing > 0.25 * gmed * gmed * eh) add.push_back({ t, std::sqrt(missing / eh) });
+        }
+        for (auto& a : add) { H.t.push_back(a.first); H.g.push_back(a.second); }
+        std::vector<std::pair<double, double>> v; for (size_t i = 0; i < H.t.size(); ++i) v.push_back({ H.t[i], H.g[i] });
+        std::sort(v.begin(), v.end()); H.t.clear(); H.g.clear(); for (auto& p : v) { H.t.push_back(p.first); H.g.push_back(p.second); }
+    }
+
     void finish(Output& out)
     {
+        moveHatsOffKicks();
         const Buf yAll = synthFull();
         const auto floorP = stemFloor();
         static const std::map<std::string, std::vector<std::pair<int, const char*>>> slots = {
@@ -1380,6 +1462,7 @@ private:
             if (idx < 0) continue;
             PadOut p; p.note = slots.at(cat)[(size_t) idx].first; p.name = slots.at(cat)[(size_t) idx].second; used[cat]++; taken.push_back(p.note);
             double scale = gmax / 1.2;
+            if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "finish %s gmax %.4f fullpeak %.4f\n", cat.c_str(), gmax, full[c].peak());
             p.audio = full[c]; p.audio.scale(scale);
             trimShot(p.audio);
             const double pk = p.audio.peak();
@@ -1411,8 +1494,16 @@ private:
                 trimShot(p.best);
             }
             {   std::vector<double> gp; for (double g : snd[c].g) if (g > 0) gp.push_back(g);
-                denoise(p.audio, floorP, scale / std::max(1e-9, median(gp))); trimShot(p.audio); }
+                if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "  before denoise peak %.4f  ratio %.3f\n", p.audio.peak(), scale / std::max(1e-9, median(gp)));
+            denoise(p.audio, floorP, scale / std::max(1e-9, median(gp))); trimShot(p.audio);
+            if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "  after denoise peak %.4f\n", p.audio.peak()); }
             if (p.best.n == 0) p.best = p.audio;
+            {   // B sits at the same level as A (same velocity scale); a B far off is a broken take
+                auto e50 = [&](const Buf& b) { double e = 0; for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < std::min(b.n, (int) (0.1 * sr)); ++i) e += b.c[ch][(size_t) i] * b.c[ch][(size_t) i]; return e; };
+                const double ea = e50(p.audio), eb = e50(p.best);
+                if (eb > 0 && ea > 0) { const double r = std::sqrt(ea / eb); if (r < 0.5 || r > 2.0) p.best.scale(r); }
+            }
+            if (cat == "kick") { tameHighTail(p.audio); tameHighTail(p.best); }
             const double pk2 = std::max(p.audio.peak(), p.best.peak());
             if (pk2 > 0.99) { p.audio.scale(0.99 / pk2); p.best.scale(0.99 / pk2); scale *= 0.99 / pk2; }
             const int pi = (int) out.pads.size();
