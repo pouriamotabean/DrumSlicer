@@ -1,4 +1,4 @@
-name: Build VST3 + installer (Windows)
+name: Build ReKit VST3 + installer (Windows)
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item -Recurse -Force "build/DrumSlicer_artefacts/Release/VST3/Drum Slicer.vst3" "dist/"
+          Copy-Item -Recurse -Force "build/DrumSlicer_artefacts/Release/VST3/ReKit.vst3" "dist/"
           Get-ChildItem -Recurse dist | Select-Object -First 20 FullName
 
       - name: Installer (Inno Setup)
@@ -29,18 +29,18 @@ jobs:
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
-          & $iscc installer\DrumSlicer.iss
+          & $iscc installer\ReKit.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem setup\*.exe
 
       - name: Upload VST3
         uses: actions/upload-artifact@v4
         with:
-          name: DrumSlicer-VST3-Windows
+          name: ReKit-VST3-Windows
           path: dist/
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: DrumSlicer-Setup-Windows
+          name: ReKit-Setup-Windows
           path: setup/*.exe
