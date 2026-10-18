@@ -22,7 +22,7 @@
 1. نصب: Visual Studio 2022 (Desktop development with C++) + CMake + Git.
 2. توی پوشه پروژه:
    ```
-   cmake -B build -G "Visual Studio 17 2022"
+   cmake -B build -A x64
    cmake --build build --config Release
    ```
    JUCE خودکار دانلود می‌شه (نیاز به اینترنت). خروجی VST3 به `C:\Program Files\Common Files\VST3` کپی می‌شه (VS رو **Run as administrator** بزن، وگرنه دستی کپی کن از `build\DrumSlicer_artefacts\Release\VST3`).
