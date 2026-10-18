@@ -334,6 +334,10 @@ public:
             chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                                  [this](const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) proc.startAnalysis(f, true); });
         };
+        addAndMakeVisible(kitsBtn);
+        kitsBtn.setButtonText("KITS");
+        kitsBtn.setTooltip("Save this kit (sounds, settings, MIDI) or open a saved one - Documents/DrumSlicer/Kits");
+        kitsBtn.onClick = [this] { showKitsMenu(); };
         reBtn.onClick = [this] { proc.reanalyse(); };
         reBtn.setTooltip("Analyse the loop again (ignores the cache)");
 
@@ -415,6 +419,7 @@ public:
 
     void resized() override
     {
+        kitsBtn.setBounds(display.getRight() - 238, display.getY() + 10, 60, 22);
         loadBtn.setBounds(display.getRight() - 172, display.getY() + 10, 60, 22);
         reBtn.setBounds(display.getRight() - 106, display.getY() + 10, 94, 22);
         for (int i = 0; i < ds::kPads; ++i)
@@ -429,6 +434,61 @@ public:
         srcBtn[0].setBounds(32, 450, 102, 22); srcBtn[1].setBounds(133, 450, 102, 22);
         dragWav.setBounds(552, 450, 80, 22);
         shape.setBounds(30, 478, 604, 96);
+    }
+
+    // ---------------------------------------------------------------- kits
+    void toast(const juce::String& t) { toastText = t; toastUntil = juce::Time::getMillisecondCounter() + 2500; repaint(); }
+
+    void showKitsMenu()
+    {
+        juce::Array<juce::File> kits;
+        for (const auto& d : ds::kitsRoot().findChildFiles(juce::File::findDirectories, false))
+            if (ds::isKit(d)) kits.add(d);
+        std::sort(kits.begin(), kits.end(), [](const juce::File& a, const juce::File& b) {
+            return ds::kitData(a).getChildFile("kit.txt").getLastModificationTime() > ds::kitData(b).getChildFile("kit.txt").getLastModificationTime(); });
+        juce::PopupMenu m;
+        m.addItem(1, "SAVE THIS KIT...", proc.getResult() != nullptr && !proc.isBusy());
+        m.addItem(2, "OPEN KITS FOLDER");
+        m.addSeparator();
+        m.addSectionHeader(kits.isEmpty() ? "NO SAVED KITS YET" : "LOAD A KIT");
+        for (int i = 0; i < kits.size(); ++i) m.addItem(100 + i, kits[i].getFileName(), true, kits[i] == proc.getKitDir());
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&kitsBtn),
+            [this, kits, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
+            {
+                if (sp == nullptr || id == 0) return;
+                if (id == 1) askKitName();
+                else if (id == 2) { ds::kitsRoot().createDirectory(); ds::kitsRoot().startAsProcess(); }
+                else if (id >= 100 && id - 100 < kits.size()) { proc.loadKit(kits[id - 100]); toast("KIT  " + kits[id - 100].getFileName()); }
+            });
+    }
+
+    void askKitName()
+    {
+        auto* w = new juce::AlertWindow("SAVE KIT", "Name of the kit (a folder in Documents/DrumSlicer/Kits):", juce::MessageBoxIconType::NoIcon, this);
+        w->addTextEditor("name", proc.baseName());
+        w->addButton("SAVE", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        w->addButton("CANCEL", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        w->enterModalState(true, juce::ModalCallbackFunction::create(
+            [this, w, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int r)
+            {
+                if (sp == nullptr || r != 1) return;
+                const auto name = juce::File::createLegalFileName(w->getTextEditorContents("name").trim());
+                if (name.isEmpty()) return;
+                const auto dir = ds::kitsRoot().getChildFile(name);
+                if (ds::isKit(dir) && dir != proc.getKitDir())
+                {
+                    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "SAVE KIT", "A kit called \"" + name + "\" exists. Replace it?",
+                        "REPLACE", "CANCEL", this, juce::ModalCallbackFunction::create([this, name, sp](int ok) { if (sp != nullptr && ok) doSaveKit(name); }));
+                    return;
+                }
+                doSaveKit(name);
+            }), true);
+    }
+
+    void doSaveKit(const juce::String& name)
+    {
+        const auto k = proc.saveKit(name);
+        toast(k.isDirectory() ? "KIT SAVED  " + k.getFileName() : juce::String("COULD NOT SAVE THE KIT"));
     }
 
     void mouseDown(const juce::MouseEvent& e) override
@@ -459,7 +519,9 @@ public:
         const bool hasPad = res && res->pads[(size_t) selected].valid;
         for (juce::Component* c : std::initializer_list<juce::Component*> { &dragMidi, &exportBtn, &modeBtn[0], &modeBtn[1], &reBtn }) c->setEnabled(res != nullptr);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &srcBtn[0], &srcBtn[1], &dragWav }) c->setEnabled(hasPad);
-        if (lit || proc.isBusy() || wasBusy) repaint();
+        const bool toasting = juce::Time::getMillisecondCounter() < toastUntil;
+        if (lit || proc.isBusy() || wasBusy || toasting || wasToasting) repaint();
+        wasToasting = toasting;
         wasBusy = proc.isBusy();
         shape.repaint();
     }
@@ -478,6 +540,13 @@ public:
         drawHeader(g, res);
         for (auto r : { display, padsPanel, editPanel, rightPanel, soundPanel }) drawPanel(g, r);
         drawDisplay(g, res);
+        if (juce::Time::getMillisecondCounter() < toastUntil && toastText.isNotEmpty())
+        {
+            const auto t = juce::Rectangle<float>(0, 0, 320, 26).withCentre({ (float) display.getCentreX(), (float) display.getY() + 22.f });
+            g.setColour(ui::well.withAlpha(0.95f)); g.fillRoundedRectangle(t, 13.f);
+            g.setColour(ui::amber); g.drawRoundedRectangle(t, 13.f, 1.2f);
+            g.setFont(ui::font(10.f, true, 0.3f)); g.drawText(toastText, t.toNearestInt(), juce::Justification::centred);
+        }
         drawPads(g, res);
         drawRight(g, res);
     }
@@ -561,7 +630,7 @@ private:
                           + " kHz   |   " + juce::String((int) res->hits.size()) + " HITS   |   MIDI @ " + (hb > 0 ? "HOST " + juce::String(hb, 2) : juce::String(proc.midiBpm(), 2) + " BPM");
         g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(9.f, true, 0.2f));
         g.drawText(info, juce::Rectangle<float>(x0, d.getBottom() - 22, w, 12).toNearestInt(), juce::Justification::centredLeft);
-        g.drawText(proc.getLoopFile().getFileName(), juce::Rectangle<float>(x0, d.getBottom() - 22, w, 12).toNearestInt(), juce::Justification::centredRight);
+        g.drawText(proc.displayName(), juce::Rectangle<float>(x0, d.getBottom() - 22, w, 12).toNearestInt(), juce::Justification::centredRight);
     }
 
     void drawPads(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
@@ -675,7 +744,8 @@ private:
     std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch;
     juce::Slider master, sens, grid, bpm;
     std::vector<std::unique_ptr<juce::SliderParameterAttachment>> atts;
-    juce::TextButton loadBtn, reBtn, exportBtn;
+    juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn;
+    juce::String toastText; juce::uint32 toastUntil = 0; bool wasToasting = false;
     std::array<juce::TextButton, 2> modeBtn, srcBtn;
     ui::DragButton dragMidi, dragWav;
     ShapeView shape;

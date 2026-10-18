@@ -174,6 +174,80 @@ inline std::shared_ptr<Result> loadCache(const juce::File& loop, const juce::Aud
     return r;
 }
 
+// ---------------------------------------------------------------- kits (presets)
+// Documents/DrumSlicer/Kits/<name>/          final one-shots (as heard) + exact / tight MIDI, for any use
+// Documents/DrumSlicer/Kits/<name>/_data/    what the plugin needs to reopen the kit: loop, A / B shots, hits, settings
+inline juce::File kitsRoot()
+{
+    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("DrumSlicer").getChildFile("Kits");
+}
+inline juce::File kitData(const juce::File& kit) { return kit.getChildFile("_data"); }
+inline juce::File kitLoop(const juce::File& kit) { return kitData(kit).getChildFile(kit.getFileName() + ".wav"); }
+inline bool isKit(const juce::File& dir) { return kitData(dir).getChildFile("kit.txt").existsAsFile(); }
+
+inline bool saveKitData(const juce::File& kit, const Result& r)
+{
+    auto d = kitData(kit);
+    if (!d.createDirectory()) return false;
+    juce::StringArray lines;
+    lines.add("kit=1");
+    lines.add("sr=" + juce::String(r.sr, 3));
+    lines.add("bpm=" + juce::String(r.bpm, 4));
+    lines.add("null=" + juce::String(r.nullMatch, 6));
+    juce::String hs = "hearing="; for (double h : r.hearing) hs << juce::String(h, 6) << " "; lines.add(hs.trim());
+    bool ok = writeWav24(kitLoop(kit), r.loop, r.sr);
+    for (int p = 0; p < kPads; ++p)
+    {
+        const auto& pd = r.pads[(size_t) p];
+        if (!pd.valid) continue;
+        const auto base = pd.name.removeCharacters(" ");
+        ok = writeWav24(d.getChildFile(base + "_A.wav"), pd.audio, r.sr) && ok;
+        ok = writeWav24(d.getChildFile(base + "_B.wav"), pd.best.getNumSamples() > 0 ? pd.best : pd.audio, r.sr) && ok;
+        lines.add("pad=" + juce::String(p) + "|" + pd.name + "|" + juce::String(pd.note) + "|" + juce::String(pd.hits));
+    }
+    for (const auto& h : r.hits) lines.add("hit=" + juce::String((juce::int64) h.time) + "|" + juce::String(h.pad) + "|" + juce::String(h.velocity));
+    return d.getChildFile("kit.txt").replaceWithText(lines.joinIntoString("\n")) && ok;
+}
+
+inline std::shared_ptr<Result> loadKitData(const juce::File& kit)
+{
+    auto d = kitData(kit);
+    juce::StringArray lines; lines.addLines(d.getChildFile("kit.txt").loadFileAsString());
+    if (lines.isEmpty() || lines[0] != "kit=1") return nullptr;
+    auto r = std::make_shared<Result>();
+    double sr = 44100;
+    if (!loadAudio(kitLoop(kit), r->loop, sr)) return nullptr;
+    r->sr = sr; r->fromCache = true;
+    juce::AudioFormatManager fm; fm.registerBasicFormats();
+    for (auto& l : lines)
+    {
+        const auto k = l.upToFirstOccurrenceOf("=", false, false), v = l.fromFirstOccurrenceOf("=", false, false);
+        juce::StringArray f; f.addTokens(v, "|", "");
+        if (k == "bpm") r->bpm = v.getDoubleValue();
+        else if (k == "null") r->nullMatch = v.getDoubleValue();
+        else if (k == "hearing") { juce::StringArray t; t.addTokens(v, " ", ""); for (int i = 0; i < 5 && i < t.size(); ++i) r->hearing[i] = t[i].getDoubleValue(); }
+        else if (k == "pad" && f.size() >= 4)
+        {
+            const int p = f[0].getIntValue(); if (p < 0 || p >= kPads) return nullptr;
+            auto& pd = r->pads[(size_t) p];
+            pd.name = f[1]; pd.note = f[2].getIntValue(); pd.hits = f[3].getIntValue();
+            for (int b = 0; b < 2; ++b)
+            {
+                std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(d.getChildFile(pd.name.removeCharacters(" ") + (b == 1 ? "_B.wav" : "_A.wav"))));
+                if (rd == nullptr) return nullptr;
+                auto& buf = b == 1 ? pd.best : pd.audio;
+                buf.setSize(2, (int) rd->lengthInSamples);
+                rd->read(&buf, 0, (int) rd->lengthInSamples, 0, true, true);
+            }
+            pd.valid = true;
+        }
+        else if (k == "hit" && f.size() >= 3) r->hits.push_back({ (double) f[0].getLargeIntValue(), f[1].getIntValue(), f[2].getIntValue() });
+    }
+    for (auto& h : r->hits) if (h.pad < 0 || h.pad >= kPads || !r->pads[(size_t) h.pad].valid) return nullptr;
+    r->buildNoteMap();
+    return r;
+}
+
 // full analysis (or the cache when the same file was analysed before)
 inline std::shared_ptr<Result> analyse(const juce::File& file, float sensitivity,
                                        const std::function<void(float, const juce::String&)>& progress,

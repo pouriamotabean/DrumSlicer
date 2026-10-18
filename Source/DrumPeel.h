@@ -1715,7 +1715,8 @@ private:
 };
 
 // ------------------------------------------------------------------ TIGHT pattern (drum machine)
-// notes snapped to the loop's own grid (1/16, or triplets when they fit clearly better), velocities sorted
+// notes snapped to the loop's own grid (1/16, triplets, or a swung 1/16 or 1/8 grid when it clearly fits better
+// - shuffle, lang), velocities sorted
 // into a few levels per instrument, one note per instrument per grid step. strength 1 = fully on the grid.
 struct BeatNote { double beat; int note; int vel; };
 
@@ -1724,23 +1725,48 @@ inline std::vector<BeatNote> tightPattern(const Output& r, double strength, int*
     std::vector<BeatNote> out;
     if (r.notes.empty()) return out;
     const double beatLen = 60.0 / r.bpm * r.sr;
-    auto fit = [&](int d, double& phase) {
-        const double step = beatLen / d; double bestE = 1e300; phase = 0;
-        for (int k = 0; k < 64; ++k)
+    // candidate grids = positions inside one beat: straight 1/16, triplets, swung 1/16, swung 1/8 (shuffle, lang)
+    struct Grid { std::vector<double> pts; int kind; double period; };   // kind: 4 straight, 6 triplet, 5 swing16, 2 swing8; period in beats
+    auto nearest = [](const std::vector<double>& pts, double f) { double best = 0, bd = 1e9; for (double p : pts) for (double q : { p, p + 1.0 }) if (std::abs(f - q) < bd) { bd = std::abs(f - q); best = q; } return best; };
+    auto fit = [&](const Grid& g, double& phase) {
+        double bestE = 1e300; phase = 0;
+        for (int k = 0; k < 256; ++k)                            // phase within one period of the grid only
         {
-            const double ph = step * k / 64.0; double e = 0;
-            for (const auto& n : r.notes) { double q = std::fmod(n.time - ph, step); if (q < 0) q += step; const double dd = std::min(q, step - q); e += n.velocity * dd * dd; }
+            const double ph = beatLen * g.period * k / 256.0; double e = 0;
+            for (const auto& n : r.notes)
+            {
+                const double b = (n.time - ph) / beatLen; double f = b - std::floor(b);
+                const double dd = (f - nearest(g.pts, f)) * beatLen; e += n.velocity * dd * dd;
+            }
             if (e < bestE) { bestE = e; phase = ph; }
         }
         return bestE; };
+    const Grid g4 { { 0, 0.25, 0.5, 0.75 }, 4, 0.25 }, g6 { { 0, 1 / 6.0, 2 / 6.0, 0.5, 4 / 6.0, 5 / 6.0 }, 6, 1 / 6.0 };
     double ph4 = 0, ph6 = 0;
-    const double e4 = fit(4, ph4), e6 = fit(6, ph6);
-    const int d = e6 < 0.4 * e4 ? 6 : 4;                 // triplets only when they are clearly the grid
-    const double phase = d == 6 ? ph6 : ph4;
+    const double e4 = fit(g4, ph4), e6 = fit(g6, ph6);
+    Grid grid = g4; double phase = ph4, eBest = e4;
+    if (e6 < 0.4 * e4) { grid = g6; phase = ph6; eBest = e6; }   // triplets only when they are clearly the grid
+    for (int si = 0; si <= 10; ++si)                             // swing amount 54 % .. 75 %
+    {
+        const double sw = 0.54 + 0.021 * si;
+        const Grid s16 { { 0, 0.5 * sw, 0.5, 0.5 + 0.5 * sw }, 5, 0.5 }, s8 { { 0, sw }, 2, 1.0 };
+        double p16 = 0, p8 = 0;
+        const double e16 = fit(s16, p16), e8 = fit(s8, p8);
+        if (e16 < 0.6 * std::min(e4, eBest) && e16 < eBest) { grid = s16; phase = p16; eBest = e16; }
+        if (e8 < 0.8 * std::min(e4, eBest) && e8 < eBest) { grid = s8; phase = p8; eBest = e8; }
+    }
+    const int d = grid.kind;
     if (subdivOut) *subdivOut = d;
+    {   // the grid repeats every period: line it up so the first note of the loop is a beat, not a pickup
+        double t0 = 1e300; for (const auto& n : r.notes) t0 = std::min(t0, n.time);
+        const double P = grid.period * beatLen;
+        phase += P * std::round((t0 - phase) / P);
+    }
     double minBeat = 1e300;
     for (const auto& n : r.notes) minBeat = std::min(minBeat, (n.time - phase) / beatLen);
-    const double b0 = std::floor(minBeat + 0.5 / d);
+    double gap = 1.0; for (size_t i = 0; i < grid.pts.size(); ++i) gap = std::min(gap, (i + 1 < grid.pts.size() ? grid.pts[i + 1] : 1.0) - grid.pts[i]);
+    const double b0 = std::floor(minBeat + 0.5 * gap);       // a first note a little early still starts the pattern
+    auto snapBeat = [&](double beat) { const double fl = std::floor(beat); return fl + nearest(grid.pts, beat - fl); };
     // velocity levels per instrument
     std::map<int, std::vector<int>> velsOf;
     for (const auto& n : r.notes) velsOf[r.pads[(size_t) n.pad].note].push_back(n.velocity);
@@ -1767,11 +1793,11 @@ inline std::vector<BeatNote> tightPattern(const Output& r, double strength, int*
         const int note = r.pads[(size_t) n.pad].note;
         if (n.velocity < 0.12 * top[note]) continue;      // leftovers of the analysis, not real hits
         const double beat = (n.time - phase) / beatLen - b0;
-        const double snapped = std::round(beat * d) / d;
+        const double snapped = snapBeat(beat);
         const auto& c = levels[note];
         size_t bj = 0; for (size_t j = 1; j < c.size(); ++j) if (std::abs(n.velocity - c[j]) < std::abs(n.velocity - c[bj])) bj = j;
         const int vel = std::clamp((int) std::lround(c[bj]), 1, 127);
-        const auto key = std::make_pair(note, (long long) std::llround(snapped * d));
+        const auto key = std::make_pair(note, (long long) std::llround(snapped * 1000.0));
         const BeatNote bn { snapped + (1.0 - strength) * (beat - snapped), note, vel };
         auto it = slot.find(key);
         if (it == slot.end()) { slot[key] = out.size(); out.push_back(bn); }

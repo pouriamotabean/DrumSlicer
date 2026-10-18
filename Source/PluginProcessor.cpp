@@ -261,7 +261,7 @@ void DrumSlicerProcessor::startAnalysis(const juce::File& f, bool updateBpm, boo
     if (worker.joinable()) worker.join();
     cancel = false;
     if (forceNew) ds::cacheInfo(f).deleteFile();
-    loopFile = f;
+    loopFile = f; kitDir = juce::File();
     busy = true; progress = 0.f; setStatus("ANALYSING...");
     const float sens = *apvts.getRawParameterValue("sens");
     worker = std::thread([this, f, updateBpm, sens]
@@ -292,10 +292,10 @@ juce::File DrumSlicerProcessor::makeMidiFile()
     const bool tight = *apvts.getRawParameterValue("tight") > 0.5f;
     const auto bytes = ds::midiBytes(*r, midiBpm(), tight, *apvts.getRawParameterValue("quant"));
     auto f = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                 .getChildFile("DrumSlicer_" + loopFile.getFileNameWithoutExtension() + ".mid");
+                 .getChildFile("DrumSlicer_" + baseName() + ".mid");
     f.deleteFile();
     if (!f.replaceWithData(bytes.getData(), bytes.getSize())) return {};
-    exportFolder().getChildFile(loopFile.getFileNameWithoutExtension() + (tight ? "_tight" : "_exact") + ".mid").replaceWithData(bytes.getData(), bytes.getSize());
+    exportFolder().getChildFile(baseName() + (tight ? "_tight" : "_exact") + ".mid").replaceWithData(bytes.getData(), bytes.getSize());
     return f;
 }
 
@@ -305,7 +305,7 @@ juce::File DrumSlicerProcessor::shotFile(int pad)
     if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid) return {};
     // the sound as you hear it: chosen version (A / B) with its shaping
     auto sh = getShaped();
-    auto f = exportFolder().getChildFile("EXPORT").getChildFile(loopFile.getFileNameWithoutExtension() + "_" + r->pads[(size_t) pad].name.removeCharacters(" ") + ".wav");
+    auto f = exportFolder().getChildFile("EXPORT").getChildFile(baseName() + "_" + r->pads[(size_t) pad].name.removeCharacters(" ") + ".wav");
     f.getParentDirectory().createDirectory();
     if (sh && sh->buf[(size_t) pad].getNumSamples() > 0) ds::writeWav24(f, sh->buf[(size_t) pad], r->sr);
     else ds::writeWav24(f, r->pads[(size_t) pad].audio, r->sr);
@@ -318,7 +318,7 @@ juce::File DrumSlicerProcessor::exportFinal()
     if (!r) return {};
     for (int p = 0; p < ds::kPads; ++p) if (r->pads[(size_t) p].valid) shotFile(p);
     if (auto m = makeMidiFile(); m.existsAsFile())
-        m.copyFileTo(exportFolder().getChildFile("EXPORT").getChildFile(loopFile.getFileNameWithoutExtension()
+        m.copyFileTo(exportFolder().getChildFile("EXPORT").getChildFile(baseName()
                         + (*apvts.getRawParameterValue("tight") > 0.5f ? "_tight" : "_exact") + ".mid"));
     return exportFolder().getChildFile("EXPORT");
 }
@@ -326,6 +326,7 @@ juce::File DrumSlicerProcessor::exportFinal()
 juce::File DrumSlicerProcessor::exportFolder()
 {
     auto r = getResult();
+    if (kitDir != juce::File()) { kitDir.createDirectory(); return kitDir; }
     auto dir = ds::cacheDir(loopFile);
     if (r && !ds::cacheInfo(loopFile).existsAsFile()) ds::saveCache(loopFile, *r);
     dir.createDirectory();
@@ -336,6 +337,7 @@ void DrumSlicerProcessor::getStateInformation(juce::MemoryBlock& d)
 {
     auto st = apvts.copyState();
     st.setProperty("loopPath", loopFile.getFullPathName(), nullptr);
+    st.setProperty("kitPath", kitDir.getFullPathName(), nullptr);
     if (auto xml = st.createXml()) copyXmlToBinary(*xml, d);
 }
 
@@ -345,9 +347,82 @@ void DrumSlicerProcessor::setStateInformation(const void* data, int size)
     {
         auto st = juce::ValueTree::fromXml(*xml);
         apvts.replaceState(st);
+        const juce::String kp = st.getProperty("kitPath").toString();
+        if (kp.isNotEmpty() && ds::isKit(juce::File(kp))) { loadKit(juce::File(kp), false); return; }   // settings came with the project
         juce::File f(st.getProperty("loopPath").toString());
         if (f.existsAsFile()) startAnalysis(f, false);      // the cache in Documents/DrumSlicer makes this instant
     }
+}
+
+// ---------------------------------------------------------------- kits
+juce::File DrumSlicerProcessor::saveKit(const juce::String& rawName)
+{
+    auto r = getResult();
+    const auto name = juce::File::createLegalFileName(rawName.trim());
+    if (!r || name.isEmpty()) return {};
+    auto kit = ds::kitsRoot().getChildFile(name);
+    if (kit.exists() && kit != kitDir) kit.deleteRecursively();
+    kit.createDirectory();
+    if (!ds::saveKitData(kit, *r)) { setStatus("COULD NOT SAVE THE KIT"); return {}; }
+    // the settings (shape, A / B, volume, pan, pitch, MIDI mode) without the window size or file paths
+    auto st = apvts.copyState();
+    for (auto id : { "loopPath", "kitPath", "uiWidth" }) st.removeProperty(id, nullptr);
+    if (auto xml = st.createXml()) xml->writeTo(ds::kitData(kit).getChildFile("settings.xml"));
+    kitDir = kit; loopFile = ds::kitLoop(kit);
+    // ready-to-use files next to it: the sounds as you hear them + both MIDI versions
+    auto sh = getShaped();
+    for (int p = 0; p < ds::kPads; ++p)
+    {
+        const auto& pd = r->pads[(size_t) p];
+        if (!pd.valid) continue;
+        const auto f = kit.getChildFile(name + "_" + pd.name.removeCharacters(" ") + ".wav");
+        if (sh && sh->buf[(size_t) p].getNumSamples() > 0) ds::writeWav24(f, sh->buf[(size_t) p], r->sr);
+        else ds::writeWav24(f, pd.audio, r->sr);
+    }
+    for (int t = 0; t < 2; ++t)
+    {
+        const auto bytes = ds::midiBytes(*r, midiBpm(), t == 1, *apvts.getRawParameterValue("quant"));
+        kit.getChildFile(name + (t == 1 ? "_tight" : "_exact") + ".mid").replaceWithData(bytes.getData(), bytes.getSize());
+    }
+    setStatus("KIT SAVED");
+    return kit;
+}
+
+void DrumSlicerProcessor::loadKit(const juce::File& kit, bool applySettings)
+{
+    if (!ds::isKit(kit)) return;
+    cancel = true;
+    if (worker.joinable()) worker.join();
+    cancel = false;
+    kitDir = kit; loopFile = ds::kitLoop(kit);
+    busy = true; progress = 0.5f; setStatus("LOADING KIT...");
+    worker = std::thread([this, kit, applySettings]
+    {
+        auto r = ds::loadKitData(kit);
+        if (r == nullptr) { setStatus("COULD NOT LOAD THIS KIT"); busy = false; return; }
+        std::unique_ptr<juce::XmlElement> xml;
+        if (applySettings) xml = juce::parseXML(ds::kitData(kit).getChildFile("settings.xml"));
+        { juce::SpinLock::ScopedLockType l(lock); result = r; }
+        ++resultVersion;
+        setStatus("KIT LOADED");
+        if (xml != nullptr)
+        {
+            auto vt = std::make_shared<juce::ValueTree>(juce::ValueTree::fromXml(*xml));
+            juce::MessageManager::callAsync([this, vt, a = alive]
+            {
+                if (!a->load()) return;
+                for (int i = 0; i < vt->getNumChildren(); ++i)
+                {
+                    const auto c = vt->getChild(i);
+                    if (!c.hasProperty("id") || !c.hasProperty("value")) continue;
+                    const auto id = c.getProperty("id").toString();
+                    if (id == "master" || id == "sens") continue;                // your mix level stays
+                    if (auto* p = apvts.getParameter(id)) p->setValueNotifyingHost(p->convertTo0to1((float) c.getProperty("value")));
+                }
+            });
+        }
+        busy = false;
+    });
 }
 
 juce::AudioProcessorEditor* DrumSlicerProcessor::createEditor() { return new DrumSlicerEditor(*this); }

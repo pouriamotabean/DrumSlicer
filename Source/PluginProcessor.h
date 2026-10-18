@@ -58,6 +58,13 @@ public:
     juce::File exportFinal();                        // shaped, chosen one-shots + MIDI into <loop>/EXPORT
     int getResultVersion() const { return resultVersion.load(); }
 
+    // kits (presets): Documents/DrumSlicer/Kits/<name>/
+    juce::File saveKit(const juce::String& name);    // current sounds + settings + MIDI; returns the kit folder
+    void loadKit(const juce::File& kit, bool applySettings = true);
+    juce::File getKitDir() const { return kitDir; }
+    juce::String displayName() const { return kitDir != juce::File() ? "KIT  " + kitDir.getFileName() : loopFile.getFileName(); }
+    juce::String baseName() const { return kitDir != juce::File() ? kitDir.getFileName() : loopFile.getFileNameWithoutExtension(); }
+
     juce::AudioProcessorValueTreeState apvts;
     std::array<std::atomic<int>, 8>   previewPad;
     std::array<std::atomic<float>, 8> padLevel;
@@ -83,7 +90,7 @@ private:
     mutable juce::SpinLock lock, statusLock;
     std::atomic<int> resultVersion { 0 };
     juce::String status;
-    juce::File loopFile;
+    juce::File loopFile, kitDir;
     double hostSR = 44100.0;
 
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
