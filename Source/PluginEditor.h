@@ -25,7 +25,10 @@ inline juce::Colour padColour(const juce::String& name)
     if (name.startsWith("C-HAT") || name.startsWith("HAT")) return juce::Colour(0xff2ec4d6);
     if (name.startsWith("O-HAT")) return juce::Colour(0xffa66bff);
     if (name.startsWith("CRASH") || name.startsWith("RIDE")) return juce::Colour(0xffe8d44d);
-    return juce::Colour(0xffff6b8a);
+    if (name.startsWith("TOM"))    return juce::Colour(0xffff7a45);
+    if (name.startsWith("RIM"))    return juce::Colour(0xffb6e35a);
+    if (name.startsWith("SHAKER")) return juce::Colour(0xffd9b38c);
+    return juce::Colour(0xffff6b8a);                                  // PERC
 }
 
 inline juce::Font font(float size, bool bold = true, float kerning = 0.f)
@@ -164,7 +167,7 @@ public:
             return;
         }
         const auto sp = proc.shapeParams(pad);
-        refreshPeaks(*res, sp.best);
+        refreshPeaks(*res, sp.best, sp.user);
         const auto col = ui::padColour(res->pads[(size_t) pad].name);
         const auto w = wave(); const float mid = w.getCentreY(), hh = w.getHeight() * 0.47f;
         const float endMs = std::min(sp.end, totalMs);
@@ -338,12 +341,12 @@ private:
             if (id == 3) resetIds({ "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy" });
         });
     }
-    void refreshPeaks(const ds::Result& r, bool best)
+    void refreshPeaks(const ds::Result& r, bool best, bool user)
     {
-        const auto& a = r.pads[(size_t) pad].get(best);
+        const auto& a = r.pads[(size_t) pad].get(best, user);
         const int n = a.getNumSamples(); totalMs = (float) (n / r.sr * 1000.0);
         const float vm = viewMs();
-        const int key = pad * 2 + (best ? 1 : 0) + 100 * proc.getResultVersion();
+        const int key = pad * 4 + (best ? 1 : 0) + (user ? 2 : 0) + 100 * proc.getResultVersion();
         const int W = (int) wave().getWidth();
         if (key == peakKey && (int) peaks.size() == W && vm == peakView) return;
         peakKey = key; peakView = vm; peaks.clear();
@@ -478,8 +481,10 @@ private:
     void listBoxItemClicked(int row, const juce::MouseEvent& e) override
     {
         if (row < 0 || row >= kits.size()) return;
-        const int w = list.getVisibleRowWidth(), h = list.getRowHeight();
-        const auto pos = e.getEventRelativeTo(list.getComponentForRowNumber(row)).getPosition();
+        // the event comes from the row itself: its own size and position, exactly what paintListBoxItem drew
+        const auto* rc = e.eventComponent;
+        const int w = rc != nullptr ? rc->getWidth() : list.getVisibleRowWidth(), h = rc != nullptr ? rc->getHeight() : list.getRowHeight();
+        const auto pos = e.getPosition();
         if (playZone(w, h).contains(pos))
         {
             if (proc.isPreviewing() && proc.previewingKit() == kits[row]) proc.stopPreview();
@@ -591,12 +596,14 @@ public:
         exportBtn.setTooltip("Shaped one-shots (A or B as chosen) + MIDI into Documents/ReKit/<loop>/EXPORT");
         exportBtn.onClick = [this] { auto d = proc.exportFinal(); if (d.exists()) d.revealToUser(); };
 
-        for (int b = 0; b < 2; ++b)
+        for (int b = 0; b < 3; ++b)
         {
             addAndMakeVisible(srcBtn[(size_t) b]);
-            srcBtn[(size_t) b].setButtonText(b == 0 ? "A  LEARNED" : "B  BEST HIT");
-            srcBtn[(size_t) b].setTooltip(b == 0 ? "The sound averaged over all its hits: stem dirt cancels out" : "The cleanest real hit, other drums subtracted, learned tail");
-            srcBtn[(size_t) b].onClick = [this, b] { setBest(selected, b == 1); };
+            srcBtn[(size_t) b].setButtonText(b == 0 ? "A  LEARNED" : b == 1 ? "B  BEST HIT" : "C  YOUR SAMPLE");
+            srcBtn[(size_t) b].setTooltip(b == 0 ? "The sound averaged over all its hits: stem dirt cancels out"
+                                          : b == 1 ? "The cleanest real hits, other drums subtracted"
+                                                   : "A sample of yours: drop a file on the pad (or right-click the pad > LOAD YOUR SAMPLE)");
+            srcBtn[(size_t) b].onClick = [this, b] { setSource(selected, b); };
         }
         addAndMakeVisible(dragWav);
         dragWav.setButtonText("DRAG WAV");
@@ -627,24 +634,40 @@ public:
         return {};
     }
     bool isInterestedInFileDrag(const juce::StringArray& f) override { for (auto& p : f) if (isAudio(juce::File(p))) return true; return false; }
-    void fileDragEnter(const juce::StringArray&, int, int) override { hover = true; repaint(); }
-    void fileDragExit(const juce::StringArray&) override { hover = false; repaint(); }
-    void filesDropped(const juce::StringArray& f, int, int) override
+    // a file let go over a pad becomes that pad's "C" (your sample); anywhere else it is a new loop
+    int padAt(int x, int y) const
     {
-        hover = false;
-        for (auto& p : f) if (isAudio(juce::File(p))) { proc.startAnalysis(juce::File(p), true); break; }
+        auto res = proc.getResult(); if (!res) return -1;
+        for (int i = 0; i < ds::kPads; ++i) if (res->pads[(size_t) i].valid && padRect(i).contains(x, y)) return i;
+        return -1;
+    }
+    void dropFile(const juce::File& f, int x, int y)
+    {
+        const int pad = padAt(x, y);
+        if (pad >= 0) { selected = pad; if (proc.setPadSample(pad, f)) toast("C  " + f.getFileNameWithoutExtension()); updateVisibility(); }
+        else proc.startAnalysis(f, true);
+    }
+    void fileDragEnter(const juce::StringArray&, int x, int y) override { hover = true; hoverPad = padAt(x, y); repaint(); }
+    void fileDragMove(const juce::StringArray&, int x, int y) override { const int p = padAt(x, y); if (p != hoverPad) { hoverPad = p; repaint(); } }
+    void fileDragExit(const juce::StringArray&) override { hover = false; hoverPad = -1; repaint(); }
+    void filesDropped(const juce::StringArray& f, int x, int y) override
+    {
+        hover = false; hoverPad = -1;
+        for (auto& p : f) if (isAudio(juce::File(p))) { dropFile(juce::File(p), x, y); break; }
         repaint();
     }
     bool isInterestedInTextDrag(const juce::String& t) override { return fileFromText(t).existsAsFile(); }
-    void textDragEnter(const juce::String&, int, int) override { hover = true; repaint(); }
-    void textDragExit(const juce::String&) override { hover = false; repaint(); }
-    void textDropped(const juce::String& t, int, int) override { hover = false; auto f = fileFromText(t); if (f.existsAsFile()) proc.startAnalysis(f, true); repaint(); }
+    void textDragEnter(const juce::String&, int x, int y) override { hover = true; hoverPad = padAt(x, y); repaint(); }
+    void textDragMove(const juce::String&, int x, int y) override { const int p = padAt(x, y); if (p != hoverPad) { hoverPad = p; repaint(); } }
+    void textDragExit(const juce::String&) override { hover = false; hoverPad = -1; repaint(); }
+    void textDropped(const juce::String& t, int x, int y) override { hover = false; hoverPad = -1; auto f = fileFromText(t); if (f.existsAsFile()) dropFile(f, x, y); repaint(); }
 
     // ---------------------------------------------------------------- layout (1000 x 600)
     const juce::Rectangle<int> display { 20, 76, 960, 140 }, padsPanel { 20, 226, 624, 206 }, editPanel { 20, 440, 624, 140 },
                                rightPanel { 654, 226, 326, 262 }, soundPanel { 654, 496, 326, 84 };
     juce::Rectangle<int> padRect(int i) const { return { 30 + (i % 4) * 152, 236 + (i / 4) * 100, 146, 92 }; }
-    juce::Rectangle<int> abRect(int i) const { auto r = padRect(i); return { r.getRight() - 50, r.getBottom() - 30, 40, 20 }; }
+    bool padHasC(int i) const { auto r = proc.getResult(); return r && r->pads[(size_t) i].user.getNumSamples() > 0; }
+    juce::Rectangle<int> abRect(int i) const { auto r = padRect(i); const int w = padHasC(i) ? 60 : 40; return { r.getRight() - 10 - w, r.getBottom() - 30, w, 20 }; }
 
     void resized() override
     {
@@ -660,13 +683,44 @@ public:
         dragMidi.setBounds(666, 440, 134, 36);
         modeBtn[0].setBounds(806, 440, 52, 36); modeBtn[1].setBounds(862, 440, 52, 36);
         exportBtn.setBounds(918, 440, 52, 36);
-        srcBtn[0].setBounds(32, 450, 102, 22); srcBtn[1].setBounds(133, 450, 102, 22);
+        srcBtn[0].setBounds(32, 450, 102, 22); srcBtn[1].setBounds(133, 450, 102, 22); srcBtn[2].setBounds(234, 450, 122, 22);
         dragWav.setBounds(552, 450, 80, 22);
         shape.setBounds(30, 478, 604, 96);
     }
 
     // ---------------------------------------------------------------- kits
     void toast(const juce::String& t) { toastText = t; toastUntil = juce::Time::getMillisecondCounter() + 2500; repaint(); }
+
+    // right-click a pad: what instrument it is (name + MIDI note), or put its hits on another pad
+    void padMenu(int pad)
+    {
+        auto res = proc.getResult(); if (!res) return;
+        juce::PopupMenu types, into, m;
+        const auto& list = DrumSlicerProcessor::padTypes();
+        for (int t = 0; t < (int) list.size(); ++t) types.addItem(100 + t, list[(size_t) t], true, res->pads[(size_t) pad].name.upToFirstOccurrenceOf(" ", false, false) == list[(size_t) t]);
+        for (int q = 0; q < ds::kPads; ++q) if (q != pad && res->pads[(size_t) q].valid) into.addItem(200 + q, res->pads[(size_t) q].name);
+        m.addSectionHeader(res->pads[(size_t) pad].name + "   (MIDI " + juce::MidiMessage::getMidiNoteName(res->pads[(size_t) pad].note, true, true, 3) + ")");
+        m.addSubMenu("THIS PAD IS A ...", types);
+        m.addSubMenu("MERGE INTO", into, into.getNumItems() > 0);
+        m.addSeparator();
+        m.addItem(300, "LOAD YOUR SAMPLE (C) ...");
+        m.addItem(301, "REMOVE YOUR SAMPLE", res->pads[(size_t) pad].user.getNumSamples() > 0);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(localAreaToGlobal(padRect(pad))),
+            [this, pad, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
+            {
+                if (sp == nullptr || id == 0) return;
+                if (id >= 100 && id < 200) { proc.setPadType(pad, DrumSlicerProcessor::padTypes()[(size_t) (id - 100)]); toast("PAD  " + proc.getResult()->pads[(size_t) pad].name); }
+                else if (id == 300)
+                {
+                    chooser = std::make_unique<juce::FileChooser>("Your sample for this pad", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+                    chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                        [this, pad](const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile() && proc.setPadSample(pad, f)) { selected = pad; toast("C  " + f.getFileNameWithoutExtension()); updateVisibility(); repaint(); } });
+                }
+                else if (id == 301) { proc.clearPadSample(pad); toast("BACK TO A"); }
+                else if (id >= 200) { const int q = id - 200; proc.mergePad(pad, q); selected = q; toast("MERGED INTO  " + proc.getResult()->pads[(size_t) q].name); }
+                updateVisibility(); repaint();
+            });
+    }
 
     void openKits() { kitBrowser.setBounds(getLocalBounds()); kitBrowser.refresh(); kitBrowser.setVisible(true); kitBrowser.toFront(false); }
 
@@ -707,8 +761,12 @@ public:
         {
             if (!padRect(i).contains(e.getPosition())) continue;
             selected = i;
+            if (e.mods.isPopupMenu() && res && res->pads[(size_t) i].valid) { padMenu(i); updateVisibility(); repaint(); return; }
             if (res && res->pads[(size_t) i].valid && abRect(i).contains(e.getPosition()))
-                setBest(i, e.getPosition().x > abRect(i).getCentreX());
+            {
+                const auto ab = abRect(i); const int n = padHasC(i) ? 3 : 2;
+                setSource(i, juce::jlimit(0, n - 1, (e.getPosition().x - ab.getX()) * n / ab.getWidth()));
+            }
             else proc.previewPad[(size_t) i] = 1;
             updateVisibility(); repaint();
         }
@@ -720,14 +778,18 @@ public:
         if (proc.getResultVersion() != shownVersion) { shownVersion = proc.getResultVersion(); refreshWave(); shape.invalidate(); repaint(); }
         const bool tight = *proc.apvts.getRawParameterValue("tight") > 0.5f;
         modeBtn[0].setToggleState(!tight, juce::dontSendNotification); modeBtn[1].setToggleState(tight, juce::dontSendNotification);
-        const bool b = *proc.apvts.getRawParameterValue("best" + juce::String(selected)) > 0.5f;
-        srcBtn[0].setToggleState(!b, juce::dontSendNotification); srcBtn[1].setToggleState(b, juce::dontSendNotification);
+        const int src = proc.padSource(selected);
+        for (int k = 0; k < 3; ++k) srcBtn[(size_t) k].setToggleState(src == k, juce::dontSendNotification);
         bool lit = false;
         for (size_t i = 0; i < 8; ++i) { levels[i] = std::max(proc.padLevel[i].exchange(0.f) > 0.f ? 1.f : 0.f, levels[i] * 0.85f); lit |= levels[i] > 0.01f; }
         auto res = proc.getResult();
         const bool hasPad = res && res->pads[(size_t) selected].valid;
         for (juce::Component* c : std::initializer_list<juce::Component*> { &dragMidi, &exportBtn, &modeBtn[0], &modeBtn[1], &reBtn }) c->setEnabled(res != nullptr);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &srcBtn[0], &srcBtn[1], &dragWav }) c->setEnabled(hasPad);
+        const bool hasC = hasPad && res->pads[(size_t) selected].user.getNumSamples() > 0;
+        srcBtn[2].setEnabled(hasC);
+        srcBtn[2].setTooltip(hasC ? "Your sample: " + res->pads[(size_t) selected].userName
+                                  : juce::String("A sample of yours: drop a file on the pad (or right-click the pad > LOAD YOUR SAMPLE)"));
         const bool toasting = juce::Time::getMillisecondCounter() < toastUntil;
         if (lit || proc.isBusy() || wasBusy || toasting || wasToasting) repaint();
         wasToasting = toasting;
@@ -761,9 +823,9 @@ public:
     }
 
 private:
-    void setBest(int pad, bool b)
+    void setSource(int pad, int src)
     {
-        if (auto* p = proc.apvts.getParameter("best" + juce::String(pad))) p->setValueNotifyingHost(b ? 1.f : 0.f);
+        proc.setPadSource(pad, src);
         proc.previewPad[(size_t) pad] = 1; shape.invalidate(); repaint();
     }
 
@@ -784,7 +846,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.2";
+            const juce::String ver = "v1.5";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -887,13 +949,24 @@ private:
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.1f));
             g.drawText(juce::MidiMessage::getMidiNoteName(res->pads[(size_t) i].note, true, true, 3), juce::Rectangle<float>(r.getX() + 14, r.getBottom() - 24, 60, 12).toNearestInt(), juce::Justification::centredLeft);
             const auto ab = abRect(i).toFloat();
-            const bool b = *proc.apvts.getRawParameterValue("best" + juce::String(i)) > 0.5f;
+            const int src = proc.padSource(i), nsrc = padHasC(i) ? 3 : 2;
             g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(ab, 5.f);
             g.setColour(ui::panelEdge.brighter(0.2f)); g.drawRoundedRectangle(ab.reduced(0.5f), 5.f, 1.f);
             g.setFont(ui::font(10.f, true));
-            g.setColour(!b ? ui::amber : ui::dim); g.drawText("A", ab.withWidth(ab.getWidth() / 2).toNearestInt(), juce::Justification::centred);
-            g.setColour(b ? ui::amber : ui::dim);  g.drawText("B", ab.withTrimmedLeft(ab.getWidth() / 2).toNearestInt(), juce::Justification::centred);
-            g.setColour(ui::panelEdge.brighter(0.2f)); g.drawVerticalLine((int) ab.getCentreX(), ab.getY() + 4, ab.getBottom() - 4);
+            const float cw = ab.getWidth() / nsrc;
+            for (int k = 0; k < nsrc; ++k)
+            {
+                g.setColour(src == k ? ui::amber : ui::dim);
+                g.drawText(juce::String::charToString((juce::juce_wchar) ('A' + k)), juce::Rectangle<float>(ab.getX() + k * cw, ab.getY(), cw, ab.getHeight()).toNearestInt(), juce::Justification::centred);
+                if (k > 0) { g.setColour(ui::panelEdge.brighter(0.2f)); g.drawVerticalLine((int) (ab.getX() + k * cw), ab.getY() + 4, ab.getBottom() - 4); }
+            }
+        }
+        if (hoverPad >= 0 && hoverPad < ds::kPads)                        // dropping a sample here: it becomes "C"
+        {
+            const auto r = padRect(hoverPad).toFloat();
+            g.setColour(ui::amber.withAlpha(0.15f)); g.fillRoundedRectangle(r, 10.f);
+            g.setColour(ui::amber); g.drawRoundedRectangle(r.reduced(1.f), 10.f, 2.f);
+            g.setFont(ui::font(10.f, true, 0.25f)); g.drawText("DROP = YOUR SAMPLE (C)", r.withTrimmedTop(r.getHeight() * 0.35f).withHeight(14.f).toNearestInt(), juce::Justification::centred);
         }
     }
 
@@ -957,6 +1030,7 @@ private:
     ui::Look look;
     int selected = 0, shownVersion = -1;
     bool hover = false, wasBusy = false;
+    int hoverPad = -1;
     std::array<float, 8> levels {};
     std::vector<std::pair<float, float>> peaks;
 
@@ -966,7 +1040,8 @@ private:
     juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn;
     KitBrowser kitBrowser { proc };
     juce::String toastText; juce::uint32 toastUntil = 0; bool wasToasting = false;
-    std::array<juce::TextButton, 2> modeBtn, srcBtn;
+    std::array<juce::TextButton, 2> modeBtn;
+    std::array<juce::TextButton, 3> srcBtn;
     ui::DragButton dragMidi, dragWav;
     ShapeView shape;
     juce::TooltipWindow tips { this, 700 };

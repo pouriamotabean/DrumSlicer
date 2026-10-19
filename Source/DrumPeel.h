@@ -438,6 +438,14 @@ public:
         return best;
     }
 
+    // hit times of the whole input (the same detector the analysis uses)
+    std::vector<double> findOnsets(double thr)
+    {
+        N = x.n; mono.resize((size_t) N);
+        for (int i = 0; i < N; ++i) mono[(size_t) i] = 0.5 * (x.c[0][(size_t) i] + x.c[1][(size_t) i]);
+        return onsets(thr);
+    }
+
     // ---------- helpers also used by the plugin / CLI
     static double estimateBpm(const std::vector<double>& times, int n, double sr)
     {
@@ -475,6 +483,7 @@ private:
         std::vector<double> t, g;                   // hit times (samples, whole) and gains
         std::vector<double> mask;                   // optional frequency support (hats)
         bool noisy = false;
+        std::string label;                          // instrument (set when the kit is made): kick, snare, clap, ...
     };
 
     const Buf& x; double sr; int nPads, iters;
@@ -1281,16 +1290,239 @@ private:
         return "snare";
     }
 
+    // ---------------------------------------------------------------- what instrument is a sound
+    struct SFeat
+    {
+        double low = 0, body = 0, high = 0, cen = 0, flat = 0, f0 = 0, dec = 0;   // from the learned sound
+        double rise = 0, d20 = 0; int bursts = 1;                                // from its cleanest real hit
+        std::array<double, 52> prof {};                                          // 26 bands x (attack, body), dB
+        double weight = 0; bool hatlike = false;
+    };
+    SFeat featuresOf(size_t c, const Buf& yAll) const
+    {
+        SFeat F; const auto& s = snd[c];
+        std::vector<double> m((size_t) Lw);
+        for (int i = 0; i < Lw; ++i) m[(size_t) i] = 0.25 * (s.T.c[0][(size_t) i] + s.Tn.c[0][(size_t) i] + s.T.c[1][(size_t) i] + s.Tn.c[1][(size_t) i]) * 2.0;
+        {   // spectrum of the whole sound (no window: the attack counts)
+            const int n = 1 << 16; std::vector<cd> z((size_t) n);
+            for (int i = 0; i < std::min(n, Lw); ++i) z[(size_t) i] = cd(m[(size_t) i], 0);
+            fftOf(n).run(z.data(), false);
+            const bool limited = cutoffHz < 16000;
+            const double split = limited ? std::max(2500.0, 5000.0 * cutoffHz / 16000.0) : 5000.0;
+            double tot = 1e-30, cs = 0;
+            for (int k = 1; k <= n / 2; ++k) { const double f = k * sr / n, p = std::norm(z[(size_t) k]); tot += p; cs += p * f; if (f < 150) F.low += p; if (f > split) F.high += p; if (f >= 150 && f < 600) F.body += p; }
+            F.low /= tot; F.high /= tot; F.body /= tot; F.cen = cs / tot;
+            F.hatlike = F.high > 0.5 && (!limited || F.body < 0.08);
+        }
+        {   // the first 150 ms: tone or noise, and its main pitch (30 - 1000 Hz)
+            const int L = std::min(Lw, (int) (0.15 * sr)), n = 1 << 15; std::vector<cd> z((size_t) n);
+            for (int i = 0; i < L; ++i) z[(size_t) i] = cd(m[(size_t) i] * (0.5 + 0.5 * std::cos(PI * i / L)), 0);
+            fftOf(n).run(z.data(), false);
+            double lg = 0, ar = 0; int cnt = 0, kb = 0; double pb = -1;
+            for (int k = 1; k <= n / 2; ++k)
+            {
+                const double f = k * sr / n, p = std::norm(z[(size_t) k]) + 1e-30;
+                if (f > 100 && f < 8000) { lg += std::log(p); ar += p; ++cnt; }
+                if (f > 30 && f < 1000 && p > pb) { pb = p; kb = k; }
+            }
+            F.flat = cnt ? std::exp(lg / cnt) / (ar / cnt) : 1.0; F.f0 = kb * sr / n;
+        }
+        {   // decay of the learned sound (to -30 dB, 10 ms windows), as the hat rule always used
+            const int w = std::max(1, (int) (0.01 * sr)); std::vector<double> e((size_t) Lw, 0.0); double run = 0;
+            for (int i = 0; i < Lw; ++i) { run += m[(size_t) i] * m[(size_t) i]; if (i >= w) run -= m[(size_t) (i - w)] * m[(size_t) (i - w)]; e[(size_t) i] = run; }
+            const int pk = (int) (std::max_element(e.begin(), e.end()) - e.begin());
+            int k = pk; while (k < Lw && e[(size_t) k] >= e[(size_t) pk] * 1e-3) ++k;
+            F.dec = (k - pk) / sr;
+        }
+        {   // attack / decay profile in 26 bands, level-normalised (to compare two sounds)
+            const int a = (int) (0.04 * sr), b = std::min(Lw, (int) (0.2 * sr));
+            for (int seg = 0; seg < 2; ++seg)
+            {
+                const int s0 = seg ? a : 0, s1 = seg ? b : a, n = 8192; std::vector<cd> z((size_t) n);
+                for (int i = s0; i < s1 && i - s0 < n; ++i) z[(size_t) (i - s0)] = cd(m[(size_t) i], 0);
+                fftOf(n).run(z.data(), false);
+                std::array<double, 26> e {};
+                for (int k = 1; k <= n / 2; ++k) { const double f = k * sr / n; if (f < 40) continue; e[(size_t) std::min(25, (int) std::floor(3.0 * std::log2(f / 40.0)))] += std::norm(z[(size_t) k]); }
+                for (int q = 0; q < 26; ++q) F.prof[(size_t) (seg * 26 + q)] = 10.0 * std::log10(e[(size_t) q] + 1e-12);
+            }
+            double mx = -1e9; for (double v : F.prof) mx = std::max(mx, v);
+            for (double& v : F.prof) v = std::max(v - mx, -60.0);
+        }
+        double g2 = 0, gmax = 0; for (double g : s.g) { g2 += g * g; gmax = std::max(gmax, g); }
+        double en = 0; for (double v : m) en += v * v;
+        F.weight = g2 * en;
+        // the cleanest strong real hit: nobody else from 10 ms before to 60 ms after
+        double pick = -1;
+        {
+            std::vector<std::pair<double, double>> cand; for (size_t i = 0; i < s.t.size(); ++i) cand.push_back({ s.g[i], s.t[i] });
+            std::sort(cand.rbegin(), cand.rend());
+            for (const auto& cg : cand)
+            {
+                if (cg.first < 0.3 * gmax) break;
+                bool busy = false;
+                for (size_t d = 0; d < snd.size() && !busy; ++d)
+                {
+                    if (d == c) continue;
+                    double gm2 = 0; for (double g : snd[d].g) gm2 = std::max(gm2, g);
+                    for (size_t i = 0; i < snd[d].t.size(); ++i) { const double dt = snd[d].t[i] - cg.second; if (snd[d].g[i] > 0.3 * gm2 && dt > -0.01 * sr && dt < 0.06 * sr) { busy = true; break; } }
+                }
+                if (!busy) { pick = cg.second; break; }
+            }
+            if (pick < 0 && !cand.empty()) pick = cand.front().second;
+        }
+        if (pick >= 0)
+        {
+            const int a = std::max(0, (int) (pick - 0.002 * sr)), L = std::min(N - a, (int) (0.12 * sr));
+            if (L > (int) (0.06 * sr))
+            {
+                std::vector<double> seg((size_t) L), hp((size_t) L);
+                // the real hit with every other sound (as modelled) taken off: this sound alone
+                double gp = 0; for (size_t i = 0; i < s.t.size(); ++i) if (s.t[i] == pick) gp = s.g[i];
+                const int ip = (int) std::floor(pick + 0.5);
+                for (int i = 0; i < L; ++i)
+                {
+                    const int t = a + i, k = t - ip;
+                    double own = 0; if (k >= 0 && k < Lw) own = gp * 0.5 * (s.T.c[0][(size_t) k] + s.Tn.c[0][(size_t) k] + s.T.c[1][(size_t) k] + s.Tn.c[1][(size_t) k]);
+                    seg[(size_t) i] = 0.5 * (x.c[0][(size_t) t] + x.c[1][(size_t) t]) - (0.5 * (yAll.c[0][(size_t) t] + yAll.c[1][(size_t) t]) - own);
+                }
+                {   // 4th-order high-pass at 1.5 kHz (two biquads): bursts of a clap, rise of a shaker
+                    const double w0 = 2 * PI * 1500.0 / sr, cw = std::cos(w0), al = std::sin(w0) / (2 * 0.7071);
+                    const double b0 = (1 + cw) / 2, b1 = -(1 + cw), b2 = (1 + cw) / 2, a0 = 1 + al, a1 = -2 * cw, a2 = 1 - al;
+                    std::vector<double> in = seg;
+                    for (int st = 0; st < 2; ++st)
+                    {
+                        double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+                        for (int i = 0; i < L; ++i) { const double y = (b0 * in[(size_t) i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0; x2 = x1; x1 = in[(size_t) i]; y2 = y1; y1 = y; hp[(size_t) i] = y; }
+                        in = hp;
+                    }
+                }
+                const int w2 = (int) (0.002 * sr), h1 = std::max(1, (int) (0.001 * sr));
+                std::vector<double> env;
+                for (int i = 0; i + w2 < L; i += h1) { double e = 0; for (int k = 0; k < w2; ++k) e += hp[(size_t) (i + k)] * hp[(size_t) (i + k)]; env.push_back(std::sqrt(e / w2) + 1e-12); }
+                if (env.size() > 60)
+                {
+                    const int pk = (int) (std::max_element(env.begin(), env.begin() + 60) - env.begin());
+                    int i10 = 0; while (i10 < pk && env[(size_t) i10] < 0.1 * env[(size_t) pk]) ++i10;
+                    F.rise = (pk - i10) * 1.0;                       // ms
+                    const double mx = *std::max_element(env.begin(), env.end());
+                    std::vector<double> db; for (size_t i = 0; i < std::min<size_t>(50, env.size()); ++i) db.push_back(20 * std::log10(env[i] / mx));
+                    std::vector<int> peaks;
+                    for (int i = 1; i + 1 < (int) db.size(); ++i) if (db[(size_t) i] >= db[(size_t) i - 1] && db[(size_t) i] > db[(size_t) i + 1] && db[(size_t) i] > -12) peaks.push_back(i);
+                    for (size_t q = 1; q < peaks.size(); ++q)
+                    {
+                        double mn = 1e9; for (int i = peaks[q - 1]; i <= peaks[q]; ++i) mn = std::min(mn, db[(size_t) i]);
+                        if (mn < std::min(db[(size_t) peaks[q - 1]], db[(size_t) peaks[q]]) - 6) ++F.bursts;
+                    }
+                }
+                const int w10 = (int) (0.01 * sr); std::vector<double> e10;
+                for (int i = 0; i + w10 <= L; i += w10) { double e = 0; for (int k = 0; k < w10; ++k) e += seg[(size_t) (i + k)] * seg[(size_t) (i + k)]; e10.push_back(std::sqrt(e / w10) + 1e-12); }
+                if (!e10.empty())
+                {
+                    const int p10 = (int) (std::max_element(e10.begin(), e10.end()) - e10.begin()); int k = p10;
+                    while (k < (int) e10.size() && 20 * std::log10(e10[(size_t) k] / e10[(size_t) p10]) >= -20) ++k;
+                    F.d20 = (k - p10) * 10.0;                        // ms (120 = longer than the window)
+                }
+            }
+        }
+        return F;
+    }
+    static double profDist(const SFeat& a, const SFeat& b)
+    {
+        double d = 0; for (size_t i = 0; i < a.prof.size(); ++i) { const double v = a.prof[i] - b.prof[i]; d += v * v; }
+        return std::sqrt(d / a.prof.size());
+    }
+    // one label per sound. Rules that make kick / snare / hats keep working as before, and give claps
+    // (several bursts), rims (short clicks), shakers (soft attack), cymbals (long), toms and percussion
+    // (tonal sounds of their own pitch, not the main snare's) their own pads
+    std::vector<std::string> labelSounds(std::vector<SFeat>& F)
+    {
+        const size_t n = snd.size();
+        const Buf yAll = synthFull();
+        F.clear(); for (size_t c = 0; c < n; ++c) F.push_back(featuresOf(c, yAll));
+        std::vector<std::string> L(n);
+        double wmax = 0; for (auto& f : F) wmax = std::max(wmax, f.weight);
+        for (size_t c = 0; c < n; ++c)
+        {
+            const auto& f = F[c];
+            if (f.hatlike) L[c] = f.dec >= 0.6 ? "cymbal" : (f.rise >= 13 ? "shaker" : (f.dec < 0.15 ? "chat" : "ohat"));
+            else if ((f.bursts >= 3 && f.flat >= 0.12 && f.cen >= 900 && f.low < 0.5)
+                     || (f.bursts >= 2 && f.flat >= 0.2 && f.cen >= 1000 && f.cen <= 7000 && f.low < 0.1 && f.body < 0.15)) L[c] = "clap";   // several bursts of noise
+            else if (f.low > 0.45) L[c] = (f.f0 >= 110 && f.low < 0.8) ? "tom" : "kick";   // a low sound with a clear higher pitch: a tom
+            else if (f.d20 <= 30 && f.low < 0.2 && f.cen >= 1000) L[c] = "rim";
+            else L[c] = "mid";
+        }
+        // the strongest mid sound is the snare (when the loop has a kick, or it is noisy like a snare)
+        bool hasKick = false; for (auto& l : L) hasKick |= l == "kick";
+        int dom = -1; for (size_t c = 0; c < n; ++c) if (L[c] == "mid" && (dom < 0 || F[c].weight > F[(size_t) dom].weight)) dom = (int) c;
+        const bool snareDom = dom >= 0 && (hasKick || F[(size_t) dom].flat >= 0.05);
+        for (size_t c = 0; c < n; ++c)
+        {
+            const bool lowTom = L[c] == "tom";                        // from the kick rule: a low sound with a higher pitch
+            if (L[c] != "mid" && !lowTom) continue;
+            if (snareDom)
+            {
+                // the snare's own pitch (or an octave of it: the strongest peak of a snare can be either), or
+                // simply sounding much like it: a variant of the snare (layered with a kick, other velocity ...)
+                const double lr = std::log2(std::max(1.0, F[c].f0) / std::max(1.0, F[(size_t) dom].f0));
+                const double pr = std::abs(lr - std::round(lr)) + (std::abs(std::round(lr)) > 1 ? 1.0 : 0.0);
+                const double dd = profDist(F[c], F[(size_t) dom]);
+                if ((int) c == dom || (pr <= 0.26 && dd <= 14.0) || dd <= 6.0) { L[c] = "snare"; continue; }
+                // a tom / percussion pad of its own only when it really plays (not a faint leftover of the snare)
+                if (F[c].weight < 0.02 * F[(size_t) dom].weight) { L[c] = "snare"; continue; }
+            }
+            if (!lowTom) L[c] = F[c].f0 < 250 ? "tom" : "perc";
+        }
+        // leftovers are no instrument of their own: they join the closest one. A leftover plays very few times
+        // and quietly, or is next to silent. (Hats are quiet next to a kick but play often: they stay.)
+        auto weak = [&](size_t c) { return (snd[c].t.size() <= 3 && F[c].weight < 0.03 * wmax) || F[c].weight < 1e-4 * wmax; };
+        for (size_t c = 0; c < n; ++c)
+        {
+            if (!weak(c)) continue;
+            double bd = 1e9; int bc = -1;
+            for (size_t d = 0; d < n; ++d) if (d != c && !weak(d)) { const double dd = profDist(F[c], F[d]); if (dd < bd) { bd = dd; bc = (int) d; } }
+            if (bc >= 0) L[c] = L[(size_t) bc];
+        }
+        if (std::getenv("DP_DEBUG"))
+            for (size_t c = 0; c < n; ++c) { std::fprintf(stderr, "dist s%zu:", c); for (size_t d = 0; d < n; ++d) std::fprintf(stderr, " %5.1f", profDist(F[c], F[d])); std::fprintf(stderr, "\n"); }
+        if (std::getenv("DP_DEBUG"))
+            for (size_t c = 0; c < n; ++c)
+                std::fprintf(stderr, "label s%zu %-6s w %.3f low %.2f body %.2f high %.2f cen %5.0f f0 %4.0f flat %.3f dec %.2f | rise %2.0f bursts %d d20 %3.0f\n", c, L[c].c_str(), F[c].weight,
+                             F[c].low, F[c].body, F[c].high, F[c].cen, F[c].f0, F[c].flat, F[c].dec, F[c].rise, F[c].bursts, F[c].d20);
+        return L;
+    }
+
     // variants of the same instrument (KICK, KICK 2 ...) become one sound: a drum machine kit
     std::vector<size_t> lastLeaders;
     bool mergeByCategory(bool byWeight = true, std::vector<size_t>* leaders = nullptr)
     {
         std::map<std::string, std::vector<size_t>> groups;
+        if (const char* dd = std::getenv("DP_DUMP"))            // debug: the sounds before they are merged (raw float, 1 ch)
+            for (size_t c = 0; c < snd.size() + 8; ++c)
+            {   std::remove((std::string(dd) + "/s" + std::to_string(c) + ".f32").c_str()); std::remove((std::string(dd) + "/s" + std::to_string(c) + "_times.txt").c_str()); }
+        if (const char* dd = std::getenv("DP_DUMP"))
+            for (size_t c = 0; c < snd.size(); ++c)
+            {
+                std::string fn = std::string(dd) + "/s" + std::to_string(c) + ".f32";
+                if (FILE* f = std::fopen(fn.c_str(), "wb")) { for (int i = 0; i < Lw; ++i) { float v = (float) (0.5 * (snd[c].T.c[0][(size_t) i] + snd[c].Tn.c[0][(size_t) i] + snd[c].T.c[1][(size_t) i] + snd[c].Tn.c[1][(size_t) i])); std::fwrite(&v, 4, 1, f); } std::fclose(f); }
+                std::string tn = std::string(dd) + "/s" + std::to_string(c) + "_times.txt";
+                if (FILE* f = std::fopen(tn.c_str(), "w")) { for (size_t i = 0; i < snd[c].t.size(); ++i) std::fprintf(f, "%.0f %.4f\n", snd[c].t[i], snd[c].g[i]); std::fclose(f); }
+            }
+        std::vector<SFeat> F;
+        const auto L = labelSounds(F);
+        for (size_t c = 0; c < snd.size(); ++c) snd[c].label = L[c];
+        // one pad per instrument; toms and percussion of a different pitch are different instruments
         for (size_t c = 0; c < snd.size(); ++c)
         {
-            Buf f(Lw); for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < Lw; ++i) f.c[ch][(size_t) i] = snd[c].T.c[ch][(size_t) i] + snd[c].Tn.c[ch][(size_t) i];
-            const std::string cat = category(f);
-            groups[cat == "other" ? "other" + std::to_string(c) : cat].push_back(c);
+            std::string key = L[c];
+            if (key == "tom" || key == "perc")
+            {
+                int same = -1;
+                for (size_t d = 0; d < c; ++d)
+                    if (L[d] == key && std::abs(std::log2(std::max(1.0, F[c].f0) / std::max(1.0, F[d].f0))) <= 0.17 && profDist(F[c], F[d]) <= 9.0) { same = (int) d; break; }
+                key += std::to_string(same >= 0 ? same : (int) c);
+                if (same >= 0) for (auto& kv : groups) if (std::find(kv.second.begin(), kv.second.end(), (size_t) same) != kv.second.end()) { key = kv.first; break; }
+            }
+            groups[key].push_back(c);
         }
         if (groups.size() == snd.size()) return false;
         if (std::getenv("DP_DEBUG"))
@@ -1457,7 +1689,7 @@ private:
         for (size_t c = 0; c < snd.size(); ++c)
         {
             full[c].resize(Lw); for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < Lw; ++i) full[c].c[ch][(size_t) i] = snd[c].T.c[ch][(size_t) i] + snd[c].Tn.c[ch][(size_t) i];
-            const auto cat = category(full[c]);
+            const auto cat = snd[c].label.empty() ? category(full[c]) : snd[c].label;
             if (cat == "chat" && (hat < 0 || snd[c].t.size() > snd[(size_t) hat].t.size())) hat = (int) c;
             if (cat == "kick" && (kick < 0 || snd[c].t.size() > snd[(size_t) kick].t.size())) kick = (int) c;
         }
@@ -1654,11 +1886,17 @@ private:
         const Buf yAll = synthFull();
         const auto floorP = stemFloor();
         static const std::map<std::string, std::vector<std::pair<int, const char*>>> slots = {
-            { "kick",  { { 36, "KICK" }, { 35, "KICK 2" }, { 41, "KICK 3" } } },
-            { "snare", { { 38, "SNARE" }, { 40, "SNARE 2" }, { 39, "SNARE 3" }, { 37, "SNARE 4" } } },
-            { "chat",  { { 42, "C-HAT" }, { 44, "HAT 2" }, { 54, "HAT 3" } } },
-            { "ohat",  { { 46, "O-HAT" }, { 49, "CRASH" }, { 51, "RIDE" } } },
-            { "other", { { 45, "PERC" }, { 47, "PERC 2" }, { 48, "PERC 3" }, { 50, "PERC 4" }, { 43, "PERC 5" }, { 56, "PERC 6" }, { 60, "PERC 7" }, { 61, "PERC 8" } } } };
+            { "kick",   { { 36, "KICK" }, { 35, "KICK 2" } } },
+            { "snare",  { { 38, "SNARE" }, { 40, "SNARE 2" } } },
+            { "clap",   { { 39, "CLAP" }, { 54, "CLAP 2" } } },
+            { "rim",    { { 37, "RIM" }, { 75, "RIM 2" } } },
+            { "tom",    { { 45, "TOM" }, { 47, "TOM 2" }, { 48, "TOM 3" }, { 43, "TOM 4" }, { 50, "TOM 5" }, { 41, "TOM 6" } } },
+            { "perc",   { { 62, "PERC" }, { 63, "PERC 2" }, { 64, "PERC 3" }, { 60, "PERC 4" }, { 61, "PERC 5" }, { 56, "PERC 6" }, { 76, "PERC 7" }, { 77, "PERC 8" } } },
+            { "shaker", { { 70, "SHAKER" }, { 82, "SHAKER 2" } } },
+            { "chat",   { { 42, "C-HAT" }, { 44, "HAT 2" } } },
+            { "ohat",   { { 46, "O-HAT" }, { 53, "O-HAT 2" } } },
+            { "cymbal", { { 49, "CRASH" }, { 51, "RIDE" }, { 57, "CRASH 2" } } },
+            { "other",  { { 65, "PERC 9" }, { 66, "PERC 10" }, { 67, "PERC 11" }, { 68, "PERC 12" }, { 71, "PERC 13" }, { 72, "PERC 14" }, { 73, "PERC 15" }, { 74, "PERC 16" } } } };
         std::vector<Buf> full(snd.size());
         for (size_t c = 0; c < snd.size(); ++c) { full[c].resize(Lw); for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < Lw; ++i) full[c].c[ch][(size_t) i] = snd[c].T.c[ch][(size_t) i] + snd[c].Tn.c[ch][(size_t) i]; }
         std::vector<size_t> order(snd.size()); std::iota(order.begin(), order.end(), 0);
@@ -1669,7 +1907,7 @@ private:
             bool anyHit = false; double gmax = 0;
             for (double g : snd[c].g) if (g > 0) { anyHit = true; gmax = std::max(gmax, g); }
             if (!anyHit) continue;
-            std::string cat = category(full[c]);
+            std::string cat = snd[c].label.empty() ? category(full[c]) : snd[c].label;
             auto pick = [&](const std::string& k) -> int {
                 const auto& v = slots.at(k);
                 while (used[k] < v.size() && std::find(taken.begin(), taken.end(), v[used[k]].first) != taken.end()) ++used[k];
@@ -1791,6 +2029,210 @@ private:
         s = std::move(o);
     }
 };
+
+// ------------------------------------------------------------------ whole songs
+// The sounds are learned on the busiest minute; the rest of the song is then "played back" with them:
+// at every hit, which pads (and how loud) explain what is new there, in 26 bands x 10 ms (power), after the
+// ringing of the notes before it is taken off. Velocity 100 = the pad's sound as it is.
+struct BandFrames { int hop = 441, F = 0; std::vector<std::array<double, 26>> p; };
+inline BandFrames bandFrames(const Buf& b, double sr, int maxFrames = -1)
+{
+    BandFrames o; o.hop = std::max(1, (int) std::lround(0.01 * sr));
+    const int nf = 1024; o.F = b.n / o.hop + 1; if (maxFrames > 0) o.F = std::min(o.F, maxFrames);
+    o.p.assign((size_t) o.F, {});
+    std::vector<int> band((size_t) nf / 2 + 1, -1);
+    for (int k = 1; k <= nf / 2; ++k) { const double f = k * sr / nf; if (f >= 40) band[(size_t) k] = std::min(25, (int) std::floor(3.0 * std::log2(f / 40.0))); }
+    const auto& w = hannPeriodic(nf); const auto& fft = fftOf(nf);
+    std::vector<cd> z((size_t) nf);
+    for (int f = 0; f < o.F; ++f)
+    {
+        const int s0 = f * o.hop;                                 // window starts at the frame (an attack is not smeared back)
+        for (int i = 0; i < nf; ++i) { const int t = s0 + i; z[(size_t) i] = cd(t < b.n ? 0.5 * (b.c[0][(size_t) t] + b.c[1][(size_t) t]) * w[(size_t) i] : 0.0, 0); }
+        fft.run(z.data(), false);
+        for (int k = 1; k <= nf / 2; ++k) if (band[(size_t) k] >= 0) o.p[(size_t) f][(size_t) band[(size_t) k]] += std::norm(z[(size_t) k]);
+    }
+    return o;
+}
+
+inline std::vector<NoteOut> transcribe(const Buf& x, double sr, const std::vector<PadOut>& pads, const std::vector<double>& onsets,
+                                       const std::function<bool(double)>& wanted)
+{
+    std::vector<NoteOut> out;
+    if (pads.empty()) return out;
+    const int K = 8, KT = 40;                                     // fit on 80 ms, follow the ringing for 400 ms
+    const BandFrames X = bandFrames(x, sr);
+    std::vector<BandFrames> B; for (const auto& p : pads) B.push_back(bandFrames(p.audio, sr, KT));
+    std::vector<std::array<bool, 26>> topBand(pads.size());     // the bands holding 80 % of each pad's attack
+    for (size_t p = 0; p < pads.size(); ++p)
+    {
+        std::array<double, 26> e {}; double tot = 0;
+        for (int k = 0; k < std::min(K, B[p].F); ++k) for (int b = 0; b < 26; ++b) { e[(size_t) b] += B[p].p[(size_t) k][(size_t) b]; tot += B[p].p[(size_t) k][(size_t) b]; }
+        std::array<int, 26> idx; for (int b = 0; b < 26; ++b) idx[(size_t) b] = b;
+        std::sort(idx.begin(), idx.end(), [&](int u, int v) { return e[(size_t) u] > e[(size_t) v]; });
+        double acc = 0; topBand[p].fill(false);
+        for (int b : idx) { if (acc >= 0.8 * tot) break; topBand[p][(size_t) b] = true; acc += e[(size_t) b]; }
+    }
+    std::array<double, 26> wb {};                                 // every band counts (not only the loud lows)
+    for (int b = 0; b < 26; ++b) { double m = 0; for (int f = 0; f < X.F; ++f) m += X.p[(size_t) f][(size_t) b]; wb[(size_t) b] = 1.0 / (m / std::max(1, X.F) + 1e-12); }
+    std::vector<std::array<double, 26>> P((size_t) X.F, std::array<double, 26> {});   // what the notes so far explain
+    const size_t np = pads.size();
+    auto Bat = [&](size_t p, int k, int b) { return k < B[p].F ? B[p].p[(size_t) k][(size_t) b] : 0.0; };
+    for (double o : onsets)
+    {
+        if (!wanted(o)) continue;
+        const int f0 = (int) std::floor(o / X.hop + 0.5);
+        if (f0 < 0 || f0 + K > X.F) continue;
+        std::vector<double> R((size_t) K * 26);
+        double er = 0;
+        for (int k = 0; k < K; ++k) for (int b = 0; b < 26; ++b)
+        {
+            const double r = std::max(0.0, X.p[(size_t) (f0 + k)][(size_t) b] - P[(size_t) (f0 + k)][(size_t) b]);
+            R[(size_t) (k * 26 + b)] = r; er += wb[(size_t) b] * r * r;
+        }
+        if (er <= 0) continue;
+        // non-negative least squares (coordinate descent) of the pads' power patterns
+        std::vector<double> wgt(np, 0.0), BB(np, 0.0);
+        for (size_t p = 0; p < np; ++p) for (int k = 0; k < K; ++k) for (int b = 0; b < 26; ++b) BB[p] += wb[(size_t) b] * Bat(p, k, b) * Bat(p, k, b);
+        std::vector<double> E = R;                                 // R - sum w B
+        for (int it = 0; it < 60; ++it)
+            for (size_t p = 0; p < np; ++p)
+            {
+                if (BB[p] <= 0) continue;
+                double num = 0; for (int k = 0; k < K; ++k) for (int b = 0; b < 26; ++b) num += wb[(size_t) b] * Bat(p, k, b) * E[(size_t) (k * 26 + b)];
+                const double nw = std::max(0.0, wgt[p] + num / BB[p]), d = nw - wgt[p];
+                if (d == 0) continue;
+                for (int k = 0; k < K; ++k) for (int b = 0; b < 26; ++b) E[(size_t) (k * 26 + b)] -= d * Bat(p, k, b);
+                wgt[p] = nw;
+            }
+        // each pad's level again, from its own main bands only, with the others taken off there:
+        // the kick's own highs no longer decide how loud the hat on top of it is
+        if (!std::getenv("DP_TR_NOREFINE"))
+        {
+            std::vector<double> w2 = wgt;
+            for (size_t p = 0; p < np; ++p)
+            {
+                if (wgt[p] <= 0) continue;
+                double num = 0, den = 0;
+                for (int k = 0; k < K; ++k) for (int b = 0; b < 26; ++b)
+                {
+                    if (!topBand[p][(size_t) b]) continue;
+                    double others = 0; for (size_t q = 0; q < np; ++q) if (q != p) others += wgt[q] * Bat(q, k, b);
+                    const double r = std::max(0.0, R[(size_t) (k * 26 + b)] - others), bp = Bat(p, k, b);
+                    num += wb[(size_t) b] * r * bp; den += wb[(size_t) b] * bp * bp;
+                }
+                if (den > 0) w2[p] = std::max(0.0, num / den);
+            }
+            wgt = w2;
+        }
+        for (size_t p = 0; p < np; ++p)
+        {
+            if (wgt[p] <= 0) continue;
+            // judged where this pad lives (its own main bands): does it explain a real part of what is new there?
+            double ex = 0, rr = 0;
+            for (int k = 0; k < K; ++k) for (int b = 0; b < 26; ++b)
+                if (topBand[p][(size_t) b]) { const double v = wgt[p] * Bat(p, k, b), r = R[(size_t) (k * 26 + b)]; ex += std::min(v, r); rr += r; }
+            const int vel = (int) std::lround(100.0 * std::sqrt(wgt[p]));
+            static const double shareMin = std::getenv("DP_TR_SHARE") ? std::atof(std::getenv("DP_TR_SHARE")) : 0.5;
+            if (std::getenv("DP_TR_DBG")) std::fprintf(stderr, "o %.0f pad %zu w %.4f share %.3f vel %d\n", o, p, wgt[p], ex / std::max(1e-30, rr), vel);
+            if (rr <= 0 || ex < shareMin * rr || vel < 8) continue;
+            out.push_back({ std::floor(o + 0.5), (int) p, std::min(127, vel) });
+            for (int k = 0; k < KT && f0 + k < X.F; ++k) for (int b = 0; b < 26; ++b) P[(size_t) (f0 + k)][(size_t) b] += wgt[p] * Bat(p, k, b);
+        }
+    }
+    return out;
+}
+
+// the followed velocities are put on the analysis' own scale: inside the analysed minute both exist, the
+// median ratio per pad (same pad, same time) corrects the rest
+inline std::vector<double> velocityCalibration(const std::vector<NoteOut>& analysed, const std::vector<NoteOut>& followed, size_t np, double sr)
+{
+    std::vector<std::vector<double>> r(np);
+    for (const auto& f : followed)
+    {
+        if (f.pad < 0 || (size_t) f.pad >= np) continue;
+        const NoteOut* best = nullptr;
+        for (const auto& a : analysed) if (a.pad == f.pad && std::abs(a.time - f.time) < 0.015 * sr && (!best || std::abs(a.time - f.time) < std::abs(best->time - f.time))) best = &a;
+        if (best && best->velocity >= 15 && f.velocity >= 8) r[(size_t) f.pad].push_back((double) best->velocity / f.velocity);
+    }
+    std::vector<double> k(np, 1.0);
+    for (size_t p = 0; p < np; ++p)
+        if (r[p].size() >= 3) { auto v = r[p]; std::nth_element(v.begin(), v.begin() + (long) (v.size() / 2), v.end()); k[p] = std::clamp(v[v.size() / 2], 0.5, 2.0); }
+    return k;
+}
+
+// whole file: short ones as before; longer than 50 s: learn on the busiest 40 s, follow the rest
+inline Output analyseLong(const Buf& x, double sr, double onsetThreshold, const Progress& progress,
+                          const std::atomic<bool>* cancel, double windowSec = 40.0)
+{
+    const int win = (int) (windowSec * sr);
+    if (x.n <= (int) (1.25 * win))
+    {
+        Peeler peel(x, sr, 8, 9); peel.onsetThreshold = onsetThreshold;
+        return peel.runBest(progress, cancel);
+    }
+    // the busiest minute (most energy) - the clearest sounds are where the drums play the most
+    const int step = (int) sr; std::vector<double> e((size_t) (x.n / step + 1), 0.0);
+    for (int i = 0; i < x.n; ++i) e[(size_t) (i / step)] += x.c[0][(size_t) i] * x.c[0][(size_t) i] + x.c[1][(size_t) i] * x.c[1][(size_t) i];
+    const int ws = win / step; int bestS = 0; double bestE = -1, run = 0;
+    for (int s = 0; s < (int) e.size(); ++s) { run += e[(size_t) s]; if (s >= ws) run -= e[(size_t) (s - ws)]; if (s >= ws - 1 && run > bestE * 1.02) { bestE = run; bestS = s - ws + 1; } }
+    const int a = std::min(bestS * step, x.n - win), b = a + win;
+    Buf part(win); for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < win; ++i) part.c[ch][(size_t) i] = x.c[ch][(size_t) (a + i)];
+    Peeler peel(part, sr, 8, 9); peel.onsetThreshold = onsetThreshold;
+    Output o = peel.runBest([&](float p, const std::string& m) { if (progress) progress(0.85f * p, m); }, cancel);
+    if (o.pads.empty() || (cancel != nullptr && cancel->load())) return o;
+    if (progress) progress(0.87f, "following the whole song (" + std::to_string((int) (x.n / sr)) + " s)");
+    for (auto& n : o.notes) n.time += a;
+    Peeler full(x, sr, 8, 5);
+    const auto on = full.findOnsets(onsetThreshold);
+    const double margin = 0.05 * sr;
+    auto all = transcribe(x, sr, o.pads, on, [](double) { return true; });
+    const auto kv = velocityCalibration(o.notes, all, o.pads.size(), sr);
+    std::vector<NoteOut> rest;
+    for (auto n : all)
+        if (n.time < a - margin || n.time >= b - margin)
+        { n.velocity = std::clamp((int) std::lround(n.velocity * kv[(size_t) n.pad]), 1, 127); rest.push_back(n); }
+    // the analysed minute keeps its own (better) notes; around its edges the followed ones fill in
+    std::vector<NoteOut> merged;
+    for (auto& n : o.notes) if (n.time >= a && n.time < b - margin) merged.push_back(n);
+    for (auto& n : rest) merged.push_back(n);
+    std::sort(merged.begin(), merged.end(), [](const NoteOut& p, const NoteOut& q) { return p.time < q.time; });
+    o.notes = std::move(merged);
+    for (auto& p : o.pads) p.hits = 0;
+    for (auto& n : o.notes) if (n.pad >= 0 && n.pad < (int) o.pads.size()) o.pads[(size_t) n.pad].hits++;
+    for (auto& p : o.pads) p.bestTime += a;
+    // tempo: the one of the analysed minute, made exact on the whole song (a 0.1 % error would put the
+    // TIGHT grid half a 1/16 off after a few minutes); a whole / half BPM it is close to wins
+    {
+        std::vector<double> t; for (auto& n : o.notes) if (n.velocity >= 20) t.push_back(n.time);
+        auto cost = [&](double bpm) { const double g = 60.0 / bpm / 4 * sr; double c = 0;
+            for (double v : t) { const double ph = std::fmod(v / g, 1.0); const double d = std::min(ph, 1 - ph); c += d * d; } return c / std::max<size_t>(1, t.size()); };
+        // 70 or 105? both can fit the 1/16 grid; the kick and snare land on quarter notes of the right one
+        std::vector<double> strong;
+        for (auto& n : o.notes) if (n.velocity >= 50 && n.pad >= 0 && n.pad < (int) o.pads.size())
+        { const auto& nm = o.pads[(size_t) n.pad].name; if (nm.rfind("KICK", 0) == 0 || nm.rfind("SNARE", 0) == 0) strong.push_back(n.time); }
+        auto qcost = [&](double bpm) { const double g = 60.0 / bpm * sr; double c = 0;
+            for (double v : strong) { const double ph = std::fmod(v / g, 1.0); const double d = std::min(ph, 1 - ph); c += d * d; } return c / std::max<size_t>(1, strong.size()); };
+        double base = o.bpm;
+        if (strong.size() >= 8)
+        {
+            double bq = 1e300;
+            for (double m : { 1.0, 2.0 / 3.0, 1.5, 0.5, 2.0 })
+            {
+                const double cand = o.bpm * m;
+                if (cand < 55 || cand > 200 || cost(cand) > 1.3 * cost(o.bpm) + 1e-4) continue;
+                const double q = qcost(cand) * (m == 1.0 ? 0.9 : 1.0);           // a small bias for the first guess
+                if (q < bq) { bq = q; base = cand; }
+            }
+        }
+        double best = base, bc = cost(base);
+        for (double b2 = 0.985 * base; b2 <= 1.015 * base; b2 += 0.002) { const double c = cost(b2); if (c < bc) { bc = c; best = b2; } }
+        const double nice = std::round(best * 2) / 2;
+        if (std::abs(nice - best) < 0.12 && cost(nice) < 1.3 * bc) best = nice;
+        o.bpm = best;
+    }
+    if (progress) progress(1.f, "done");
+    return o;
+}
 
 // ------------------------------------------------------------------ TIGHT pattern (drum machine)
 // notes snapped to the loop's own grid (1/16, triplets, or a swung 1/16 or 1/8 grid when it clearly fits better

@@ -37,6 +37,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         p.push_back(std::make_unique<F>(juce::ParameterID{ "sus" + s, 1 },   n + " Sustain", NR(-12.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "pitch" + s, 1 }, n + " Pitch",   NR(-12.f, 12.f, 0.01f), 0.f));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "best" + juce::String(i), 1 }, n + " Best hit", false));
+        p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "usec" + juce::String(i), 1 }, n + " Your sample", false));
     }
     return { p.begin(), p.end() };
 }
@@ -63,7 +64,7 @@ ShapeParams DrumSlicerProcessor::shapeParams(int i) const
     ShapeParams p;
     p.start = v("st"); p.end = v("en"); p.attack = v("atk"); p.hold = v("hold"); p.decay = v("dcy");
     p.punch = v("punch"); p.sustain = v("sus"); p.best = v("best") > 0.5f;
-    p.attackCurve = v("fic"); p.fadeOut = v("fo"); p.fadeOutCurve = v("foc");
+    p.attackCurve = v("fic"); p.fadeOut = v("fo"); p.fadeOutCurve = v("foc"); p.user = v("usec") > 0.5f;
     return p;
 }
 
@@ -129,7 +130,7 @@ void DrumSlicerProcessor::timerCallback()
     auto sh = std::make_shared<Shaped>();
     for (int i = 0; i < ds::kPads; ++i)
         if (r->pads[(size_t) i].valid)
-            sh->buf[(size_t) i] = shapeShot(r->pads[(size_t) i].get(now[(size_t) i].best), r->sr, now[(size_t) i], sh->offset[(size_t) i]);
+            sh->buf[(size_t) i] = shapeShot(r->pads[(size_t) i].get(now[(size_t) i].best, now[(size_t) i].user), r->sr, now[(size_t) i], sh->offset[(size_t) i]);
     std::shared_ptr<Shaped> old;
     { juce::SpinLock::ScopedLockType l(lock); old = shaped; shaped = sh; }
     retire(std::move(old));
@@ -468,6 +469,101 @@ void DrumSlicerProcessor::restoreAsync(juce::ValueTree embedded, juce::File kitI
         setStatus(hadSomething ? "COULD NOT FIND " + (kitIn != juce::File() ? kitIn.getFileName() : loopIn.getFileName()) : juce::String());
         busy = false;
     });
+}
+
+// ---------------------------------------------------------------- pad type / merge
+const std::vector<juce::String>& DrumSlicerProcessor::padTypes()
+{
+    static const std::vector<juce::String> t { "KICK", "SNARE", "CLAP", "RIM", "TOM", "PERC", "SHAKER", "C-HAT", "O-HAT", "CRASH", "RIDE" };
+    return t;
+}
+
+void DrumSlicerProcessor::setPadType(int pad, const juce::String& type)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid) return;
+    static const std::map<juce::String, std::vector<int>> notes {
+        { "KICK", { 36, 35 } }, { "SNARE", { 38, 40 } }, { "CLAP", { 39, 54 } }, { "RIM", { 37, 75 } },
+        { "TOM", { 45, 47, 48, 43, 50, 41 } }, { "PERC", { 62, 63, 64, 60, 61, 56, 76, 77 } }, { "SHAKER", { 70, 82 } },
+        { "C-HAT", { 42, 44 } }, { "O-HAT", { 46, 53 } }, { "CRASH", { 49, 57 } }, { "RIDE", { 51, 59 } } };
+    auto it = notes.find(type); if (it == notes.end()) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    int k = 0;
+    for (int note : it->second)
+    {
+        bool used = false;
+        for (int q = 0; q < ds::kPads; ++q) if (q != pad && r->pads[(size_t) q].valid && r->pads[(size_t) q].note == note) used = true;
+        if (!used) break;
+        ++k;
+    }
+    if (k >= (int) it->second.size()) k = 0;
+    r->pads[(size_t) pad].note = it->second[(size_t) k];
+    r->pads[(size_t) pad].name = k == 0 ? type : type + " " + juce::String(k + 1);
+    r->buildNoteMap();
+    const auto loop = getLoopFile(); const auto kit = getKitDir();
+    publish(r, kit, loop, orphan());
+    if (kit == juce::File() && loop.existsAsFile()) ds::saveCache(loop, *r);      // the loop opens like this next time
+}
+
+void DrumSlicerProcessor::mergePad(int from, int into)
+{
+    auto cur = getResult();
+    if (!cur || from == into || from < 0 || into < 0 || from >= ds::kPads || into >= ds::kPads) return;
+    if (!cur->pads[(size_t) from].valid || !cur->pads[(size_t) into].valid) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    // the hits keep their loudness: velocity scaled by how loud the two sounds are (first 100 ms)
+    auto e100 = [&](const juce::AudioBuffer<float>& b) { double e = 0; const int n = std::min(b.getNumSamples(), (int) (0.1 * r->sr));
+        for (int c = 0; c < b.getNumChannels(); ++c) for (int i = 0; i < n; ++i) e += (double) b.getSample(c, i) * b.getSample(c, i); return e; };
+    const double ef = e100(r->pads[(size_t) from].audio), ei = e100(r->pads[(size_t) into].audio);
+    const double k = ei > 0 ? std::sqrt(ef / ei) : 1.0;
+    for (auto& h : r->hits) if (h.pad == from) { h.pad = into; h.velocity = juce::jlimit(1, 127, (int) std::lround(h.velocity * k)); }
+    std::sort(r->hits.begin(), r->hits.end(), [](const ds::Hit& a, const ds::Hit& b) { return a.time < b.time; });
+    r->pads[(size_t) into].hits += r->pads[(size_t) from].hits;
+    r->pads[(size_t) from] = ds::Pad();
+    r->buildNoteMap();
+    const auto loop = getLoopFile(); const auto kit = getKitDir();
+    publish(r, kit, loop, orphan());
+    if (kit == juce::File() && loop.existsAsFile()) ds::saveCache(loop, *r);
+}
+
+// ---------------------------------------------------------------- your samples ("C")
+bool DrumSlicerProcessor::setPadSample(int pad, const juce::File& f)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid) return false;
+    juce::AudioBuffer<float> shot;
+    if (!ds::loadUserShot(f, cur->pads[(size_t) pad], cur->sr, shot)) { setStatus("COULD NOT READ " + f.getFileName()); return false; }
+    auto r = std::make_shared<ds::Result>(*cur);
+    r->pads[(size_t) pad].user = std::move(shot);
+    r->pads[(size_t) pad].userName = f.getFileNameWithoutExtension();
+    publish(r, getKitDir(), getLoopFile(), orphan());
+    setPadSource(pad, 2);
+    previewPad[(size_t) pad] = 1;
+    return true;
+}
+
+void DrumSlicerProcessor::clearPadSample(int pad)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    r->pads[(size_t) pad].user.setSize(0, 0); r->pads[(size_t) pad].userName.clear();
+    publish(r, getKitDir(), getLoopFile(), orphan());
+    setPadSource(pad, 0);
+}
+
+void DrumSlicerProcessor::setPadSource(int pad, int src)
+{
+    if (auto* p = apvts.getParameter("best" + juce::String(pad))) p->setValueNotifyingHost(src == 1 ? 1.f : 0.f);
+    if (auto* p = apvts.getParameter("usec" + juce::String(pad))) p->setValueNotifyingHost(src == 2 ? 1.f : 0.f);
+}
+
+int DrumSlicerProcessor::padSource(int pad) const
+{
+    auto r = getResult();
+    const bool hasC = r && pad >= 0 && pad < ds::kPads && r->pads[(size_t) pad].user.getNumSamples() > 0;
+    if (hasC && apvts.getRawParameterValue("usec" + juce::String(pad))->load() > 0.5f) return 2;
+    return apvts.getRawParameterValue("best" + juce::String(pad))->load() > 0.5f ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- kits

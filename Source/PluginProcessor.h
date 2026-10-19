@@ -8,7 +8,7 @@
 // per-pad sound shaping (start / end trim, attack-hold-decay, punch / sustain), rendered off the audio thread
 // fades: curve -1..1 (0 = straight line, + = stays louder, - = drops / rises later), gain = t^(2^(-3 curve))
 struct ShapeParams { float start = 0, end = 2000, attack = 0, hold = 2000, decay = 2000, punch = 0, sustain = 0,
-                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0; bool best = false;
+                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0; bool best = false, user = false;
                      bool operator!=(const ShapeParams& o) const { return std::memcmp(this, &o, sizeof(*this)) != 0; } };
 struct Shaped
 {
@@ -65,6 +65,15 @@ public:
     // kits (presets): Documents/ReKit/Kits/<name>/
     juce::File saveKit(const juce::String& name);    // current sounds + settings + MIDI; returns the kit folder ({} on failure)
     void loadKit(const juce::File& kit, bool applySettings = true);
+    // fix what the analysis decided: the instrument of a pad (its name and MIDI note), or merge two pads
+    static const std::vector<juce::String>& padTypes();
+    // "C": a sample of yours on a pad (dropped on it or chosen); the MIDI and A / B stay as they are
+    bool setPadSample(int pad, const juce::File& f);
+    void clearPadSample(int pad);
+    void setPadSource(int pad, int src);             // 0 = A, 1 = B, 2 = C
+    int padSource(int pad) const;
+    void setPadType(int pad, const juce::String& type);
+    void mergePad(int from, int into);
     void kitRemoved(const juce::File& kit) { if (getKitDir() == kit) setFiles({}, {}, kit.getFileName()); }   // sounds stay, files gone
     // listening to a saved kit (its pattern) before loading it
     bool previewKit(const juce::File& kit);

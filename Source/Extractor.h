@@ -21,8 +21,14 @@ struct Pad
     int note = 36, hits = 0;
     juce::AudioBuffer<float> audio;          // "learned": the sound averaged over all its hits (velocity 100 = this level)
     juce::AudioBuffer<float> best;           // "best hit": the cleanest real hit, others subtracted, learned tail
+    juce::AudioBuffer<float> user;           // "C": a sample of yours dropped on the pad (level-matched to A)
+    juce::String userName;
     bool valid = false;
-    const juce::AudioBuffer<float>& get(bool useBest) const { return useBest && best.getNumSamples() > 0 ? best : audio; }
+    const juce::AudioBuffer<float>& get(bool useBest, bool useUser = false) const
+    {
+        if (useUser && user.getNumSamples() > 0) return user;
+        return useBest && best.getNumSamples() > 0 ? best : audio;
+    }
 };
 
 struct Hit { double time = 0; int pad = 0; int velocity = 100; };   // time in samples of the loop (whole samples)
@@ -47,17 +53,21 @@ struct Result
             if (noteToPad[(size_t) note] >= 0) return;
             for (auto* pr : prefs) { const int p = firstWith(pr); if (p >= 0) { noteToPad[(size_t) note] = p; return; } } };
         for (int n : { 35, 36 }) fallback(n, { "KICK" });
-        for (int n : { 37, 38, 39, 40 }) fallback(n, { "SNARE", "PERC" });
-        for (int n : { 42, 44 }) fallback(n, { "C-HAT", "HAT", "O-HAT" });
+        for (int n : { 38, 40 }) fallback(n, { "SNARE", "CLAP", "RIM" });
+        for (int n : { 39 }) fallback(n, { "CLAP", "SNARE" });
+        for (int n : { 37 }) fallback(n, { "RIM", "SNARE" });
+        for (int n : { 42, 44 }) fallback(n, { "C-HAT", "HAT", "SHAKER", "O-HAT" });
         for (int n : { 46 }) fallback(n, { "O-HAT", "C-HAT", "HAT" });
-        for (int n : { 41, 43, 45, 47, 48, 50 }) fallback(n, { "PERC", "SNARE", "KICK" });
+        for (int n : { 41, 43, 45, 47, 48, 50 }) fallback(n, { "TOM", "PERC", "SNARE", "KICK" });
+        for (int n : { 60, 61, 62, 63, 64, 56, 76, 77 }) fallback(n, { "PERC", "TOM", "RIM" });
+        for (int n : { 69, 70, 82 }) fallback(n, { "SHAKER", "C-HAT" });
         for (int n : { 49, 51, 52, 55, 57 }) fallback(n, { "CRASH", "RIDE", "O-HAT", "C-HAT" });
     }
     double meanHearing() const { double s = 0; for (double h : hearing) s += h; return s / 5.0; }
     double minHearing() const { double m = 1; for (double h : hearing) m = std::min(m, h); return m; }
 };
 
-inline bool loadAudio(const juce::File& file, juce::AudioBuffer<float>& out, double& sr, double maxSeconds = 60.0)
+inline bool loadAudio(const juce::File& file, juce::AudioBuffer<float>& out, double& sr, double maxSeconds = 300.0)
 {
     juce::AudioFormatManager fm;
     fm.registerBasicFormats();
@@ -237,6 +247,39 @@ inline std::shared_ptr<Result> loadCache(const juce::File& loop, const juce::Aud
     return loadCacheFrom(legacyCacheDir(loop), loop, audio, sr);     // analysed by an older version
 }
 
+// a one-shot of yours for pad "C": up to 4 s, at the kit's sample rate, as loud as the pad's own sound (A) in its
+// first 100 ms, so the MIDI velocities keep meaning the same
+inline bool loadUserShot(const juce::File& f, const Pad& pad, double kitSr, juce::AudioBuffer<float>& out)
+{
+    juce::AudioBuffer<float> a; double sr = 0;
+    {
+        juce::AudioFormatManager fm; fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(f));
+        if (rd == nullptr || rd->lengthInSamples < 16 || rd->sampleRate <= 0) return false;
+        sr = rd->sampleRate;
+        const int n = (int) std::min<juce::int64>(rd->lengthInSamples, (juce::int64) (sr * 4.0));
+        a.setSize(2, n);
+        if (!rd->read(&a, 0, n, 0, true, true)) return false;
+        if (rd->numChannels < 2) a.copyFrom(1, 0, a, 0, 0, n);
+    }
+    if (std::abs(sr - kitSr) > 0.5)
+    {
+        const double ratio = sr / kitSr;
+        const int n2 = (int) std::floor(a.getNumSamples() / ratio);
+        juce::AudioBuffer<float> b(2, n2);
+        for (int c = 0; c < 2; ++c) { juce::LagrangeInterpolator li; li.process(ratio, a.getReadPointer(c), b.getWritePointer(c), n2); }
+        a = std::move(b);
+    }
+    auto e100 = [&](const juce::AudioBuffer<float>& b) { double e = 0; const int n = std::min(b.getNumSamples(), (int) (0.1 * kitSr));
+        for (int c = 0; c < b.getNumChannels(); ++c) for (int i = 0; i < n; ++i) e += (double) b.getSample(c, i) * b.getSample(c, i); return e; };
+    const double ea = e100(pad.audio), eu = e100(a);
+    if (eu > 0 && ea > 0) a.applyGain((float) std::sqrt(ea / eu));
+    const float pk = a.getMagnitude(0, a.getNumSamples());
+    if (pk > 0.99f) a.applyGain(0.99f / pk);
+    out = std::move(a);
+    return true;
+}
+
 // ---------------------------------------------------------------- kits (presets)
 // Documents/ReKit/Kits/<name>/          final one-shots (as heard) + exact / tight MIDI, for any use
 // Documents/ReKit/Kits/<name>/_data/    what the plugin needs to reopen the kit: loop, A / B shots, hits, settings
@@ -268,8 +311,10 @@ inline bool saveKitData(const juce::File& kit, const Result& r)
         const auto base = pd.name.removeCharacters(" ");
         ok = writeWav24(d.getChildFile(base + "_A.wav"), pd.audio, r.sr) && ok;
         ok = writeWav24(d.getChildFile(base + "_B.wav"), pd.best.getNumSamples() > 0 ? pd.best : pd.audio, r.sr) && ok;
+        if (pd.user.getNumSamples() > 0) ok = writeWav24(d.getChildFile(base + "_C.wav"), pd.user, r.sr) && ok;
     }
     auto lines = infoLines(r); lines.insert(0, "kit=1");
+    for (int p = 0; p < kPads; ++p) if (r.pads[(size_t) p].valid && r.pads[(size_t) p].user.getNumSamples() > 0) lines.add("user=" + juce::String(p) + "|" + r.pads[(size_t) p].userName);
     return ok && writeText(d.getChildFile("kit.txt"), lines.joinIntoString("\n"));
 }
 
@@ -283,6 +328,19 @@ inline std::shared_ptr<Result> loadKitData(const juce::File& kit)
     if (!loadAudio(kitLoop(kit), r->loop, sr)) return nullptr;
     r->sr = sr; r->fromCache = true;
     if (!parseInfo(lines, *r, [&](const juce::String& n, bool b) { return d.getChildFile(n.removeCharacters(" ") + (b ? "_B.wav" : "_A.wav")); })) return nullptr;
+    juce::AudioFormatManager fm; fm.registerBasicFormats();
+    for (auto& l : lines)
+        if (l.startsWith("user="))
+        {
+            const int p = l.fromFirstOccurrenceOf("=", false, false).upToFirstOccurrenceOf("|", false, false).getIntValue();
+            if (p < 0 || p >= kPads || !r->pads[(size_t) p].valid) continue;
+            auto& pd = r->pads[(size_t) p];
+            std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(d.getChildFile(pd.name.removeCharacters(" ") + "_C.wav")));
+            if (rd == nullptr || rd->lengthInSamples <= 0) continue;
+            pd.user.setSize(2, (int) rd->lengthInSamples);
+            if (rd->read(&pd.user, 0, (int) rd->lengthInSamples, 0, true, true)) pd.userName = l.fromFirstOccurrenceOf("|", false, false);
+            else pd.user.setSize(0, 0);
+        }
     r->buildNoteMap();
     return r;
 }
@@ -358,6 +416,7 @@ inline juce::ValueTree embedResult(const Result& r)
         t.setProperty("i", p, nullptr); t.setProperty("name", pd.name, nullptr); t.setProperty("note", pd.note, nullptr); t.setProperty("hits", pd.hits, nullptr);
         t.setProperty("a", enc(pd.audio), nullptr);
         t.setProperty("b", pd.best.getNumSamples() > 0 ? enc(pd.best) : juce::String(), nullptr);
+        if (pd.user.getNumSamples() > 0) { t.setProperty("c", enc(pd.user), nullptr); t.setProperty("cname", pd.userName, nullptr); }
         e.appendChild(t, nullptr);
     }
     juce::String hits; for (const auto& h : r.hits) hits << (juce::int64) h.time << ":" << h.pad << ":" << h.velocity << " ";
@@ -386,6 +445,8 @@ inline std::shared_ptr<Result> unembedResult(const juce::ValueTree& e)
         pd.name = t.getProperty("name").toString(); pd.note = juce::jlimit(0, 127, (int) t.getProperty("note", 36)); pd.hits = t.getProperty("hits", 0);
         if (!dec(t.getProperty("a").toString(), pd.audio)) return nullptr;
         if (!dec(t.getProperty("b").toString(), pd.best)) pd.best.makeCopyOf(pd.audio);
+        if (t.hasProperty("c") && dec(t.getProperty("c").toString(), pd.user)) pd.userName = t.getProperty("cname").toString();
+        else pd.user.setSize(0, 0);
         pd.valid = true;
     }
     juce::StringArray hl; hl.addTokens(e.getProperty("hitlist").toString(), " ", "");
@@ -411,9 +472,8 @@ inline std::shared_ptr<Result> analyse(const juce::File& file, float sensitivity
 
     dp::Buf x(audio.getNumSamples());
     for (int c = 0; c < 2; ++c) { const float* p = audio.getReadPointer(c); for (int i = 0; i < x.n; ++i) x.c[c][(size_t) i] = p[i]; }
-    dp::Peeler peel(x, sr, kPads, 9);
-    peel.onsetThreshold = 0.06 - 0.06 * juce::jlimit(0.f, 1.f, sensitivity);   // SENS 0.5 -> 0.03
-    auto out = peel.runBest([&](float p, const std::string& s) { if (progress) progress(p, juce::String(s)); }, cancel);
+    const double thr = 0.06 - 0.06 * juce::jlimit(0.f, 1.f, sensitivity);       // SENS 0.5 -> 0.03
+    auto out = dp::analyseLong(x, sr, thr, [&](float p, const std::string& s) { if (progress) progress(p, juce::String(s)); }, cancel);
     if (cancel != nullptr && cancel->load()) return nullptr;
     if (out.pads.empty()) return nullptr;
 
