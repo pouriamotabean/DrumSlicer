@@ -584,10 +584,16 @@ inline std::shared_ptr<Result> analyse(const juce::File& file, float sensitivity
     return analyseBuffer(std::move(audio), sr, file, {}, sensitivity, progress, cancel);
 }
 
-// MIDI file bytes. EXACT: the loop as played, at the host tempo (timing exact in seconds).
-// TIGHT: drum-machine pattern on the loop's grid (strength 1 = fully on the grid), at the loop's tempo.
-inline juce::MemoryBlock midiBytes(const Result& r, double bpm, bool tight, double strength)
+// MIDI file bytes (mode 0 / 1 / 2):
+// EXACT: the loop as played, at the host tempo (timing exact in seconds: plays at the loop's own speed).
+// TIGHT: drum-machine pattern on the loop's grid (strength 1 = fully on the grid), follows the project tempo.
+// SYNC:  the loop as played (every hit, its groove), but in beats of the loop: follows the project tempo.
+enum MidiMode { kExact = 0, kTight = 1, kSync = 2 };
+inline const char* midiSuffix(int mode) { return mode == kTight ? "_tight" : mode == kSync ? "_sync" : "_exact"; }
+inline juce::MemoryBlock midiBytes(const Result& r, double bpm, int mode, double strength)
 {
+    const bool tight = mode == kTight;
+    if (mode == kSync && r.bpm > 0) bpm = r.bpm;      // one beat of the loop = one beat of the project
     dp::Output o; o.sr = r.sr;
     for (const auto& p : r.pads) { dp::PadOut po; po.note = p.note; po.name = p.name.toStdString(); o.pads.push_back(po); }
     for (const auto& h : r.hits) o.notes.push_back({ h.time, h.pad, h.velocity });

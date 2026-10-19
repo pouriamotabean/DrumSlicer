@@ -19,6 +19,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
     p.push_back(std::make_unique<F>(juce::ParameterID{ "bpm", 1 },    "BPM", NR(40.f, 240.f, 0.01f), 120.f));
     p.push_back(std::make_unique<F>(juce::ParameterID{ "quant", 3 },  "Grid (tight MIDI)", NR(0.f, 1.f, 0.001f), 1.f));
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "tight", 1 }, "Tight MIDI", false));
+    p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "sync", 1 }, "Sync MIDI", false));
     for (int i = 0; i < ds::kPads; ++i)
     {
         const juce::String n("Pad " + juce::String(i + 1));
@@ -236,14 +237,35 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
             }
             audioShaped = shaped;
             if (audioSource != source) { audioSource = source; srcPos = (double) selS.load(); }
-            if (audioPreview != preview) { audioPreview = preview; audioPreviewSR = previewSR; previewPos = 0; }
+            if (audioPreview != preview)
+            {   // a new preview: the one still sounding fades out (5 ms) instead of being cut
+                if (audioPreview && previewPlaying.load() && previewPos > 0) startPreviewFade();
+                audioPreview = preview; audioPreviewSR = previewSR; previewPos = 0;
+            }
         }
     }
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
             if (auto b = pos->getBpm()) hostBpm = *b;
     const int numSamples = buf.getNumSamples();
-    if (previewStop.exchange(false)) { audioPreview.reset(); previewPlaying = false; }   // "preview" itself is retired on the message thread
+    if (previewStop.exchange(false)) { if (audioPreview && previewPlaying.load()) startPreviewFade(); audioPreview.reset(); previewPlaying = false; }
+    if (fadePrev && fadeLeft > 0)
+    {
+        const auto& pb = *fadePrev;
+        const double step = fadeSR / hostSR; const float g = pMaster->load();
+        auto* oL = buf.getWritePointer(0); auto* oR = buf.getWritePointer(1);
+        const int len = pb.getNumSamples(), c1 = pb.getNumChannels() > 1 ? 1 : 0;
+        for (int i = 0; i < numSamples && fadeLeft > 0; ++i, --fadeLeft)
+        {
+            const int i0 = (int) fadePos;
+            if (i0 + 1 >= len) { fadeLeft = 0; break; }
+            const float fr = (float) (fadePos - i0), k = g * (float) fadeLeft / (float) fadeLen;
+            oL[i] += k * (pb.getSample(0, i0) + (pb.getSample(0, i0 + 1) - pb.getSample(0, i0)) * fr);
+            oR[i] += k * (pb.getSample(c1, i0) + (pb.getSample(c1, i0 + 1) - pb.getSample(c1, i0)) * fr);
+            fadePos += step;
+        }
+        if (fadeLeft <= 0) fadePrev.reset();         // never the last owner: replaced previews are retired
+    }   // "preview" itself is retired on the message thread
     if (audioPreview && previewPlaying.load())
     {   // a saved kit playing its pattern: straight to the main output
         const auto& pb = *audioPreview;
@@ -469,8 +491,8 @@ juce::File DrumSlicerProcessor::makeMidiFile()
 {
     auto r = getResult();
     if (!r || r->hits.empty()) return {};
-    const bool tight = apvts.getRawParameterValue("tight")->load() > 0.5f;
-    const auto bytes = ds::midiBytes(*r, midiBpm(), tight, apvts.getRawParameterValue("quant")->load());
+    const int mode = midiMode();
+    const auto bytes = ds::midiBytes(*r, midiBpm(), mode, apvts.getRawParameterValue("quant")->load());
     // a new file for every drag (two instances never hand Cubase the same file); the previous one is removed
     static std::atomic<int> counter { 0 };
     if (lastTempMidi != juce::File()) lastTempMidi.deleteFile();
@@ -478,7 +500,7 @@ juce::File DrumSlicerProcessor::makeMidiFile()
                  .getChildFile("ReKit_" + juce::File::createLegalFileName(baseName()) + "_" + juce::String(++counter) + ".mid");
     if (!f.replaceWithData(bytes.getData(), bytes.getSize())) return {};
     lastTempMidi = f;
-    ds::writeData(exportFolder().getChildFile(baseName() + (tight ? "_tight" : "_exact") + ".mid"), bytes.getData(), bytes.getSize());
+    ds::writeData(exportFolder().getChildFile(baseName() + ds::midiSuffix(mode) + ".mid"), bytes.getData(), bytes.getSize());
     return f;
 }
 
@@ -501,9 +523,9 @@ juce::File DrumSlicerProcessor::exportFinal()
     if (!r) return {};
     bool ok = true;
     for (int p = 0; p < ds::kPads; ++p) if (r->pads[(size_t) p].valid) ok = shotFile(p).existsAsFile() && ok;
-    const bool tight = apvts.getRawParameterValue("tight")->load() > 0.5f;
+    const int mode = midiMode();
     if (auto m = makeMidiFile(); m.existsAsFile())
-        ok = m.copyFileTo(exportFolder().getChildFile("EXPORT").getChildFile(baseName() + (tight ? "_tight" : "_exact") + ".mid")) && ok;
+        ok = m.copyFileTo(exportFolder().getChildFile("EXPORT").getChildFile(baseName() + ds::midiSuffix(mode) + ".mid")) && ok;
     else ok = false;
     if (!ok) setStatus("SOME EXPORT FILES COULD NOT BE WRITTEN");
     return exportFolder().getChildFile("EXPORT");
@@ -719,6 +741,23 @@ int DrumSlicerProcessor::padSource(int pad) const
 }
 
 // ---------------------------------------------------------------- kits
+bool DrumSlicerProcessor::previewSample(const juce::File& f, int pad)
+{
+    auto r = getResult();
+    const ds::Pad none;
+    const ds::Pad& pd = (r && pad >= 0 && pad < ds::kPads && r->pads[(size_t) pad].valid) ? r->pads[(size_t) pad] : none;
+    const double sr = r ? r->sr : hostSR;
+    auto b = std::make_shared<juce::AudioBuffer<float>>();
+    if (!ds::loadUserShot(f, pd, sr, *b)) return false;          // as loud as the pad, like it would be as "C"
+    std::shared_ptr<juce::AudioBuffer<float>> old;
+    { juce::SpinLock::ScopedLockType l(lock); old = preview; preview = b; previewSR = sr; }
+    retire(std::move(old));
+    { juce::SpinLock::ScopedLockType l(fileLock); previewDir = f; }
+    srcPlay = false;
+    previewStop = false; previewPlaying = true;
+    return true;
+}
+
 bool DrumSlicerProcessor::previewKit(const juce::File& kit)
 {
     auto b = std::make_shared<juce::AudioBuffer<float>>(); double sr = 44100;
@@ -756,10 +795,10 @@ juce::File DrumSlicerProcessor::saveKit(const juce::String& rawName)
         const auto f = tmp.getChildFile(name + "_" + pd.name.removeCharacters(" ") + ".wav");
         ok = (sh && sh->buf[(size_t) p].getNumSamples() > 0) ? ds::writeWav24(f, sh->buf[(size_t) p], r->sr) : ds::writeWav24(f, pd.audio, r->sr);
     }
-    for (int t = 0; t < 2 && ok; ++t)
+    for (int t = 0; t < 3 && ok; ++t)
     {
-        const auto bytes = ds::midiBytes(*r, midiBpm(), t == 1, apvts.getRawParameterValue("quant")->load());
-        ok = ds::writeData(tmp.getChildFile(name + (t == 1 ? "_tight" : "_exact") + ".mid"), bytes.getData(), bytes.getSize());
+        const auto bytes = ds::midiBytes(*r, midiBpm(), t, apvts.getRawParameterValue("quant")->load());
+        ok = ds::writeData(tmp.getChildFile(name + ds::midiSuffix(t) + ".mid"), bytes.getData(), bytes.getSize());
     }
     if (ok && kit.exists()) ok = kit.moveFileTo(old);
     if (ok) ok = tmp.moveFileTo(kit);

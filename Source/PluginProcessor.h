@@ -64,7 +64,17 @@ public:
     juce::String getStatus() const { juce::SpinLock::ScopedLockType l(statusLock); return status; }
     juce::File getLoopFile() const { juce::SpinLock::ScopedLockType l(fileLock); return loopFile; }
     juce::File getKitDir() const { juce::SpinLock::ScopedLockType l(fileLock); return kitDir; }
-    double midiBpm() const;                          // host tempo when known, else the BPM knob
+    double midiBpm() const;
+    int midiMode() const                             // 0 EXACT, 1 TIGHT, 2 SYNC (see ds::midiBytes)
+    {
+        if (apvts.getRawParameterValue("tight")->load() > 0.5f) return ds::kTight;
+        return apvts.getRawParameterValue("sync")->load() > 0.5f ? ds::kSync : ds::kExact;
+    }
+    void setMidiMode(int m)
+    {
+        if (auto* p = apvts.getParameter("tight")) p->setValueNotifyingHost(m == ds::kTight ? 1.f : 0.f);
+        if (auto* p = apvts.getParameter("sync")) p->setValueNotifyingHost(m == ds::kSync ? 1.f : 0.f);
+    }                          // host tempo when known, else the BPM knob
     double getHostBpm() const { return hostBpm.load(); }
     juce::File makeMidiFile();                       // .mid built from the analysis (for dragging into the DAW)
     juce::File exportFolder();                       // Documents/ReKit/<loop>_<id>/ (or the kit) with one-shots + .mid
@@ -92,6 +102,7 @@ public:
     void kitRemoved(const juce::File& kit) { if (getKitDir() == kit) setFiles({}, {}, kit.getFileName()); }   // sounds stay, files gone
     // listening to a saved kit (its pattern) before loading it
     bool previewKit(const juce::File& kit);
+    bool previewSample(const juce::File& f, int pad);   // a one-shot from your folders, level-matched to the pad
     void stopPreview() { previewStop = true; }
     bool isPreviewing() const { return previewPlaying.load(); }
     juce::File previewingKit() const { juce::SpinLock::ScopedLockType l(fileLock); return previewDir; }
@@ -153,6 +164,9 @@ private:
     std::shared_ptr<ds::Result> result, audioRes;
     std::shared_ptr<juce::AudioBuffer<float>> preview, audioPreview;
     double previewSR = 44100, audioPreviewSR = 44100, previewPos = 0;
+    std::shared_ptr<juce::AudioBuffer<float>> fadePrev;   // the preview that was cut, fading out
+    double fadePos = 0, fadeSR = 44100; int fadeLeft = 0, fadeLen = 1;
+    void startPreviewFade() { fadePrev = audioPreview; fadePos = previewPos; fadeSR = audioPreviewSR; fadeLen = std::max(1, (int) (0.005 * hostSR)); fadeLeft = fadeLen; }
     std::atomic<bool> previewStop { false }, previewPlaying { false };
     juce::File previewDir;
     mutable juce::SpinLock lock, statusLock, fileLock;
