@@ -239,7 +239,7 @@ public:
         drag = hit(e.position);
         if (drag && e.getNumberOfClicks() > 1) { resetHandle(drag); drag = 0; }
         else if (drag) { beginGesture(); startSp = proc.shapeParams(pad); startPos = e.position; }
-        else proc.previewPad[(size_t) pad] = 1;            // click on the sound = listen
+        else proc.audition(pad);            // click on the sound = listen
         repaint();
     }
     void mouseDrag(const juce::MouseEvent& e) override
@@ -269,7 +269,7 @@ public:
         }
         repaint();
     }
-    void mouseUp(const juce::MouseEvent&) override { if (drag) { endGesture(); proc.previewPad[(size_t) pad] = 1; } drag = 0; repaint(); }
+    void mouseUp(const juce::MouseEvent&) override { if (drag) { endGesture(); proc.audition(pad); } drag = 0; repaint(); }
     void invalidate() { peakKey = -1; repaint(); }
 
 private:
@@ -557,12 +557,12 @@ public:
         bpm.setTooltip("Tempo used for the MIDI when the host does not report one");
 
         for (auto* b : { &loadBtn, &reBtn }) addAndMakeVisible(b);
-        loadBtn.setButtonText("LOAD"); reBtn.setButtonText("RE-ANALYSE");
+        loadBtn.setButtonText("LOAD"); reBtn.setButtonText("ANALYSE");
         loadBtn.onClick = [this]
         {
             chooser = std::make_unique<juce::FileChooser>("Select drum loop", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3");
             chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                                 [this](const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) proc.startAnalysis(f, true); });
+                                 [this](const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) proc.loadSource(f); });
         };
         addAndMakeVisible(kitsBtn);
         kitsBtn.setButtonText("KITS");
@@ -573,7 +573,7 @@ public:
         kitBrowser.onSave = [this] { askKitName(); };
         kitBrowser.onLoad = [this](const juce::File& k) { proc.stopPreview(); proc.loadKit(k); toast("KIT  " + k.getFileName()); kitBrowser.setVisible(false); };
         reBtn.onClick = [this] { proc.reanalyse(); };
-        reBtn.setTooltip("Analyse the loop again (ignores the cache)");
+        reBtn.setTooltip("ANALYSE: learn the sounds of the selected part.  RE-ANALYSE: the same part again (ignores the cache)");
 
         addAndMakeVisible(dragMidi);
         dragMidi.getProperties().set("primary", true);
@@ -645,7 +645,7 @@ public:
     {
         const int pad = padAt(x, y);
         if (pad >= 0) { selected = pad; if (proc.setPadSample(pad, f)) toast("C  " + f.getFileNameWithoutExtension()); updateVisibility(); }
-        else proc.startAnalysis(f, true);
+        else proc.loadSource(f);
     }
     void fileDragEnter(const juce::StringArray&, int x, int y) override { hover = true; hoverPad = padAt(x, y); repaint(); }
     void fileDragMove(const juce::StringArray&, int x, int y) override { const int p = padAt(x, y); if (p != hoverPad) { hoverPad = p; repaint(); } }
@@ -767,15 +767,54 @@ public:
                 const auto ab = abRect(i); const int n = padHasC(i) ? 3 : 2;
                 setSource(i, juce::jlimit(0, n - 1, (e.getPosition().x - ab.getX()) * n / ab.getWidth()));
             }
-            else proc.previewPad[(size_t) i] = 1;
+            else proc.audition(i);
             updateVisibility(); repaint();
         }
-        if (display.contains(e.getPosition()) && !res && !proc.isBusy()) loadBtn.triggerClick();
+        if (display.contains(e.getPosition())) displayDown(e);
+    }
+    void mouseDrag(const juce::MouseEvent& e) override { displayDrag(e); }
+    void mouseUp(const juce::MouseEvent&) override { dragWhat = 0; }
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        const int h = display.contains(e.getPosition()) ? handleAt(e.position.x, e.position.y) : 0;
+        setMouseCursor(h != 0 ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    }
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        auto src = proc.getSource();
+        if (!src || !display.contains(e.getPosition()) || proc.isBusy()) return;
+        const int h = handleAt(e.position.x, e.position.y);
+        if (h == 1) proc.setSelection(0, proc.selEnd());                       // double-click a handle: back to the file's edge
+        else if (h == 2) proc.setSelection(proc.selStart(), src->length());
+        else if (waveZone().contains(e.position)) { v0 = 0; v1 = src->length(); }   // elsewhere: whole file
+        repaint();
+    }
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
+    {
+        auto src = proc.getSource();
+        if (!src || !display.contains(e.getPosition())) return;
+        fixView(*src);
+        const double span = (double) (v1 - v0), n = (double) src->length();
+        if (e.mods.isShiftDown() || std::abs(w.deltaX) > std::abs(w.deltaY))     // shift + wheel: move along
+        {
+            const double d = -(std::abs(w.deltaX) > std::abs(w.deltaY) ? w.deltaX : w.deltaY) * span * 0.25;
+            const double a = juce::jlimit(0.0, n - span, (double) v0 + d);
+            v0 = (juce::int64) a; v1 = (juce::int64) (a + span);
+        }
+        else                                                                     // wheel: zoom where the mouse is
+        {
+            const double at = (double) sampleAt(e.position.x);
+            const double ns = juce::jlimit(std::min(n, 0.05 * src->sr), n, span * std::pow(0.8, w.deltaY * 4.0));
+            const double f = (at - (double) v0) / span;
+            const double a = juce::jlimit(0.0, n - ns, at - f * ns);
+            v0 = (juce::int64) a; v1 = (juce::int64) (a + ns);
+        }
+        repaint();
     }
 
     void timerCallback() override
     {
-        if (proc.getResultVersion() != shownVersion) { shownVersion = proc.getResultVersion(); refreshWave(); shape.invalidate(); repaint(); }
+        if (proc.getResultVersion() != shownVersion) { shownVersion = proc.getResultVersion(); shape.invalidate(); repaint(); }
         const bool tight = *proc.apvts.getRawParameterValue("tight") > 0.5f;
         modeBtn[0].setToggleState(!tight, juce::dontSendNotification); modeBtn[1].setToggleState(tight, juce::dontSendNotification);
         const int src = proc.padSource(selected);
@@ -784,12 +823,20 @@ public:
         for (size_t i = 0; i < 8; ++i) { levels[i] = std::max(proc.padLevel[i].exchange(0.f) > 0.f ? 1.f : 0.f, levels[i] * 0.85f); lit |= levels[i] > 0.01f; }
         auto res = proc.getResult();
         const bool hasPad = res && res->pads[(size_t) selected].valid;
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &dragMidi, &exportBtn, &modeBtn[0], &modeBtn[1], &reBtn }) c->setEnabled(res != nullptr);
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &dragMidi, &exportBtn, &modeBtn[0], &modeBtn[1] }) c->setEnabled(res != nullptr);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &srcBtn[0], &srcBtn[1], &dragWav }) c->setEnabled(hasPad);
         const bool hasC = hasPad && res->pads[(size_t) selected].user.getNumSamples() > 0;
         srcBtn[2].setEnabled(hasC);
         srcBtn[2].setTooltip(hasC ? "Your sample: " + res->pads[(size_t) selected].userName
                                   : juce::String("A sample of yours: drop a file on the pad (or right-click the pad > LOAD YOUR SAMPLE)"));
+        {
+            const bool hasSrc = proc.getSource() != nullptr, done = proc.selectionAnalysed();
+            reBtn.setEnabled(hasSrc && !proc.isBusy());
+            reBtn.setButtonText(done ? "RE-ANALYSE" : "ANALYSE");
+            reBtn.setToggleState(hasSrc && !done && !proc.isBusy(), juce::dontSendNotification);   // lit = waiting for you
+            if (proc.isSourcePlaying() || wasPlaying) repaint(display);
+            wasPlaying = proc.isSourcePlaying();
+        }
         const bool toasting = juce::Time::getMillisecondCounter() < toastUntil;
         if (lit || proc.isBusy() || wasBusy || toasting || wasToasting) repaint();
         wasToasting = toasting;
@@ -807,7 +854,6 @@ public:
             g.fillAll();
         }
         auto res = proc.getResult();
-        if (res && peaks.empty()) refreshWave();
         drawHeader(g, res);
         for (auto r : { display, padsPanel, editPanel, rightPanel, soundPanel }) drawPanel(g, r);
         drawDisplay(g, res);
@@ -826,7 +872,7 @@ private:
     void setSource(int pad, int src)
     {
         proc.setPadSource(pad, src);
-        proc.previewPad[(size_t) pad] = 1; shape.invalidate(); repaint();
+        proc.audition(pad); shape.invalidate(); repaint();
     }
 
     void drawPanel(juce::Graphics& g, juce::Rectangle<int> r)
@@ -846,7 +892,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.5";
+            const juce::String ver = "v1.6";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -865,6 +911,107 @@ private:
         g.drawText(has ? juce::String(juce::roundToInt(100.0 * m)) + "%" : juce::String("--"), pill.withTrimmedRight(16).toNearestInt(), juce::Justification::centredRight);
     }
 
+    // ---------------------------------------------------------------- top display: the loaded file
+    // player (cursor), selection START / END (snap to the attacks), wheel = zoom, shift + wheel = move
+    float wx0() const { return (float) display.getX() + 19.f; }
+    float ww() const { return (float) display.getWidth() - 38.f; }
+    juce::Rectangle<int> playRect() const { return { (int) wx0(), display.getY() + 11, 26, 22 }; }
+    juce::Rectangle<int> snapRect() const { return { (int) wx0() + 32, display.getY() + 11, 64, 22 }; }
+    juce::Rectangle<float> waveZone() const { return { wx0() - 6.f, (float) display.getY() + 36.f, ww() + 12.f, 80.f }; }
+    float waveMid() const { return (float) display.getY() + 68.f; }
+    static constexpr float waveH = 30.f;
+    void fixView(const ds::Source& s)
+    {
+        if (s.id != viewId || v1 <= v0 || v1 > s.length()) { v0 = 0; v1 = s.length(); viewId = s.id; }
+    }
+    float xOf(juce::int64 smp) const { return wx0() + (float) ((double) (smp - v0) / (double) std::max<juce::int64>(1, v1 - v0)) * ww(); }
+    juce::int64 sampleAt(float x) const { return v0 + (juce::int64) std::llround((double) (x - wx0()) / ww() * (double) (v1 - v0)); }
+    int handleAt(float x, float y) const
+    {
+        auto src = proc.getSource();
+        if (!src || !waveZone().contains(x, y)) return 0;
+        const float xs = xOf(proc.selStart()), xe = xOf(proc.selEnd());
+        const float ds_ = std::abs(x - xs), de = std::abs(x - xe);
+        if (std::min(ds_, de) > 7.f) return 0;
+        return ds_ <= de ? 1 : 2;
+    }
+    // the strongest attack near the mouse (10 px), else the nearest one (40 px), else where the mouse is
+    juce::int64 snapped(const ds::Source& s, juce::int64 pos) const
+    {
+        const double spp = (double) (v1 - v0) / ww();
+        const juce::int64 near = (juce::int64) (10 * spp), far = (juce::int64) (40 * spp);
+        const auto& on = s.onsets;
+        auto it = std::lower_bound(on.begin(), on.end(), pos - far, [](const ds::Onset& o, juce::int64 p) { return o.pos < p; });
+        float top = 0; std::vector<ds::Onset> cand;
+        juce::int64 nearest = -1, nd = far + 1;
+        for (; it != on.end() && it->pos <= pos + far; ++it)
+        {
+            const juce::int64 d = std::abs(it->pos - pos);
+            if (d < nd) { nd = d; nearest = it->pos; }
+            if (d <= near) { cand.push_back(*it); top = std::max(top, it->strength); }
+        }
+        for (juce::int64 edge : { (juce::int64) 0, s.length() })                // the file's own start and end
+            if (std::abs(edge - pos) <= near) { cand.push_back({ edge, 1.f }); top = 1.f; }
+        if (!cand.empty())
+        {
+            juce::int64 best = cand.front().pos, bd = std::numeric_limits<juce::int64>::max();
+            for (auto& c : cand) if (c.strength >= 0.7f * top && std::abs(c.pos - pos) < bd) { bd = std::abs(c.pos - pos); best = c.pos; }
+            return best;
+        }
+        return nearest >= 0 ? nearest : pos;
+    }
+    void displayDown(const juce::MouseEvent& e)
+    {
+        auto src = proc.getSource();
+        if (!src) { if (!proc.isBusy()) loadBtn.triggerClick(); return; }
+        if (proc.isBusy() || e.mods.isPopupMenu()) return;
+        fixView(*src);
+        if (playRect().contains(e.getPosition())) { proc.playSource(!proc.isSourcePlaying()); repaint(); return; }
+        if (snapRect().contains(e.getPosition())) { proc.snap = !proc.snap.load(); repaint(); return; }
+        if (!waveZone().contains(e.position)) return;
+        dragWhat = handleAt(e.position.x, e.position.y);
+        if (dragWhat == 0)
+        {   // click on the wave: play from there (inside the selection)
+            const auto p = juce::jlimit(proc.selStart(), std::max(proc.selStart(), proc.selEnd() - 1), sampleAt(e.position.x));
+            proc.seekSource(p);
+            proc.playSource(true);
+            repaint();
+        }
+    }
+    void displayDrag(const juce::MouseEvent& e)
+    {
+        if (dragWhat == 0) return;
+        auto src = proc.getSource(); if (!src) return;
+        auto p = juce::jlimit<juce::int64>(0, src->length(), sampleAt(e.position.x));
+        if (proc.snap.load() != e.mods.isAltDown()) p = snapped(*src, p);              // ALT: the other way round
+        if (dragWhat == 1) proc.setSelection(std::min(p, proc.selEnd() - 1), proc.selEnd());
+        else proc.setSelection(proc.selStart(), std::max(p, proc.selStart() + 1));
+        repaint(display);
+    }
+    static juce::String clock(double sec)
+    {
+        const int m = (int) (sec / 60.0);
+        return juce::String(m) + ":" + juce::String(sec - 60.0 * m, 2).paddedLeft('0', 5);
+    }
+    void computePeaks(const ds::Source& s)
+    {
+        if (s.id == peaksId && v0 == pk0 && v1 == pk1) return;
+        peaksId = s.id; pk0 = v0; pk1 = v1;
+        peaks.clear();
+        const int w = (int) ww(), n = (int) s.length();
+        if (w <= 0 || n <= 0) return;
+        if (s.id != gmaxId) { gmax = 1e-6f; for (int c = 0; c < s.audio.getNumChannels(); ++c) gmax = std::max(gmax, s.audio.getMagnitude(c, 0, n)); gmaxId = s.id; }
+        const float* L = s.audio.getReadPointer(0); const float* R = s.audio.getReadPointer(s.audio.getNumChannels() > 1 ? 1 : 0);
+        for (int x = 0; x < w; ++x)
+        {
+            const juce::int64 a = juce::jlimit<juce::int64>(0, n - 1, v0 + (v1 - v0) * x / w), b = juce::jlimit<juce::int64>(a + 1, n, v0 + (v1 - v0) * (x + 1) / w);
+            const juce::int64 step = std::max<juce::int64>(1, (b - a) / 64);
+            float mn = 0.f, mxv = 0.f;
+            for (juce::int64 i = a; i < b; i += step) { const float v = 0.5f * (L[i] + R[i]) / gmax; mn = std::min(mn, v); mxv = std::max(mxv, v); }
+            peaks.push_back({ mn, mxv });
+        }
+    }
+
     void drawDisplay(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
     {
         auto d = display.toFloat().reduced(1.f);
@@ -872,16 +1019,18 @@ private:
         if (hover) { g.setColour(ui::amber.withAlpha(0.8f)); g.drawRoundedRectangle(d.reduced(4.f), 10.f, 1.5f); }
         if (proc.isBusy())
         {
+            const bool loading = proc.getStatus().startsWith("LOADING") || proc.getStatus().startsWith("OPENING");
             const auto bar = juce::Rectangle<float>(d.getX() + 120, d.getCentreY() + 8, d.getWidth() - 240, 6);
             g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(bar, 3.f);
-            g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * juce::jlimit(0.f, 1.f, proc.getProgress())), 3.f);
+            g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * (loading ? 0.5f : juce::jlimit(0.f, 1.f, proc.getProgress()))), 3.f);
             g.setFont(ui::font(13.f, true, 0.3f));
-            g.drawText("LEARNING THE SOUNDS   " + juce::String(juce::roundToInt(100.f * proc.getProgress())) + "%", d.withTrimmedBottom(40).toNearestInt(), juce::Justification::centred);
+            g.drawText(loading ? juce::String("LOADING") : "LEARNING THE SOUNDS   " + juce::String(juce::roundToInt(100.f * proc.getProgress())) + "%", d.withTrimmedBottom(40).toNearestInt(), juce::Justification::centred);
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, false, 0.05f));
             g.drawText(proc.getStatus(), d.withTrimmedTop(84).reduced(24, 0).toNearestInt(), juce::Justification::centred);
             return;
         }
-        if (!res)
+        auto src = proc.getSource();
+        if (!src)
         {
             const auto st = proc.getStatus();
             g.setColour(ui::amber.withAlpha(0.9f)); g.setFont(ui::font(14.f, true, 0.3f));
@@ -890,25 +1039,100 @@ private:
             g.drawText("DRAG A FILE FROM THE POOL / MEDIABAY / EXPLORER  -  OR CLICK TO BROWSE", d.withTrimmedTop(36).toNearestInt(), juce::Justification::centred);
             return;
         }
-        const float x0 = d.getX() + 18, w = d.getWidth() - 36, mid = d.getY() + 58, hh = 38.f;
-        juce::Path wav; wav.startNewSubPath(x0, mid);
-        for (int x = 0; x < (int) peaks.size(); ++x) wav.lineTo(x0 + (float) x, mid - peaks[(size_t) x].second * hh);
-        for (int x = (int) peaks.size() - 1; x >= 0; --x) wav.lineTo(x0 + (float) x, mid - peaks[(size_t) x].first * hh);
-        wav.closeSubPath();
-        g.setColour(ui::amber.withAlpha(0.18f)); g.strokePath(wav, juce::PathStrokeType(3.f));
-        g.setColour(ui::amber); g.fillPath(wav);
-        const int n = res->loop.getNumSamples();
-        for (auto& h : res->hits)
+        fixView(*src);
+        computePeaks(*src);
+        const juce::int64 sa = proc.selStart(), sb = proc.selEnd();
+        const float x0 = wx0(), w = ww(), mid = waveMid(), hh = waveH;
+        const float xs = juce::jlimit(x0, x0 + w, xOf(sa)), xe = juce::jlimit(x0, x0 + w, xOf(sb));
+
+        // play / stop
         {
-            const float x = x0 + (float) (h.time / n) * w;
-            const auto c = ui::padColour(res->pads[(size_t) h.pad].name);
-            g.setColour(c.withAlpha(h.pad == selected ? 1.f : 0.55f));
-            g.fillRoundedRectangle(x - 1.f, mid + hh + 6.f, 2.f, h.pad == selected ? 10.f : 7.f, 1.f);
+            const auto pr = playRect().toFloat();
+            const bool on = proc.isSourcePlaying();
+            g.setColour(on ? ui::amber : ui::text.withAlpha(0.85f));
+            g.drawRoundedRectangle(pr.reduced(0.5f), 5.f, 1.f);
+            if (on) g.fillRect(pr.withSizeKeepingCentre(8.f, 8.f));
+            else { juce::Path t; const auto c = pr.getCentre(); t.addTriangle(c.x - 3.5f, c.y - 5.f, c.x - 3.5f, c.y + 5.f, c.x + 5.f, c.y); g.fillPath(t); }
         }
-        const double secs = n / res->sr, bars = std::max(1.0, std::round(secs * res->bpm / 240.0));
-        const double hb = proc.getHostBpm();
-        juce::String info = "LOOP  " + juce::String((int) bars) + " BARS   |   " + juce::String(res->bpm, 2) + " BPM   |   " + juce::String(res->sr / 1000.0, 1)
-                          + " kHz   |   " + juce::String((int) res->hits.size()) + " HITS   |   MIDI @ " + (hb > 0 ? "HOST " + juce::String(hb, 2) : juce::String(proc.midiBpm(), 2) + " BPM");
+        // snap: hollow circle = off, filled = on
+        {
+            const auto sr = snapRect().toFloat();
+            const bool on = proc.snap.load();
+            const auto c = juce::Rectangle<float>(sr.getX() + 4.f, sr.getCentreY() - 5.5f, 11.f, 11.f);
+            g.setColour(on ? ui::amber : ui::dim);
+            g.drawEllipse(c, 1.4f);
+            if (on) g.fillEllipse(c.reduced(2.6f));
+            g.setFont(ui::font(9.5f, true, 0.25f));
+            g.drawText("SNAP", sr.withTrimmedLeft(21).toNearestInt(), juce::Justification::centredLeft);
+        }
+        // selection text
+        {
+            const double secs = (double) (sb - sa) / src->sr;
+            juce::String t = "SELECTION   " + clock((double) sa / src->sr) + "  -  " + clock((double) sb / src->sr) + "    " + juce::String(secs, 2) + " s";
+            if (res && res->sourceId == src->id && res->bpm > 0) t << "   ~" << juce::String(secs * res->bpm / 240.0, 2) << " BARS @ " << juce::String(res->bpm, 1);
+            if (v0 > 0 || v1 < src->length()) t << "    ZOOM";
+            g.setColour(ui::dim.brighter(0.25f)); g.setFont(ui::font(9.5f, true, 0.18f));
+            g.drawText(t, juce::Rectangle<float>(x0 + 106.f, (float) display.getY() + 11.f, 560.f, 22.f).toNearestInt(), juce::Justification::centredLeft);
+        }
+        // wave: bright inside the selection, dim outside
+        {
+            juce::Path wav; wav.startNewSubPath(x0, mid);
+            for (int x = 0; x < (int) peaks.size(); ++x) wav.lineTo(x0 + (float) x, mid - peaks[(size_t) x].second * hh);
+            for (int x = (int) peaks.size() - 1; x >= 0; --x) wav.lineTo(x0 + (float) x, mid - peaks[(size_t) x].first * hh);
+            wav.closeSubPath();
+            g.setColour(ui::faint.brighter(0.15f)); g.fillPath(wav);
+            {
+                juce::Graphics::ScopedSaveState ss(g);
+                g.reduceClipRegion(juce::Rectangle<float>(xs, mid - hh - 4.f, std::max(0.f, xe - xs), 2.f * hh + 8.f).toNearestInt());
+                g.setColour(ui::amber.withAlpha(0.18f)); g.strokePath(wav, juce::PathStrokeType(3.f));
+                g.setColour(ui::amber); g.fillPath(wav);
+            }
+        }
+        // hits of the analysed part
+        const juce::int64 n = src->length();
+        if (res && res->sourceId == src->id)
+            for (auto& h : res->hits)
+            {
+                const juce::int64 t = (juce::int64) h.time + res->regionStart;
+                if (t < v0 || t > v1) continue;
+                const float x = xOf(t);
+                const auto c = ui::padColour(res->pads[(size_t) h.pad].name);
+                g.setColour(c.withAlpha(h.pad == selected ? 1.f : 0.55f));
+                g.fillRoundedRectangle(x - 1.f, mid + hh + 5.f, 2.f, h.pad == selected ? 10.f : 7.f, 1.f);
+            }
+        // START / END handles (flags like the sound editor)
+        for (int k = 0; k < 2; ++k)
+        {
+            const juce::int64 at = k == 0 ? sa : sb;
+            if (at < v0 || at > v1) continue;
+            const float x = xOf(at);
+            g.setColour(ui::text);
+            g.fillRect(x - 0.75f, mid - hh - 2.f, 1.5f, 2.f * hh + 4.f);
+            juce::Path f;
+            const float fy = mid - hh - 2.f;
+            if (k == 0) f.addTriangle(x, fy, x + 9.f, fy + 5.f, x, fy + 10.f);
+            else        f.addTriangle(x, fy, x - 9.f, fy + 5.f, x, fy + 10.f);
+            g.fillPath(f);
+        }
+        // the cursor
+        {
+            const double p = proc.sourcePos();
+            if (p >= (double) v0 && p <= (double) v1 && (proc.isSourcePlaying() || (p > (double) sa && p < (double) sb)))
+            {
+                const float x = xOf((juce::int64) p);
+                g.setColour(juce::Colours::white.withAlpha(proc.isSourcePlaying() ? 0.9f : 0.4f));
+                g.fillRect(x - 0.5f, mid - hh - 4.f, 1.f, 2.f * hh + 8.f);
+            }
+        }
+        juce::String info;
+        if (res && res->sourceId == src->id)
+        {
+            const double hb = proc.getHostBpm();
+            info = juce::String(res->bpm, 2) + " BPM   |   " + juce::String(res->sr / 1000.0, 1) + " kHz   |   " + juce::String((int) res->hits.size())
+                 + " HITS   |   MIDI @ " + (hb > 0 ? "HOST " + juce::String(hb, 2) : juce::String(proc.midiBpm(), 2) + " BPM");
+            if (!proc.selectionAnalysed()) info << "   |   SELECTION CHANGED: PRESS ANALYSE";
+        }
+        else info = "FILE  " + clock((double) n / src->sr) + "   |   " + juce::String(src->sr / 1000.0, 1) + " kHz   |   SELECT THE PART (DRAG THE FLAGS), THEN ANALYSE";
         g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(9.f, true, 0.2f));
         g.drawText(info, juce::Rectangle<float>(x0, d.getBottom() - 22, w, 12).toNearestInt(), juce::Justification::centredLeft);
         g.drawText(proc.displayName(), juce::Rectangle<float>(x0, d.getBottom() - 22, w, 12).toNearestInt(), juce::Justification::centredRight);
@@ -1008,23 +1232,6 @@ private:
         shape.pad = selected; shape.invalidate();
     }
 
-    void refreshWave()
-    {
-        peaks.clear();
-        auto r = proc.getResult();
-        if (!r) return;
-        const int w = display.getWidth() - 38, n = r->loop.getNumSamples();
-        float mx = 1e-6f; for (int c = 0; c < 2; ++c) mx = std::max(mx, r->loop.getMagnitude(c, 0, n));
-        const float* L = r->loop.getReadPointer(0); const float* R = r->loop.getReadPointer(1);
-        for (int x = 0; x < w; ++x)
-        {
-            const int a = (int) ((juce::int64) x * n / w), b = (int) ((juce::int64) (x + 1) * n / w), step = std::max(1, (b - a) / 64);
-            float mn = 0.f, mxv = 0.f;
-            for (int s = a; s < b; s += step) { const float v = 0.5f * (L[s] + R[s]) / mx; mn = std::min(mn, v); mxv = std::max(mxv, v); }
-            peaks.push_back({ mn, mxv });
-        }
-    }
-
     DrumSlicerProcessor& proc;
     ui::Skin skin;
     ui::Look look;
@@ -1033,6 +1240,11 @@ private:
     int hoverPad = -1;
     std::array<float, 8> levels {};
     std::vector<std::pair<float, float>> peaks;
+    juce::int64 v0 = 0, v1 = 0, pk0 = -1, pk1 = -1;   // the part of the file in view (samples)
+    juce::uint64 viewId = 0, peaksId = 0, gmaxId = 0;
+    float gmax = 1.f;
+    int dragWhat = 0;                                // 1 = START, 2 = END
+    bool wasPlaying = false;
 
     std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch;
     juce::Slider master, sens, grid, bpm;

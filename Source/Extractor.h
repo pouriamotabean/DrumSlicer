@@ -42,6 +42,8 @@ struct Result
     double nullMatch = 0, hearing[5] {};
     std::array<int, 128> noteToPad {};
     bool fromCache = false;
+    juce::int64 regionStart = 0;             // where "loop" starts in the source file (a selection of it was analysed)
+    juce::uint64 sourceId = 0;               // which loaded source (see Source) it came from
 
     void buildNoteMap()
     {
@@ -81,6 +83,72 @@ inline bool loadAudio(const juce::File& file, juce::AudioBuffer<float>& out, dou
     return true;
 }
 
+// ---------------------------------------------------------------- the loaded file, before analysis
+// Attacks for the selection handles to snap to: the first sample of each hit (just after the last zero
+// crossing before it), with a strength (peak right after it, 0..1 of the file's peak).
+struct Onset { juce::int64 pos = 0; float strength = 0; };
+inline std::vector<Onset> findOnsets(const juce::AudioBuffer<float>& a, double sr)
+{
+    std::vector<Onset> out;
+    const int n = a.getNumSamples();
+    if (n < 2048 || sr <= 0) return out;
+    const float* L = a.getReadPointer(0); const float* R = a.getReadPointer(a.getNumChannels() > 1 ? 1 : 0);
+    auto m = [&](juce::int64 i) { return 0.5f * (L[i] + R[i]); };
+    const int H = 64, K = n / H;
+    std::vector<float> e((size_t) K), d((size_t) K);         // peak envelope of the signal and of its slope (highs)
+    float prev = 0, gmax = 1e-9f, dmax = 1e-9f;
+    for (int k = 0; k < K; ++k)
+    {
+        float ek = 0, dk = 0;
+        for (int i = k * H; i < (k + 1) * H; ++i) { const float v = m(i); ek = std::max(ek, std::abs(v)); dk = std::max(dk, std::abs(v - prev)); prev = v; }
+        e[(size_t) k] = ek; d[(size_t) k] = dk; gmax = std::max(gmax, ek); dmax = std::max(dmax, dk);
+    }
+    const int W = std::max(2, (int) (0.016 * sr / H)), gap = std::max(1, (int) (0.035 * sr / H)), tail = std::max(1, (int) (0.03 * sr / H));
+    const float fe = gmax * 0.015f, fd = dmax * 0.02f;
+    int last = -gap - 1;
+    for (int k = W; k < K; ++k)
+    {
+        if (k - last <= gap) continue;
+        float pe = 0, pd = 0;
+        for (int j = k - W; j < k; ++j) { pe = std::max(pe, e[(size_t) j]); pd = std::max(pd, d[(size_t) j]); }
+        const float re = e[(size_t) k] > fe ? e[(size_t) k] / (pe + 0.25f * fe) : 0.f;
+        const float rd = d[(size_t) k] > fd ? d[(size_t) k] / (pd + 0.25f * fd) : 0.f;
+        if (std::max(re, rd) < 2.0f) continue;
+        last = k;
+        // the exact first sample: above the noise just before and 8% of the attack's peak, then back to the zero crossing
+        const juce::int64 s0 = (juce::int64) k * H;
+        const juce::int64 lo = std::max<juce::int64>(1, s0 - H), hi = std::min<juce::int64>(n - 1, s0 + H);
+        float peak = 0; for (juce::int64 i = s0; i < std::min<juce::int64>(n, s0 + (juce::int64) (0.005 * sr)); ++i) peak = std::max(peak, std::abs(m(i)));
+        float noise = 0; for (juce::int64 i = std::max<juce::int64>(0, lo - (juce::int64) (0.01 * sr)); i < lo; ++i) noise = std::max(noise, std::abs(m(i)));
+        const float thr = std::max(noise * 1.5f, peak * 0.08f);
+        juce::int64 at = s0;
+        for (juce::int64 i = lo; i < hi; ++i) if (std::abs(m(i)) > thr) { at = i; break; }
+        const juce::int64 back = std::max<juce::int64>(1, at - (juce::int64) (0.001 * sr));
+        for (juce::int64 i = at; i > back; --i) if ((m(i) >= 0) != (m(i - 1) >= 0)) { at = i; break; }
+        float st = 0; for (int j = k; j < std::min(K, k + tail); ++j) st = std::max(st, e[(size_t) j]);
+        out.push_back({ at, st / gmax });
+    }
+    return out;
+}
+
+struct Source
+{
+    juce::AudioBuffer<float> audio;          // the whole file (up to 5 minutes)
+    double sr = 44100;
+    juce::File file;                         // {} = only the sound (a kit's loop, a project whose file is gone)
+    std::vector<Onset> onsets;
+    juce::uint64 id = 0;
+    juce::int64 length() const { return audio.getNumSamples(); }
+};
+inline std::shared_ptr<Source> makeSource(juce::AudioBuffer<float> audio, double sr, const juce::File& f)
+{
+    static std::atomic<juce::uint64> counter { 0 };
+    auto s = std::make_shared<Source>();
+    s->audio = std::move(audio); s->sr = sr; s->file = f; s->id = ++counter;
+    s->onsets = findOnsets(s->audio, sr);
+    return s;
+}
+
 // ---------------------------------------------------------------- folders
 // Documents/ReKit  (the folder of the old name "DrumSlicer" is moved once, so caches and kits stay)
 inline juce::File root()
@@ -111,12 +179,12 @@ inline juce::String sourceKey(const juce::File& loop)
 {
     return juce::String(loop.getSize()) + "|" + juce::String(loop.getLastModificationTime().toMilliseconds());
 }
-inline bool keyMatches(const juce::String& line, const juce::File& loop)
+inline bool keyMatches(const juce::String& line, const juce::File& loop, const juce::String& region = {})
 {
     if (!line.startsWith("key=")) return false;
     auto k = line.fromFirstOccurrenceOf("=", false, false);
     if (k.startsWith("drumpeel-")) k = k.fromFirstOccurrenceOf("|", false, false);     // older files carried the version here
-    return k == sourceKey(loop);
+    return k == sourceKey(loop) + region;
 }
 
 // written to a temporary file first: an existing file is only replaced by a complete new one
@@ -207,7 +275,7 @@ inline bool parseInfo(const juce::StringArray& lines, Result& r, const std::func
 
 // one-shots, rebuild and analysis next to each other in Documents/ReKit/<loop>_<id>/  (also the cache).
 // The analysis text is written last, and only when every sound was written.
-inline bool saveCache(const juce::File& loop, const Result& r)
+inline bool saveCache(const juce::File& loop, const Result& r, const juce::String& region = {})
 {
     auto dir = cacheDir(loop);
     if (!dir.createDirectory()) return false;
@@ -221,7 +289,7 @@ inline bool saveCache(const juce::File& loop, const Result& r)
     }
     if (!ok) { cacheInfoIn(dir, loop).deleteFile(); return false; }
     auto lines = infoLines(r);
-    lines.insert(0, "key=" + sourceKey(loop));
+    lines.insert(0, "key=" + sourceKey(loop) + region);
     lines.insert(1, "engine=" + juce::String(kEngineVersion));
     if (!writeText(cacheInfoIn(dir, loop), lines.joinIntoString("\n"))) return false;
     juce::AudioBuffer<float> y; renderRebuild(r, y);
@@ -229,22 +297,22 @@ inline bool saveCache(const juce::File& loop, const Result& r)
     return true;
 }
 
-inline std::shared_ptr<Result> loadCacheFrom(const juce::File& dir, const juce::File& loop, const juce::AudioBuffer<float>& audio, double sr)
+inline std::shared_ptr<Result> loadCacheFrom(const juce::File& dir, const juce::File& loop, const juce::AudioBuffer<float>& audio, double sr, const juce::String& region = {})
 {
     auto info = cacheInfoIn(dir, loop);
     if (!info.existsAsFile()) return nullptr;
     juce::StringArray lines; lines.addLines(info.loadFileAsString());
-    if (lines.isEmpty() || !keyMatches(lines[0], loop)) return nullptr;
+    if (lines.isEmpty() || !keyMatches(lines[0], loop, region)) return nullptr;
     auto r = std::make_shared<Result>();
     r->loop = audio; r->sr = sr; r->fromCache = true;
     if (!parseInfo(lines, *r, [&](const juce::String& n, bool b) { return shotFileIn(dir, loop, n, b); })) return nullptr;
     r->buildNoteMap();
     return r;
 }
-inline std::shared_ptr<Result> loadCache(const juce::File& loop, const juce::AudioBuffer<float>& audio, double sr)
+inline std::shared_ptr<Result> loadCache(const juce::File& loop, const juce::AudioBuffer<float>& audio, double sr, const juce::String& region = {})
 {
-    if (auto r = loadCacheFrom(cacheDir(loop), loop, audio, sr)) return r;
-    return loadCacheFrom(legacyCacheDir(loop), loop, audio, sr);     // analysed by an older version
+    if (auto r = loadCacheFrom(cacheDir(loop), loop, audio, sr, region)) return r;
+    return loadCacheFrom(legacyCacheDir(loop), loop, audio, sr, region);     // analysed by an older version
 }
 
 // a one-shot of yours for pad "C": up to 4 s, at the kit's sample rate, as loud as the pad's own sound (A) in its
@@ -270,10 +338,16 @@ inline bool loadUserShot(const juce::File& f, const Pad& pad, double kitSr, juce
         for (int c = 0; c < 2; ++c) { juce::LagrangeInterpolator li; li.process(ratio, a.getReadPointer(c), b.getWritePointer(c), n2); }
         a = std::move(b);
     }
-    auto e100 = [&](const juce::AudioBuffer<float>& b) { double e = 0; const int n = std::min(b.getNumSamples(), (int) (0.1 * kitSr));
-        for (int c = 0; c < b.getNumChannels(); ++c) for (int i = 0; i < n; ++i) e += (double) b.getSample(c, i) * b.getSample(c, i); return e; };
-    const double ea = e100(pad.audio), eu = e100(a);
-    if (eu > 0 && ea > 0) a.applyGain((float) std::sqrt(ea / eu));
+    // match the pad's peak, but never move the sample more than 12 dB: a kick dropped on a quiet hat pad
+    // must stay audible (an energy match used to pull it down by ~40 dB)
+    const float pa = pad.audio.getNumSamples() > 0 ? pad.audio.getMagnitude(0, pad.audio.getNumSamples()) : 0.0f;
+    const float pu = a.getMagnitude(0, a.getNumSamples());
+    if (pu <= 1.0e-6f) return false;
+    {
+        const float target = pa > 1.0e-4f ? pa : 0.7f;
+        const float g = juce::jlimit(0.25f, 4.0f, target / pu);
+        a.applyGain(g);
+    }
     const float pk = a.getMagnitude(0, a.getNumSamples());
     if (pk > 0.99f) a.applyGain(0.99f / pk);
     out = std::move(a);
@@ -397,6 +471,7 @@ inline juce::ValueTree embedResult(const Result& r)
     juce::ValueTree e("EMBED");
     e.setProperty("sr", r.sr, nullptr); e.setProperty("bpm", r.bpm, nullptr); e.setProperty("len", r.loop.getNumSamples(), nullptr);
     e.setProperty("null", r.nullMatch, nullptr);
+    e.setProperty("rs", r.regionStart, nullptr);
     juce::String hs; for (double h : r.hearing) hs << juce::String(h, 6) << " "; e.setProperty("hearing", hs.trim(), nullptr);
     juce::FlacAudioFormat flac;
     auto enc = [&](const juce::AudioBuffer<float>& b) -> juce::String {
@@ -429,6 +504,7 @@ inline std::shared_ptr<Result> unembedResult(const juce::ValueTree& e)
     if (!e.isValid() || !e.hasType("EMBED")) return nullptr;
     auto r = std::make_shared<Result>();
     r->sr = (double) e.getProperty("sr", 44100.0); r->bpm = (double) e.getProperty("bpm", 120.0); r->nullMatch = (double) e.getProperty("null", 0.0);
+    r->regionStart = (juce::int64) e.getProperty("rs", 0);
     { juce::StringArray t; t.addTokens(e.getProperty("hearing").toString(), " ", ""); for (int i = 0; i < 5 && i < t.size(); ++i) r->hearing[i] = t[i].getDoubleValue(); }
     juce::FlacAudioFormat flac;
     auto dec = [&](const juce::String& b64, juce::AudioBuffer<float>& out) {
@@ -461,14 +537,14 @@ inline std::shared_ptr<Result> unembedResult(const juce::ValueTree& e)
     return r;
 }
 
-// full analysis (or the cache when the same file was analysed before)
-inline std::shared_ptr<Result> analyse(const juce::File& file, float sensitivity,
-                                       const std::function<void(float, const juce::String&)>& progress,
-                                       const std::atomic<bool>* cancel)
+// analysis of a piece of audio (the whole file or the selected part of it); with a file: its cache first.
+// region = "" for the whole file, else "|r<start>-<end>" (part of the cache key)
+inline std::shared_ptr<Result> analyseBuffer(juce::AudioBuffer<float> audio, double sr, const juce::File& file, const juce::String& region,
+                                             float sensitivity, const std::function<void(float, const juce::String&)>& progress,
+                                             const std::atomic<bool>* cancel)
 {
-    juce::AudioBuffer<float> audio; double sr = 44100;
-    if (!loadAudio(file, audio, sr)) return nullptr;
-    if (auto c = loadCache(file, audio, sr)) return c;
+    if (audio.getNumSamples() < 4096) return nullptr;
+    if (file.existsAsFile()) if (auto c = loadCache(file, audio, sr, region)) return c;
 
     dp::Buf x(audio.getNumSamples());
     for (int c = 0; c < 2; ++c) { const float* p = audio.getReadPointer(c); for (int i = 0; i < x.n; ++i) x.c[c][(size_t) i] = p[i]; }
@@ -491,8 +567,18 @@ inline std::shared_ptr<Result> analyse(const juce::File& file, float sensitivity
     }
     for (const auto& n : out.notes) if (n.pad < kPads) r->hits.push_back({ n.time, n.pad, n.velocity });
     r->buildNoteMap();
-    saveCache(file, *r);
+    if (file.existsAsFile()) saveCache(file, *r, region);
     return r;
+}
+
+// full analysis of a file (or the cache when the same file was analysed before)
+inline std::shared_ptr<Result> analyse(const juce::File& file, float sensitivity,
+                                       const std::function<void(float, const juce::String&)>& progress,
+                                       const std::atomic<bool>* cancel)
+{
+    juce::AudioBuffer<float> audio; double sr = 44100;
+    if (!loadAudio(file, audio, sr)) return nullptr;
+    return analyseBuffer(std::move(audio), sr, file, {}, sensitivity, progress, cancel);
 }
 
 // MIDI file bytes. EXACT: the loop as played, at the host tempo (timing exact in seconds).

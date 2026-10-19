@@ -44,8 +44,21 @@ public:
     void setStateInformation(const void*, int) override;
 
     // --- used by the editor (message thread) ---
-    void startAnalysis(const juce::File& f, bool updateBpm, bool forceNew = false);   // runs on a background thread
-    void reanalyse() { const auto f = getLoopFile(); if (f.existsAsFile()) startAnalysis(f, false, true); }
+    // a file is loaded (shown, playable) but not analysed: you choose the part, then ANALYSE
+    void loadSource(const juce::File& f);            // runs on a background thread
+    std::shared_ptr<const ds::Source> getSource() const { juce::SpinLock::ScopedLockType l(lock); return source; }
+    juce::int64 selStart() const { return selS.load(); }
+    juce::int64 selEnd() const { return selE.load(); }
+    void setSelection(juce::int64 a, juce::int64 b);
+    bool selectionAnalysed() const;                  // the sounds come from exactly this selection
+    void analyseSelection(bool force);               // ANALYSE (the selection; cache when it was done before) / RE-ANALYSE (force)
+    void reanalyse() { analyseSelection(selectionAnalysed()); }
+    // the player of the loaded file: loops the selection
+    void playSource(bool on);
+    bool isSourcePlaying() const { return srcPlay.load(); }
+    double sourcePos() const { return srcPosShown.load(); }   // samples of the source
+    void seekSource(juce::int64 pos) { srcSeek = pos; }
+    std::atomic<bool> snap { true };                 // selection handles snap to the attacks
     bool isBusy() const { return busy.load(); }
     float getProgress() const { return progress.load(); }
     juce::String getStatus() const { juce::SpinLock::ScopedLockType l(statusLock); return status; }
@@ -61,6 +74,8 @@ public:
     ShapeParams shapeParams(int pad) const;
     juce::File exportFinal();                        // shaped, chosen one-shots + MIDI into <folder>/EXPORT
     int getResultVersion() const { return resultVersion.load(); }
+    // listen to one pad (click): the sound is rebuilt first, so you hear the new one, and it cuts the last click
+    void audition(int pad) { if (pad < 0 || pad >= ds::kPads) return; reshape(); previewPad[(size_t) pad] = 1; }
 
     // kits (presets): Documents/ReKit/Kits/<name>/
     juce::File saveKit(const juce::String& name);    // current sounds + settings + MIDI; returns the kit folder ({} on failure)
@@ -98,12 +113,16 @@ public:
 
 private:
     static BusesProperties makeBuses();
-    struct Voice { bool on = false; int pad = 0, wait = 0; double pos = 0, step = 1; float gain = 0; juce::uint64 age = 0; };
+    // a voice keeps the sound it started with: a sound rebuilt while it rings (A/B/C, a shape change) never jumps mid-hit.
+    // It is never the last owner (the retired list holds every replaced Shaped), so it never frees on the audio thread.
+    struct Voice { bool on = false; int pad = 0, wait = 0; double pos = 0, step = 1; float gain = 0; juce::uint64 age = 0;
+                   std::shared_ptr<Shaped> sh; bool audition = false; int fade = -1, fadeLen = 1; };
     void timerCallback() override;                   // rebuilds the shaped shots when a shape parameter changes
     std::array<ShapeParams, ds::kPads> lastShape {};
     int lastShapedVersion = -1;
     std::shared_ptr<Shaped> shaped, audioShaped;
-    void startVoice(int pad, float gain, int wait);
+    void startVoice(int pad, float gain, int wait, bool audition = false);
+    void reshape();                                  // rebuilds the shaped sounds now if anything changed
     void setStatus(const juce::String& s) { juce::SpinLock::ScopedLockType l(statusLock); status = s; }
     void setFiles(const juce::File& kit, const juce::File& loop, const juce::String& orphanName = {})
     { juce::SpinLock::ScopedLockType l(fileLock); kitDir = kit; loopFile = loop; orphanName_ = orphanName; }
@@ -111,6 +130,12 @@ private:
     // a new result (or none) becomes the current one. The old one is kept alive here and released later on the
     // message thread, so the audio thread never frees big buffers when it lets go of its copy.
     void publish(std::shared_ptr<ds::Result> r, const juce::File& kit, const juce::File& loop, const juce::String& orphanName = {});
+    void setSource(std::shared_ptr<ds::Source> s, juce::int64 a, juce::int64 b);
+    std::shared_ptr<const ds::Source> source, audioSource;
+    std::atomic<juce::int64> selS { 0 }, selE { 0 }, srcSeek { -1 };
+    std::atomic<bool> srcPlay { false };
+    std::atomic<double> srcPosShown { 0 };
+    double srcPos = 0;
     template <typename T> void retire(std::shared_ptr<T> p) { if (p) { std::lock_guard<std::mutex> g(retiredLock); retired.push_back(std::move(p)); } }
     void stopWorker();
     void restoreAsync(juce::ValueTree embedded, juce::File kit, juce::File loop);

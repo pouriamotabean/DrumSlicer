@@ -117,6 +117,11 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double s
 
 void DrumSlicerProcessor::timerCallback()
 {
+    reshape();
+}
+
+void DrumSlicerProcessor::reshape()
+{
     {   // results / shaped sounds nobody else uses any more are freed here, never on the audio thread
         std::lock_guard<std::mutex> g(retiredLock);
         retired.erase(std::remove_if(retired.begin(), retired.end(), [](const std::shared_ptr<const void>& p) { return p.use_count() <= 1; }), retired.end());
@@ -153,6 +158,17 @@ void DrumSlicerProcessor::stopWorker()
 
 void DrumSlicerProcessor::publish(std::shared_ptr<ds::Result> r, const juce::File& kit, const juce::File& loop, const juce::String& orphanName)
 {
+    if (r != nullptr)
+    {   // sounds that did not come from the loaded file (a kit, a project): their loop becomes the loaded file
+        auto s = getSource();
+        if (s == nullptr || r->sourceId != s->id || r->regionStart + r->loop.getNumSamples() > s->length())
+        {
+            juce::AudioBuffer<float> a; a.makeCopyOf(r->loop);
+            auto ns = ds::makeSource(std::move(a), r->sr, loop);
+            r->sourceId = ns->id; r->regionStart = 0;
+            setSource(ns, 0, ns->length());
+        }
+    }
     std::shared_ptr<ds::Result> old;
     { juce::SpinLock::ScopedLockType l(lock); old = result; result = std::move(r); }
     setFiles(kit, loop, orphanName);
@@ -175,16 +191,20 @@ bool DrumSlicerProcessor::isBusesLayoutSupported(const BusesLayout& l) const
 // ---------------------------------------------------------------- playback
 // Every hit rings out on its own voice (additive, like the loop itself), starts on a whole sample and
 // plays the one-shot unchanged at velocity 100. That is exactly the model the analysis fitted.
-void DrumSlicerProcessor::startVoice(int pad, float g, int wait)
+void DrumSlicerProcessor::startVoice(int pad, float g, int wait, bool audition)
 {
     if (pad < 0 || pad >= ds::kPads || !audioRes || !audioShaped || audioShaped->buf[(size_t) pad].getNumSamples() == 0) return;
     const double ratio = audioRes->sr / hostSR;
     const double step = ratio * std::pow(2.0, pPitch[(size_t) pad]->load() / 12.0);
     wait += (int) std::lround(audioShaped->offset[(size_t) pad] / step);    // a trimmed start keeps the hit on time
+    if (audition)                                     // a new click fades the last one out (5 ms) instead of stacking on it
+        for (auto& vv : voices)
+            if (vv.on && vv.audition && vv.fade < 0) { vv.fadeLen = std::max(1, (int) (0.005 * hostSR)); vv.fade = vv.fadeLen; }
     Voice* v = nullptr;
     for (auto& vv : voices) if (!vv.on) { v = &vv; break; }
     if (v == nullptr) { v = &voices[0]; for (auto& vv : voices) if (vv.age < v->age) v = &vv; }   // steal the oldest
-    *v = { true, pad, std::max(0, wait), 0.0, step, g, ++voiceAge };
+    v->on = true; v->pad = pad; v->wait = std::max(0, wait); v->pos = 0.0; v->step = step; v->gain = g; v->age = ++voiceAge;
+    v->sh = audioShaped; v->audition = audition; v->fade = -1; v->fadeLen = 1;
     padLevel[(size_t) pad] = g;
 }
 
@@ -198,12 +218,19 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
 {
     juce::ScopedNoDenormals nd;
     buf.clear();
+    bool fresh = false;
     {
         juce::SpinLock::ScopedTryLockType l(lock);
-        if (l.isLocked())
+        fresh = l.isLocked();
+        if (fresh)
         {
-            if (audioRes != result) { audioRes = result; for (auto& v : voices) v.on = false; }
+            if (audioRes != result)
+            {   // hits still ringing keep their own sound; they fade out quickly (no hard cut = no click)
+                audioRes = result;
+                for (auto& v : voices) if (v.on && v.fade < 0) { v.fadeLen = std::max(1, (int) (0.005 * hostSR)); v.fade = v.fadeLen; }
+            }
             audioShaped = shaped;
+            if (audioSource != source) { audioSource = source; srcPos = (double) selS.load(); }
             if (audioPreview != preview) { audioPreview = preview; audioPreviewSR = previewSR; previewPos = 0; }
         }
     }
@@ -228,6 +255,32 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
             previewPos += step;
         }
     }
+    if (audioSource && srcPlay.load())
+    {   // the loaded file: the selection, looped, from the cursor
+        const auto& sb = audioSource->audio;
+        const juce::int64 a = selS.load(), b = std::min<juce::int64>(selE.load(), sb.getNumSamples() - 1);
+        const juce::int64 sk = srcSeek.exchange(-1);
+        if (sk >= 0) srcPos = (double) sk;
+        if (srcPos < (double) a || srcPos >= (double) b) srcPos = (double) a;
+        const double step = audioSource->sr / hostSR; const float g = pMaster->load();
+        const int c1 = sb.getNumChannels() > 1 ? 1 : 0;
+        auto* oL = buf.getWritePointer(0); auto* oR = buf.getWritePointer(1);
+        const int fadeN = std::max(1, (int) (0.002 * audioSource->sr));
+        for (int i = 0; i < numSamples && b > a; ++i)
+        {
+            if (srcPos >= (double) b) srcPos = (double) a;
+            const int i0 = (int) srcPos; const float fr = (float) (srcPos - i0);
+            const int i1 = std::min(i0 + 1, sb.getNumSamples() - 1);
+            // 2 ms fades at the selection's edges: the loop point never clicks
+            const double fromA = srcPos - (double) a, toB = (double) b - srcPos;
+            const float edge = (float) std::min(1.0, std::min(fromA, toB) / fadeN);
+            oL[i] += g * edge * (sb.getSample(0, i0) + (sb.getSample(0, i1) - sb.getSample(0, i0)) * fr);
+            oR[i] += g * edge * (sb.getSample(c1, i0) + (sb.getSample(c1, i1) - sb.getSample(c1, i0)) * fr);
+            srcPos += step;
+        }
+        srcPosShown = srcPos;
+    }
+    else if (audioSource) { const juce::int64 sk = srcSeek.exchange(-1); if (sk >= 0) srcPos = (double) sk; srcPosShown = srcPos; }
     if (!audioRes || !audioShaped) { clock += numSamples; return; }
     const auto& res = *audioRes;
 
@@ -240,7 +293,7 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
         const float a = (pan + 1.f) * juce::MathConstants<float>::pi * 0.25f;
         pl[i] = 1.41421356f * std::cos(a);           // pan 0 -> 1.0 / 1.0 (unity)
         pr[i] = 1.41421356f * std::sin(a);
-        if (previewPad[(size_t) i].exchange(0)) startVoice(i, 1.f, 0);
+        if (fresh && previewPad[(size_t) i].exchange(0)) startVoice(i, 1.f, 0, true);   // (else: next block, with the new sound)
     }
     const double spt = 60.0 / midiBpm() / 480.0 * hostSR;   // samples per tick of the exported MIDI
 
@@ -248,8 +301,8 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
     {
         for (auto& v : voices)
         {
-            if (!v.on || s1 <= s0) continue;
-            const auto& sh = audioShaped->buf[(size_t) v.pad];
+            if (!v.on || s1 <= s0 || !v.sh) continue;
+            const auto& sh = v.sh->buf[(size_t) v.pad];
             const int len = sh.getNumSamples();
             auto* bus = getBus(false, v.pad + 1);
             auto out = (bus != nullptr && bus->isEnabled()) ? getBusBuffer(buf, false, v.pad + 1) : getBusBuffer(buf, false, 0);
@@ -276,8 +329,14 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
                     l = sL[i0] + (sL[i0 + 1] - sL[i0]) * fr;
                     r = sR[i0] + (sR[i0 + 1] - sR[i0]) * fr;
                 }
-                oL[i] += l * g * pl[v.pad];
-                oR[i] += r * g * pr[v.pad];
+                float gf = g;
+                if (v.fade >= 0)
+                {
+                    if (v.fade == 0) { v.on = false; break; }
+                    gf *= (float) v.fade / (float) v.fadeLen; --v.fade;
+                }
+                oL[i] += l * gf * pl[v.pad];
+                oR[i] += r * gf * pr[v.pad];
                 v.pos += v.step;
             }
         }
@@ -312,31 +371,93 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
 // ---------------------------------------------------------------- analysis (background thread)
 // All starts come from the message thread; a new job stops the running one first. A job that fails leaves
 // the current sounds (and their files) as they were and says so.
-void DrumSlicerProcessor::startAnalysis(const juce::File& f, bool updateBpm, bool forceNew)
+void DrumSlicerProcessor::setSource(std::shared_ptr<ds::Source> s, juce::int64 a, juce::int64 b)
+{
+    std::shared_ptr<const ds::Source> old;
+    {
+        juce::SpinLock::ScopedLockType l(lock);
+        old = source; source = std::move(s);
+        const juce::int64 n = source ? source->length() : 0;
+        a = juce::jlimit<juce::int64>(0, n, a); b = juce::jlimit<juce::int64>(a, n, b);
+        if (b <= a) { a = 0; b = n; }
+        selS = a; selE = b; srcSeek = a;
+    }
+    retire(std::move(old));
+}
+
+void DrumSlicerProcessor::setSelection(juce::int64 a, juce::int64 b)
+{
+    auto s = getSource(); if (!s) return;
+    const juce::int64 n = s->length(), minLen = (juce::int64) (0.05 * s->sr);
+    a = juce::jlimit<juce::int64>(0, std::max<juce::int64>(0, n - minLen), a);
+    b = juce::jlimit<juce::int64>(std::min(n, a + minLen), n, b);
+    selS = a; selE = b;
+}
+
+bool DrumSlicerProcessor::selectionAnalysed() const
+{
+    auto r = getResult(); auto s = getSource();
+    return r && s && r->sourceId == s->id && r->regionStart == selS.load() && r->regionStart + r->loop.getNumSamples() == selE.load();
+}
+
+void DrumSlicerProcessor::loadSource(const juce::File& f)
 {
     stopWorker();
-    if (forceNew) { ds::cacheInfo(f).deleteFile(); ds::cacheInfoIn(ds::legacyCacheDir(f), f).deleteFile(); }
+    srcPlay = false;
+    const int token = ++jobToken;
+    busy = true; progress = 0.f; setStatus("LOADING...");
+    worker = std::thread([this, f, token]
+    {
+        juce::AudioBuffer<float> a; double sr = 0;
+        if (!ds::loadAudio(f, a, sr)) { if (token == jobToken.load()) setStatus("COULD NOT READ " + f.getFileName()); busy = false; return; }
+        if (cancel.load() || token != jobToken.load()) { busy = false; return; }
+        auto s = ds::makeSource(std::move(a), sr, f);
+        if (cancel.load() || token != jobToken.load()) { busy = false; return; }
+        setSource(s, 0, s->length());
+        publish(nullptr, {}, f);                     // the old sounds go: these pads will come from this file
+        setStatus("CHOOSE THE PART, THEN ANALYSE");
+        busy = false;
+    });
+}
+
+void DrumSlicerProcessor::analyseSelection(bool force)
+{
+    auto s = getSource();
+    if (!s) return;
+    const juce::int64 a = selS.load(), b = selE.load();
+    if (b - a < (juce::int64) (0.5 * s->sr)) { setStatus("SELECTION TOO SHORT"); return; }
+    const bool whole = a == 0 && b == s->length();
+    const juce::String region = whole ? juce::String() : "|r" + juce::String(a) + "-" + juce::String(b);
+    stopWorker();
+    if (force && s->file.existsAsFile()) { ds::cacheInfo(s->file).deleteFile(); ds::cacheInfoIn(ds::legacyCacheDir(s->file), s->file).deleteFile(); }
     const int token = ++jobToken;
     busy = true; progress = 0.f; setStatus("ANALYSING...");
     const float sens = apvts.getRawParameterValue("sens")->load();
-    worker = std::thread([this, f, updateBpm, sens, token]
+    const auto orphanName = orphan();
+    worker = std::thread([this, s, a, b, region, sens, token, orphanName]
     {
-        auto r = ds::analyse(f, sens, [this](float p, const juce::String& s) { progress = p; setStatus(s.trim()); }, &cancel);
+        juce::AudioBuffer<float> part(2, (int) (b - a));
+        for (int c = 0; c < 2; ++c) part.copyFrom(c, 0, s->audio, std::min(c, s->audio.getNumChannels() - 1), (int) a, (int) (b - a));
+        auto r = ds::analyseBuffer(std::move(part), s->sr, s->file, region, sens, [this](float p, const juce::String& st) { progress = p; setStatus(st.trim()); }, &cancel);
         if (cancel.load() || token != jobToken.load()) { busy = false; return; }
-        if (r == nullptr) { setStatus("COULD NOT ANALYSE THIS FILE"); busy = false; return; }
-        publish(r, {}, f);
+        if (r == nullptr) { setStatus("COULD NOT ANALYSE THIS PART"); busy = false; return; }
+        r->regionStart = a; r->sourceId = s->id;
+        publish(r, {}, s->file, s->file == juce::File() ? orphanName : juce::String());
         setStatus(r->fromCache ? "LOADED FROM CACHE" : "DONE");
-        if (updateBpm)
+        const double bpm = r->bpm;
+        juce::MessageManager::callAsync([this, bpm, a = alive, v = resultVersion.load()]
         {
-            const double bpm = r->bpm;
-            juce::MessageManager::callAsync([this, bpm, a = alive, v = resultVersion.load()]
-            {
-                if (!a->load() || resultVersion.load() != v) return;
-                if (auto* pb = apvts.getParameter("bpm")) pb->setValueNotifyingHost(pb->convertTo0to1((float) bpm));
-            });
-        }
+            if (!a->load() || resultVersion.load() != v) return;
+            if (auto* pb = apvts.getParameter("bpm")) pb->setValueNotifyingHost(pb->convertTo0to1((float) bpm));
+        });
         busy = false;
     });
+}
+
+void DrumSlicerProcessor::playSource(bool on)
+{
+    if (on) { stopPreview(); auto s = getSource(); if (!s) return; }
+    srcPlay = on;
 }
 
 juce::File DrumSlicerProcessor::makeMidiFile()
@@ -402,6 +523,7 @@ void DrumSlicerProcessor::getStateInformation(juce::MemoryBlock& d)
     auto st = apvts.copyState();
     st.setProperty("loopPath", getLoopFile().getFullPathName(), nullptr);
     st.setProperty("kitPath", getKitDir().getFullPathName(), nullptr);
+    st.setProperty("snap", snap.load(), nullptr);
     if (auto r = getResult())
     {
         std::lock_guard<std::mutex> g(embedLock);
@@ -420,6 +542,7 @@ void DrumSlicerProcessor::setStateInformation(const void* data, int size)
     auto emb = st.getChildWithName("EMBED");
     if (emb.isValid()) { emb = emb.createCopy(); st.removeChild(st.getChildWithName("EMBED"), nullptr); }
     const juce::String kp = st.getProperty("kitPath").toString(), lp = st.getProperty("loopPath").toString();
+    snap = (bool) st.getProperty("snap", true);
     apvts.replaceState(st);
     restoreAsync(emb, kp.isNotEmpty() ? juce::File(kp) : juce::File(), lp.isNotEmpty() ? juce::File(lp) : juce::File());
 }
@@ -441,9 +564,32 @@ void DrumSlicerProcessor::restoreAsync(juce::ValueTree embedded, juce::File kitI
         if (auto r = ds::unembedResult(embedded))
         {
             if (loop.existsAsFile())
-            {
+            {   // the whole file is shown again, with the part that was analysed selected
                 juce::AudioBuffer<float> a; double sr = 0;
-                if (ds::loadAudio(loop, a, sr) && std::abs(sr - r->sr) < 1.0) r->loop = std::move(a);
+                const juce::int64 rs = r->regionStart, len = r->loop.getNumSamples();
+                if (ds::loadAudio(loop, a, sr) && std::abs(sr - r->sr) < 1.0)
+                {
+                    if (rs > 0 || len < a.getNumSamples())
+                    {
+                        if (rs + len <= a.getNumSamples())
+                        {
+                            juce::AudioBuffer<float> part(2, (int) len);
+                            for (int c = 0; c < 2; ++c) part.copyFrom(c, 0, a, c, (int) rs, (int) len);
+                            r->loop = std::move(part);
+                            auto src = ds::makeSource(std::move(a), sr, loop);
+                            r->sourceId = src->id;
+                            if (stale()) { busy = false; return; }
+                            setSource(src, rs, rs + len);
+                        }
+                    }
+                    else
+                    {
+                        auto src = ds::makeSource(std::move(a), sr, loop);
+                        r->loop.makeCopyOf(src->audio); r->sourceId = src->id;
+                        if (stale()) { busy = false; return; }
+                        setSource(src, 0, src->length());
+                    }
+                }
             }
             if (stale()) { busy = false; return; }
             if (kit != juce::File() || loop.existsAsFile()) publish(r, kit, loop);
@@ -538,7 +684,7 @@ bool DrumSlicerProcessor::setPadSample(int pad, const juce::File& f)
     r->pads[(size_t) pad].userName = f.getFileNameWithoutExtension();
     publish(r, getKitDir(), getLoopFile(), orphan());
     setPadSource(pad, 2);
-    previewPad[(size_t) pad] = 1;
+    audition(pad);
     return true;
 }
 
@@ -575,6 +721,7 @@ bool DrumSlicerProcessor::previewKit(const juce::File& kit)
     { juce::SpinLock::ScopedLockType l(lock); old = preview; preview = b; previewSR = sr; }
     retire(std::move(old));
     { juce::SpinLock::ScopedLockType l(fileLock); previewDir = kit; }
+    srcPlay = false;
     previewStop = false; previewPlaying = true;
     return true;
 }
