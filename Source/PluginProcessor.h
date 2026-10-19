@@ -98,6 +98,8 @@ public:
     void setPadSource(int pad, int src);             // 0 = A, 1 = B, 2 = C
     int padSource(int pad) const;
     void setPadType(int pad, const juce::String& type);
+    bool addPad(int pad, const juce::String& type, const juce::File& f);   // an empty pad: a new sound of yours ("" = from its file name)
+    static juce::String guessType(const juce::File& f);
     void mergePad(int from, int into);
     void kitRemoved(const juce::File& kit) { if (getKitDir() == kit) setFiles({}, {}, kit.getFileName()); }   // sounds stay, files gone
     // listening to a saved kit (its pattern) before loading it

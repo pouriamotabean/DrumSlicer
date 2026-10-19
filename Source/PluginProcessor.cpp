@@ -652,27 +652,34 @@ const std::vector<juce::String>& DrumSlicerProcessor::padTypes()
     return t;
 }
 
-void DrumSlicerProcessor::setPadType(int pad, const juce::String& type)
+// name + MIDI note of a pad for an instrument: the first free note of its kind (KICK, KICK 2 ...)
+static bool assignType(ds::Result& r, int pad, const juce::String& type)
 {
-    auto cur = getResult();
-    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid) return;
     static const std::map<juce::String, std::vector<int>> notes {
         { "KICK", { 36, 35 } }, { "SNARE", { 38, 40 } }, { "CLAP", { 39, 54 } }, { "RIM", { 37, 75 } },
         { "TOM", { 45, 47, 48, 43, 50, 41 } }, { "PERC", { 62, 63, 64, 60, 61, 56, 76, 77 } }, { "SHAKER", { 70, 82 } },
         { "C-HAT", { 42, 44 } }, { "O-HAT", { 46, 53 } }, { "CRASH", { 49, 57 } }, { "RIDE", { 51, 59 } } };
-    auto it = notes.find(type); if (it == notes.end()) return;
-    auto r = std::make_shared<ds::Result>(*cur);
+    auto it = notes.find(type); if (it == notes.end()) return false;
     int k = 0;
     for (int note : it->second)
     {
         bool used = false;
-        for (int q = 0; q < ds::kPads; ++q) if (q != pad && r->pads[(size_t) q].valid && r->pads[(size_t) q].note == note) used = true;
+        for (int q = 0; q < ds::kPads; ++q) if (q != pad && r.pads[(size_t) q].valid && r.pads[(size_t) q].note == note) used = true;
         if (!used) break;
         ++k;
     }
     if (k >= (int) it->second.size()) k = 0;
-    r->pads[(size_t) pad].note = it->second[(size_t) k];
-    r->pads[(size_t) pad].name = k == 0 ? type : type + " " + juce::String(k + 1);
+    r.pads[(size_t) pad].note = it->second[(size_t) k];
+    r.pads[(size_t) pad].name = k == 0 ? type : type + " " + juce::String(k + 1);
+    return true;
+}
+
+void DrumSlicerProcessor::setPadType(int pad, const juce::String& type)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    if (!assignType(*r, pad, type)) return;
     r->buildNoteMap();
     const auto loop = getLoopFile(); const auto kit = getKitDir();
     publish(r, kit, loop, orphan());
@@ -685,11 +692,12 @@ void DrumSlicerProcessor::mergePad(int from, int into)
     if (!cur || from == into || from < 0 || into < 0 || from >= ds::kPads || into >= ds::kPads) return;
     if (!cur->pads[(size_t) from].valid || !cur->pads[(size_t) into].valid) return;
     auto r = std::make_shared<ds::Result>(*cur);
-    // the hits keep their loudness: velocity scaled by how loud the two sounds are (first 100 ms)
+    // the hits keep about their loudness: velocity scaled by how loud the two sounds are (first 100 ms), but
+    // at most x0.6 .. x1.6 - a quiet hat merged into a kick must not turn into notes of velocity 1
     auto e100 = [&](const juce::AudioBuffer<float>& b) { double e = 0; const int n = std::min(b.getNumSamples(), (int) (0.1 * r->sr));
         for (int c = 0; c < b.getNumChannels(); ++c) for (int i = 0; i < n; ++i) e += (double) b.getSample(c, i) * b.getSample(c, i); return e; };
     const double ef = e100(r->pads[(size_t) from].audio), ei = e100(r->pads[(size_t) into].audio);
-    const double k = ei > 0 ? std::sqrt(ef / ei) : 1.0;
+    const double k = ei > 0 ? juce::jlimit(0.6, 1.6, std::sqrt(ef / ei)) : 1.0;
     for (auto& h : r->hits) if (h.pad == from) { h.pad = into; h.velocity = juce::jlimit(1, 127, (int) std::lround(h.velocity * k)); }
     std::sort(r->hits.begin(), r->hits.end(), [](const ds::Hit& a, const ds::Hit& b) { return a.time < b.time; });
     r->pads[(size_t) into].hits += r->pads[(size_t) from].hits;
@@ -698,6 +706,46 @@ void DrumSlicerProcessor::mergePad(int from, int into)
     const auto loop = getLoopFile(); const auto kit = getKitDir();
     publish(r, kit, loop, orphan());
     if (kit == juce::File() && loop.existsAsFile()) ds::saveCache(loop, *r);
+}
+
+// an empty pad gets a sound of yours: no hits in the loop, you play it (MIDI note of its instrument)
+juce::String DrumSlicerProcessor::guessType(const juce::File& f)
+{
+    const auto n = f.getFileNameWithoutExtension().toLowerCase();
+    auto has = [&](std::initializer_list<const char*> w) { for (auto* x : w) if (n.contains(x)) return true; return false; };
+    if (has({ "kick", "kik", "808 bd", "bassdrum", "bass drum" })) return "KICK";
+    if (has({ "snare", "snr" })) return "SNARE";
+    if (has({ "clap" })) return "CLAP";
+    if (has({ "rim", "stick" })) return "RIM";
+    if (has({ "tom" })) return "TOM";
+    if (has({ "shak", "maraca", "tamb" })) return "SHAKER";
+    if (has({ "open", "ohh", "ohat", "o-hat", "o_hat" })) return "O-HAT";
+    if (has({ "hat", "hh", "hihat" })) return "C-HAT";
+    if (has({ "crash", "cym" })) return "CRASH";
+    if (has({ "ride" })) return "RIDE";
+    return "PERC";
+}
+
+bool DrumSlicerProcessor::addPad(int pad, const juce::String& type, const juce::File& f)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || cur->pads[(size_t) pad].valid) return false;
+    const ds::Pad none;
+    juce::AudioBuffer<float> shot;
+    if (!ds::loadUserShot(f, none, cur->sr, shot)) { setStatus("COULD NOT READ " + f.getFileName()); return false; }
+    auto r = std::make_shared<ds::Result>(*cur);
+    auto& pd = r->pads[(size_t) pad];
+    pd = ds::Pad();
+    pd.audio.makeCopyOf(shot); pd.user = std::move(shot); pd.userName = f.getFileNameWithoutExtension();
+    pd.hits = 0; pd.valid = true;
+    if (!assignType(*r, pad, type.isNotEmpty() ? type : guessType(f))) assignType(*r, pad, "PERC");
+    r->buildNoteMap();
+    const auto loop = getLoopFile(); const auto kit = getKitDir();
+    publish(r, kit, loop, orphan());
+    if (kit == juce::File() && loop.existsAsFile()) ds::saveCache(loop, *r);
+    setPadSource(pad, 2);
+    audition(pad);
+    return true;
 }
 
 // ---------------------------------------------------------------- your samples ("C")

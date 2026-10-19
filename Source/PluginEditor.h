@@ -531,6 +531,9 @@ public:
         list.setColour(juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
         list.setWantsKeyboardFocus(true);
         for (auto* b : { &addBtn, &remBtn, &upBtn, &useBtn, &revealBtn, &closeBtn }) addAndMakeVisible(b);
+        addChildComponent(firstBtn);
+        firstBtn.setButtonText("ADD SAMPLE FOLDER"); firstBtn.getProperties().set("primary", true);
+        firstBtn.onClick = [this] { addFolder(); };
         addBtn.setButtonText("+"); remBtn.setButtonText("-"); upBtn.setButtonText("UP");
         useBtn.setButtonText("USE ON PAD"); useBtn.getProperties().set("primary", true);
         revealBtn.setButtonText("OPEN FOLDER"); closeBtn.setButtonText("X");
@@ -554,7 +557,7 @@ public:
     }
     ~SampleBrowser() override { saveSettings(); }
 
-    void showFor() { refreshRoots(); if (!dir.isDirectory() && !rootDirs.isEmpty()) open(rootDirs[0]); else rebuild(); list.grabKeyboardFocus(); repaint(); }
+    void showFor() { refreshRoots(); updateControls(); if (!dir.isDirectory() && !rootDirs.isEmpty()) open(rootDirs[0]); else rebuild(); list.grabKeyboardFocus(); repaint(); }
     void visibilityChanged() override { if (isVisible()) startTimerHz(10); else { stopTimer(); proc.stopPreview(); saveSettings(); } }
 
     void paint(juce::Graphics& g) override
@@ -571,9 +574,16 @@ public:
         g.setColour(ui::dim); g.setFont(ui::font(9.f, true, 0.1f));
         g.drawText(dir.isDirectory() ? shortPath(dir) : juce::String(), 16, 94, getWidth() - 32, 14, juce::Justification::centredLeft);
         if (rootDirs.isEmpty())
-        {
-            g.setColour(ui::dim); g.setFont(ui::font(10.f, true, 0.2f));
-            g.drawFittedText("PRESS  +  TO ADD YOUR SAMPLE FOLDER", list.getBounds().reduced(20), juce::Justification::centred, 2);
+        {   // first time: say what this is
+            auto r = juce::Rectangle<int>(20, 60, getWidth() - 40, 170);
+            g.setColour(ui::text); g.setFont(ui::font(11.f, true, 0.15f));
+            g.drawFittedText("CHOOSE A SAMPLE OF YOURS FOR A PAD", r.removeFromTop(22), juce::Justification::centredLeft, 1);
+            g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(10.f, false, 0.05f));
+            g.drawFittedText("1.  Add your one-shot folder (once - it is remembered).\n"
+                             "2.  Click a file (or use the arrow keys): you hear it as loud as the pad.\n"
+                             "3.  Double-click it, drag it onto a pad, or press USE ON PAD:\n"
+                             "     it becomes the pad's sound C. The MIDI stays the same.",
+                             r.withTrimmedTop(6), juce::Justification::topLeft, 8, 1.f);
         }
         else if (items.isEmpty())
         {
@@ -590,6 +600,7 @@ public:
         upBtn.setBounds(12, 66, 44, 24);
         filter.setBounds(62, 66, w - 74, 24);
         list.setBounds(8, 110, w - 16, h - 110 - 46);
+        firstBtn.setBounds(30, 196, w - 60, 40);
         useBtn.setBounds(12, h - 40, (w - 32) / 2 + 20, 30);
         revealBtn.setBounds(useBtn.getRight() + 8, h - 40, w - 12 - useBtn.getRight() - 8, 30);
     }
@@ -599,7 +610,7 @@ private:
     juce::ListBox list;
     juce::ComboBox roots;
     juce::TextEditor filter;
-    juce::TextButton addBtn, remBtn, upBtn, useBtn, revealBtn, closeBtn;
+    juce::TextButton addBtn, remBtn, upBtn, useBtn, revealBtn, closeBtn, firstBtn;
     juce::Array<juce::File> rootDirs, items;       // items: folders first, then audio files
     juce::File dir;
     std::unique_ptr<juce::FileChooser> chooser;
@@ -637,6 +648,13 @@ private:
         for (int i = 0; i < rootDirs.size(); ++i) roots.addItem(rootDirs[i].getFileName().toUpperCase(), i + 1);
         for (int i = 0; i < rootDirs.size(); ++i) if (dir == rootDirs[i] || dir.isAChildOf(rootDirs[i])) roots.setSelectedItemIndex(i, juce::dontSendNotification);
         remBtn.setEnabled(!rootDirs.isEmpty());
+        updateControls();
+    }
+    void updateControls()
+    {   // no folder yet: only the explanation and one big button
+        const bool any = !rootDirs.isEmpty();
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &roots, &remBtn, &upBtn, &filter, &list, &useBtn, &revealBtn, &addBtn }) c->setVisible(any);
+        firstBtn.setVisible(!any);
     }
     void addFolder()
     {
@@ -848,12 +866,14 @@ public:
         addAndMakeVisible(browseBtn);
         browseBtn.setButtonText("BROWSE");
         browseBtn.setTooltip("Your sample folders: click = listen (as loud as this pad), double-click or drag onto a pad = YOUR SAMPLE (C)");
-        browseBtn.onClick = [this] { if (samples.isVisible()) samples.setVisible(false); else { samples.setVisible(true); samples.toFront(false); samples.showFor(); } };
+        browseBtn.onClick = [this] { if (samples.isVisible()) samples.setVisible(false); else openSamples(); };
         addChildComponent(samples);
         samples.onClose = [this] { samples.setVisible(false); };
-        samples.onUse = [this](const juce::File& f) { auto r = proc.getResult(); if (r && r->pads[(size_t) selected].valid) useSample(selected, f); };
+        samples.onUse = [this](const juce::File& f) { useSample(selected, f); };
         samples.targetPad = [this] { return selected; };
-        samples.targetName = [this] { auto r = proc.getResult(); return r && r->pads[(size_t) selected].valid ? r->pads[(size_t) selected].name : juce::String(); };
+        samples.targetName = [this] { auto r = proc.getResult(); if (!r) return juce::String();
+                                      return r->pads[(size_t) selected].valid ? r->pads[(size_t) selected].name
+                                                                              : "NEW " + (pendingType.isNotEmpty() ? pendingType : juce::String("SOUND")); };
         addAndMakeVisible(dragWav);
         dragWav.setButtonText("DRAG WAV");
         dragWav.setTooltip("Drag this pad's sound (as you hear it) into the DAW");
@@ -887,7 +907,7 @@ public:
     int padAt(int x, int y) const
     {
         auto res = proc.getResult(); if (!res) return -1;
-        for (int i = 0; i < ds::kPads; ++i) if (res->pads[(size_t) i].valid && padRect(i).contains(x, y)) return i;
+        for (int i = 0; i < ds::kPads; ++i) if (padRect(i).contains(x, y)) return i;    // empty pads too: a new sound
         return -1;
     }
     void dropFile(const juce::File& f, int x, int y)
@@ -929,16 +949,37 @@ public:
     }
     void useSample(int pad, const juce::File& f)
     {
-        if (pad < 0 || !f.existsAsFile()) return;
+        auto res = proc.getResult();
+        if (pad < 0 || !f.existsAsFile() || !res) return;
         selected = pad;
-        if (proc.setPadSample(pad, f)) toast("C  " + f.getFileNameWithoutExtension());
+        if (res->pads[(size_t) pad].valid) { if (proc.setPadSample(pad, f)) toast("C  " + f.getFileNameWithoutExtension()); }
+        else if (proc.addPad(pad, pendingType, f)) toast("NEW  " + proc.getResult()->pads[(size_t) pad].name + "  -  " + f.getFileNameWithoutExtension());
+        pendingType.clear();
         updateVisibility(); repaint();
+    }
+    juce::String pendingType;                        // chosen for an empty pad before its sample
+    void emptyPadMenu(int pad)
+    {
+        juce::PopupMenu types, m;
+        const auto& list = DrumSlicerProcessor::padTypes();
+        for (int t = 0; t < (int) list.size(); ++t) types.addItem(100 + t, list[(size_t) t]);
+        m.addSectionHeader("EMPTY PAD");
+        m.addSubMenu("ADD A SOUND:  THIS PAD IS A ...", types);
+        m.addItem(1, "ADD A SOUND  (TYPE FROM THE FILE NAME) ...");
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(localAreaToGlobal(padRect(pad))),
+            [this, pad, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
+            {
+                if (sp == nullptr || id == 0) return;
+                pendingType = id >= 100 ? DrumSlicerProcessor::padTypes()[(size_t) (id - 100)] : juce::String();
+                selected = pad; openSamples();
+            });
     }
 
     // ---------------------------------------------------------------- layout (1000 x 600)
     const juce::Rectangle<int> display { 20, 76, 960, 140 }, padsPanel { 20, 226, 624, 206 }, editPanel { 20, 440, 624, 140 },
                                rightPanel { 654, 226, 326, 262 }, soundPanel { 654, 496, 326, 84 };
     juce::Rectangle<int> padRect(int i) const { return { 30 + (i % 4) * 152, 236 + (i / 4) * 100, 146, 92 }; }
+    bool padHasSound(int i) const { auto r = proc.getResult(); return r && i >= 0 && i < ds::kPads && r->pads[(size_t) i].valid; }
     bool padHasC(int i) const { auto r = proc.getResult(); return r && r->pads[(size_t) i].user.getNumSamples() > 0; }
     juce::Rectangle<int> abRect(int i) const { auto r = padRect(i); const int w = padHasC(i) ? 60 : 40; return { r.getRight() - 10 - w, r.getBottom() - 30, w, 20 }; }
 
@@ -976,27 +1017,23 @@ public:
         for (int q = 0; q < ds::kPads; ++q) if (q != pad && res->pads[(size_t) q].valid) into.addItem(200 + q, res->pads[(size_t) q].name);
         m.addSectionHeader(res->pads[(size_t) pad].name + "   (MIDI " + juce::MidiMessage::getMidiNoteName(res->pads[(size_t) pad].note, true, true, 3) + ")");
         m.addSubMenu("THIS PAD IS A ...", types);
-        m.addSubMenu("MERGE INTO", into, into.getNumItems() > 0);
+        m.addSubMenu("MOVE ITS HITS TO ...  (THIS PAD GOES)", into, into.getNumItems() > 0);
         m.addSeparator();
-        m.addItem(300, "LOAD YOUR SAMPLE (C) ...");
+        m.addItem(300, "CHOOSE YOUR SAMPLE (C) ...  (LISTEN FIRST)");
         m.addItem(301, "REMOVE YOUR SAMPLE", res->pads[(size_t) pad].user.getNumSamples() > 0);
         m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(localAreaToGlobal(padRect(pad))),
             [this, pad, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
             {
                 if (sp == nullptr || id == 0) return;
                 if (id >= 100 && id < 200) { proc.setPadType(pad, DrumSlicerProcessor::padTypes()[(size_t) (id - 100)]); toast("PAD  " + proc.getResult()->pads[(size_t) pad].name); }
-                else if (id == 300)
-                {
-                    chooser = std::make_unique<juce::FileChooser>("Your sample for this pad", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
-                    chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                        [this, pad](const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile() && proc.setPadSample(pad, f)) { selected = pad; toast("C  " + f.getFileNameWithoutExtension()); updateVisibility(); repaint(); } });
-                }
+                else if (id == 300) { selected = pad; openSamples(); }   // the SAMPLES panel: listen at the pad's level, then use
                 else if (id == 301) { proc.clearPadSample(pad); toast("BACK TO A"); }
-                else if (id >= 200) { const int q = id - 200; proc.mergePad(pad, q); selected = q; toast("MERGED INTO  " + proc.getResult()->pads[(size_t) q].name); }
+                else if (id >= 200) { const int q = id - 200; proc.mergePad(pad, q); selected = q; toast("HITS MOVED TO  " + proc.getResult()->pads[(size_t) q].name); }
                 updateVisibility(); repaint();
             });
     }
 
+    void openSamples() { updateVisibility(); samples.setVisible(true); samples.toFront(false); samples.showFor(); repaint(); }
     void openKits() { kitBrowser.setBounds(getLocalBounds()); kitBrowser.refresh(); kitBrowser.setVisible(true); kitBrowser.toFront(false); }
 
     void askKitName()
@@ -1036,7 +1073,13 @@ public:
         {
             if (!padRect(i).contains(e.getPosition())) continue;
             selected = i;
-            if (e.mods.isPopupMenu() && res && res->pads[(size_t) i].valid) { padMenu(i); updateVisibility(); repaint(); return; }
+            if (e.mods.isPopupMenu())
+            {
+                if (res && res->pads[(size_t) i].valid) padMenu(i);
+                else if (res) emptyPadMenu(i);
+                else toast("ANALYSE A LOOP FIRST");
+                updateVisibility(); repaint(); return;
+            }
             if (res && res->pads[(size_t) i].valid && abRect(i).contains(e.getPosition()))
             {
                 const auto ab = abRect(i); const int n = padHasC(i) ? 3 : 2;
@@ -1171,7 +1214,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.6";
+            const juce::String ver = "v1.6.2";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -1470,7 +1513,7 @@ private:
             const auto r = padRect(hoverPad).toFloat();
             g.setColour(ui::amber.withAlpha(0.15f)); g.fillRoundedRectangle(r, 10.f);
             g.setColour(ui::amber); g.drawRoundedRectangle(r.reduced(1.f), 10.f, 2.f);
-            g.setFont(ui::font(10.f, true, 0.25f)); g.drawText("DROP = YOUR SAMPLE (C)", r.withTrimmedTop(r.getHeight() * 0.35f).withHeight(14.f).toNearestInt(), juce::Justification::centred);
+            g.setFont(ui::font(10.f, true, 0.25f)); g.drawText(padHasSound(hoverPad) ? "DROP = YOUR SAMPLE (C)" : "DROP = NEW SOUND", r.withTrimmedTop(r.getHeight() * 0.35f).withHeight(14.f).toNearestInt(), juce::Justification::centred);
         }
     }
 
