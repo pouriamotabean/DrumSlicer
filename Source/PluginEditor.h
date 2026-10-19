@@ -551,7 +551,7 @@ public:
         knob(grid, "quant", [](double v) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
         knob(bpm, "bpm", [](double v) { return juce::String(v, 1); });
         for (auto* s : { &master, &sens, &grid, &bpm }) s->setVisible(true);
-        sens.onDragEnd = [this] { proc.reanalyse(); };
+        sens.onDragEnd = [this] { if (proc.getResult() != nullptr && proc.getSource() != nullptr) proc.reanalyse(); };
         sens.setTooltip("Hit detection sensitivity (re-analyses the loop when you let go)");
         grid.setTooltip("TIGHT MIDI: 100% = fully on the grid, lower keeps some of the loop's groove");
         bpm.setTooltip("Tempo used for the MIDI when the host does not report one");

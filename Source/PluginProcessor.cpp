@@ -227,7 +227,12 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
             if (audioRes != result)
             {   // hits still ringing keep their own sound; they fade out quickly (no hard cut = no click)
                 audioRes = result;
-                for (auto& v : voices) if (v.on && v.fade < 0) { v.fadeLen = std::max(1, (int) (0.005 * hostSR)); v.fade = v.fadeLen; }
+                for (auto& v : voices)
+                    if (v.on && v.fade < 0)
+                    {
+                        if (result == nullptr) v.on = false;   // nothing renders without sounds (a new file is loading)
+                        else { v.fadeLen = std::max(1, (int) (0.005 * hostSR)); v.fade = v.fadeLen; }
+                    }
             }
             audioShaped = shaped;
             if (audioSource != source) { audioSource = source; srcPos = (double) selS.load(); }
@@ -578,6 +583,7 @@ void DrumSlicerProcessor::restoreAsync(juce::ValueTree embedded, juce::File kitI
                             r->loop = std::move(part);
                             auto src = ds::makeSource(std::move(a), sr, loop);
                             r->sourceId = src->id;
+                            r->region = "|r" + juce::String(rs) + "-" + juce::String(rs + len);
                             if (stale()) { busy = false; return; }
                             setSource(src, rs, rs + len);
                         }

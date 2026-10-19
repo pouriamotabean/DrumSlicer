@@ -44,6 +44,7 @@ struct Result
     bool fromCache = false;
     juce::int64 regionStart = 0;             // where "loop" starts in the source file (a selection of it was analysed)
     juce::uint64 sourceId = 0;               // which loaded source (see Source) it came from
+    juce::String region;                     // cache key of the part: "" = the whole file, else "|r<start>-<end>"
 
     void buildNoteMap()
     {
@@ -275,8 +276,9 @@ inline bool parseInfo(const juce::StringArray& lines, Result& r, const std::func
 
 // one-shots, rebuild and analysis next to each other in Documents/ReKit/<loop>_<id>/  (also the cache).
 // The analysis text is written last, and only when every sound was written.
-inline bool saveCache(const juce::File& loop, const Result& r, const juce::String& region = {})
+inline bool saveCache(const juce::File& loop, const Result& r)
 {
+    const auto& region = r.region;
     auto dir = cacheDir(loop);
     if (!dir.createDirectory()) return false;
     bool ok = true;
@@ -304,7 +306,7 @@ inline std::shared_ptr<Result> loadCacheFrom(const juce::File& dir, const juce::
     juce::StringArray lines; lines.addLines(info.loadFileAsString());
     if (lines.isEmpty() || !keyMatches(lines[0], loop, region)) return nullptr;
     auto r = std::make_shared<Result>();
-    r->loop = audio; r->sr = sr; r->fromCache = true;
+    r->loop = audio; r->sr = sr; r->fromCache = true; r->region = region;
     if (!parseInfo(lines, *r, [&](const juce::String& n, bool b) { return shotFileIn(dir, loop, n, b); })) return nullptr;
     r->buildNoteMap();
     return r;
@@ -567,7 +569,8 @@ inline std::shared_ptr<Result> analyseBuffer(juce::AudioBuffer<float> audio, dou
     }
     for (const auto& n : out.notes) if (n.pad < kPads) r->hits.push_back({ n.time, n.pad, n.velocity });
     r->buildNoteMap();
-    if (file.existsAsFile()) saveCache(file, *r, region);
+    r->region = region;
+    if (file.existsAsFile()) saveCache(file, *r);
     return r;
 }
 
