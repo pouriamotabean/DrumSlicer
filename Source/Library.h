@@ -180,15 +180,15 @@ struct LibIndex
 {
     std::vector<LibEntry> items;
     std::array<float, kFeat> mean {}, sd {};      // over the one-shots: features are compared in these units
-    int oneShots = 0, loops = 0, longs = 0, bad = 0;
+    int oneShots = 0, loops = 0, longs = 0, bad = 0, byName = 0;
     void stats()
     {
-        oneShots = loops = longs = bad = 0;
+        oneShots = loops = longs = bad = byName = 0;
         std::array<double, kFeat> s {}, s2 {};
         for (auto& e : items)
         {
             if (e.status == 0) { ++oneShots; for (int i = 0; i < kFeat; ++i) { s[(size_t) i] += e.feat[(size_t) i]; s2[(size_t) i] += (double) e.feat[(size_t) i] * e.feat[(size_t) i]; } }
-            else if (e.status == 1) ++longs; else if (e.status == 4) ++bad; else ++loops;
+            else if (e.status == 1) ++longs; else if (e.status == 4) ++bad; else if (e.status == 3) { ++loops; ++byName; } else ++loops;
         }
         for (int i = 0; i < kFeat; ++i)
         {
@@ -374,12 +374,12 @@ private:
         prog = 0.f;
         if (dirs.isEmpty()) { setStatus("ADD A SAMPLE FOLDER FIRST"); return; }
         setStatus("LOOKING FOR FILES...");
-        juce::Array<juce::File> files;
+        juce::Array<juce::File> files, fileRoot;
         for (auto& d : dirs)
             for (const auto& it : juce::RangedDirectoryIterator(d, true, "*.wav;*.wave;*.aif;*.aiff;*.flac;*.mp3;*.ogg", juce::File::findFiles))
             {
                 if (threadShouldExit()) return;
-                if (!it.getFile().getFileName().startsWithChar('.')) files.add(it.getFile());
+                if (!it.getFile().getFileName().startsWithChar('.')) { files.add(it.getFile()); fileRoot.add(d); }
             }
         // what is known already: same path, size, date and limit = not read again
         std::map<juce::String, const LibEntry*> known;
@@ -404,7 +404,7 @@ private:
             }
             else
             {
-                analyseFile(fm, f, e, lim);
+                analyseFile(fm, f, f.getRelativePathFrom(fileRoot.getReference(i)), e, lim);
                 ix->items.push_back(e);
                 ++fresh;
             }
@@ -424,18 +424,26 @@ private:
         save(*index());
         prog = 1.f;
         auto now = index();
-        setStatus(juce::String(now->oneShots) + " ONE-SHOTS   |   " + juce::String(now->loops + now->longs) + " LOOPS LEFT OUT");
+        setStatus(summary(*now));
     }
 
-    static void analyseFile(juce::AudioFormatManager& fm, const juce::File& f, LibEntry& e, float lim)
+    static juce::String summary(const LibIndex& ix)
     {
-        const auto lower = e.path.toLowerCase().replaceCharacter('\\', '/');
+        return juce::String(ix.oneShots) + " ONE-SHOTS\nLEFT OUT: " + juce::String(ix.loops) + " LOOPS (" + juce::String(ix.byName) + " BY NAME)  "
+             + juce::String(ix.longs) + " LONG" + (ix.bad > 0 ? "  " + juce::String(ix.bad) + " UNREADABLE" : juce::String());
+    }
+    // the name rules look only inside your sample folder (its own path above does not count: a folder
+    // called "Loops & One Shots" holding everything must not throw everything out)
+    static void analyseFile(juce::AudioFormatManager& fm, const juce::File& f, const juce::String& relPath, LibEntry& e, float lim)
+    {
+        const auto lower = relPath.toLowerCase().replaceCharacter('\\', '/');
         e.hint = (juce::uint8) familyOfHint(nameHint(lower));
         std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(f));
         if (rd == nullptr || rd->sampleRate <= 0 || rd->lengthInSamples < 32) { e.status = 4; return; }
         e.seconds = (float) (rd->lengthInSamples / rd->sampleRate);
         if (e.seconds > lim) { e.status = 1; return; }                       // decided without reading it
-        if (nameSaysLoop(lower)) { e.status = 3; return; }
+        // a short file is judged by its sound (one hit or several), only a longer one by its name too
+        if (e.seconds > 1.5f && nameSaysLoop(lower)) { e.status = 3; return; }
         const int n = (int) rd->lengthInSamples;
         juce::AudioBuffer<float> a(2, n);
         if (!rd->read(&a, 0, n, 0, true, true)) { e.status = 4; return; }
@@ -449,7 +457,7 @@ private:
         juce::MemoryBlock mb;
         if (!indexFile().loadFileAsData(mb) || mb.getSize() < 12) return;
         juce::MemoryInputStream in(mb, false);
-        if (in.readInt() != 0x524b4c42 /* RKLB */ || in.readInt() != 1) return;
+        if (in.readInt() != 0x524b4c42 /* RKLB */ || in.readInt() != 2) return;     // older index: read the folders again
         const int count = in.readInt();
         if (count < 0 || count > 2000000) return;
         auto ix = std::make_shared<LibIndex>();
@@ -464,12 +472,12 @@ private:
         }
         publish(ix);
         auto now = index();
-        setStatus(juce::String(now->oneShots) + " ONE-SHOTS   |   " + juce::String(now->loops + now->longs) + " LOOPS LEFT OUT");
+        setStatus(summary(*now));
     }
     static void save(const LibIndex& ix)
     {
         juce::MemoryOutputStream out;
-        out.writeInt(0x524b4c42); out.writeInt(1); out.writeInt((int) ix.items.size());
+        out.writeInt(0x524b4c42); out.writeInt(2); out.writeInt((int) ix.items.size());
         for (auto& e : ix.items)
         {
             out.writeString(e.path); out.writeInt64(e.size); out.writeInt64(e.mtime);

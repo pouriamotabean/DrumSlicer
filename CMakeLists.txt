@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(DrumSlicer VERSION 1.8.0)
+project(DrumSlicer VERSION 1.8.1)
 set(CMAKE_CXX_STANDARD 17)
 
 include(FetchContent)

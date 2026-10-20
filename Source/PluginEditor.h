@@ -624,7 +624,13 @@ public:
         // SIMILAR: what the library knows
         auto& lib = *proc.library;
         g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(9.f, true, 0.1f));
-        g.drawText(lib.status(), 14, 40, getWidth() - 150, 20, juce::Justification::centredLeft);
+        {
+            const auto st = lib.status();
+            g.setColour(ui::text.withAlpha(0.85f)); g.setFont(ui::font(9.5f, true, 0.1f));
+            g.drawText(st.upToFirstOccurrenceOf("\n", false, false), 14, 36, getWidth() - 150, 14, juce::Justification::centredLeft);
+            g.setColour(ui::dim); g.setFont(ui::font(8.f, true, 0.05f));
+            g.drawFittedText(st.fromFirstOccurrenceOf("\n", false, false), 14, 50, getWidth() - 150, 12, juce::Justification::centredLeft, 1, 0.8f);
+        }
         if (lib.scanning())
         {
             const auto bar = juce::Rectangle<float>(14.f, 62.f, (float) getWidth() - 28.f, 4.f);
@@ -1369,7 +1375,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.8.0";
+            const juce::String ver = "v1.8.1";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
