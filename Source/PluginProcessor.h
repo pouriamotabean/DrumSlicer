@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Extractor.h"
+#include "Library.h"
 #include <thread>
 #include <cstring>
 #include <mutex>
@@ -59,6 +60,10 @@ public:
     double sourcePos() const { return srcPosShown.load(); }   // samples of the source
     void seekSource(juce::int64 pos) { srcSeek = pos; }
     std::atomic<bool> snap { true };                 // selection handles snap to the attacks
+    // ▶ next to DRAG MIDI: the MIDI you would drag (EXACT / SYNC / TIGHT), played with the kit as it is now,
+    // at the project tempo, looped
+    void playMidi(bool on);
+    bool isMidiPlaying() const { return midiPlay.load(); }
     bool isBusy() const { return busy.load(); }
     float getProgress() const { return progress.load(); }
     juce::String getStatus() const { juce::SpinLock::ScopedLockType l(statusLock); return status; }
@@ -121,6 +126,7 @@ public:
     }
 
     juce::AudioProcessorValueTreeState apvts;
+    juce::SharedResourcePointer<ds::Library> library;     // your one-shot archive (one for all ReKit windows)
     std::array<std::atomic<int>, 8>   previewPad;
     std::array<std::atomic<float>, 8> padLevel;
 
@@ -144,6 +150,13 @@ private:
     // message thread, so the audio thread never frees big buffers when it lets go of its copy.
     void publish(std::shared_ptr<ds::Result> r, const juce::File& kit, const juce::File& loop, const juce::String& orphanName = {});
     void setSource(std::shared_ptr<ds::Source> s, juce::int64 a, juce::int64 b);
+    struct SeqEv { double tick; int note; int vel; };
+    struct Seq { std::vector<SeqEv> ev; double loopTicks = 0; };
+    std::shared_ptr<const Seq> seq, audioSeq;
+    juce::String seqKey;
+    void rebuildSeq();                               // message thread: when the result / mode / tempo changed
+    std::atomic<bool> midiPlay { false }, midiRestart { false };
+    double seqPos = 0;                               // ticks (audio thread)
     std::shared_ptr<const ds::Source> source, audioSource;
     std::atomic<juce::int64> selS { 0 }, selE { 0 }, srcSeek { -1 };
     std::atomic<bool> srcPlay { false };

@@ -119,6 +119,64 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double s
 void DrumSlicerProcessor::timerCallback()
 {
     reshape();
+    rebuildSeq();
+}
+
+void DrumSlicerProcessor::rebuildSeq()
+{
+    auto r = getResult();
+    const int mode = midiMode();
+    const double bpm = midiBpm(), quant = apvts.getRawParameterValue("quant")->load();
+    const juce::String key = r ? juce::String(resultVersion.load()) + "|" + juce::String(mode) + "|" + juce::String(quant, 3) + "|" + juce::String(bpm, 3) : juce::String();
+    if (key == seqKey) return;
+    seqKey = key;
+    std::shared_ptr<Seq> s;
+    if (r && !r->hits.empty() && bpm > 0)
+    {
+        // exactly the MIDI file you would drag, read back
+        const auto bytes = ds::midiBytes(*r, bpm, mode, quant);
+        juce::MemoryInputStream in(bytes, false);
+        juce::MidiFile mf;
+        if (mf.readFrom(in))
+        {
+            s = std::make_shared<Seq>();
+            const double ppq = mf.getTimeFormat() > 0 ? mf.getTimeFormat() : 480.0;
+            std::array<std::pair<double, int>, 128> fine; fine.fill({ -10.0, 0 });
+            for (int t = 0; t < mf.getNumTracks(); ++t)
+                if (auto* tr = mf.getTrack(t))
+                    for (const auto* e : *tr)
+                    {
+                        const auto& m = e->message;
+                        const double tick = m.getTimeStamp() * 480.0 / ppq;
+                        if (m.isAftertouch()) fine[(size_t) m.getNoteNumber()] = { tick, m.getAfterTouchValue() };   // sub-tick timing
+                        else if (m.isNoteOn())
+                        {
+                            const auto& f = fine[(size_t) m.getNoteNumber()];
+                            const double exact = tick + (std::abs(f.first - (tick - 1.0)) < 0.01 ? f.second / 127.0 : 0.0);
+                            s->ev.push_back({ exact, m.getNoteNumber(), m.getVelocity() });
+                        }
+                    }
+            std::sort(s->ev.begin(), s->ev.end(), [](const SeqEv& a, const SeqEv& b) { return a.tick < b.tick; });
+            // one turn = the analysed part: EXACT in seconds (at this tempo), SYNC / TIGHT in whole beats of the loop
+            const double secs = r->loop.getNumSamples() / r->sr;
+            const double beats = mode == ds::kExact ? secs * bpm / 60.0 : std::max(1.0, std::round(secs * r->bpm / 60.0));
+            s->loopTicks = beats * 480.0;
+        }
+    }
+    std::shared_ptr<const Seq> old;
+    { juce::SpinLock::ScopedLockType l(lock); old = seq; seq = s; }
+    retire(std::move(old));
+}
+
+void DrumSlicerProcessor::playMidi(bool on)
+{
+    if (on)
+    {
+        rebuildSeq();
+        srcPlay = false; stopPreview();
+        midiRestart = true;
+    }
+    midiPlay = on;
 }
 
 void DrumSlicerProcessor::reshape()
@@ -236,6 +294,7 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
                     }
             }
             audioShaped = shaped;
+            audioSeq = seq;
             if (audioSource != source) { audioSource = source; srcPos = (double) selS.load(); }
             if (audioPreview != preview)
             {   // a new preview: the one still sounding fades out (5 ms) instead of being cut
@@ -369,6 +428,25 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
         }
     };
 
+    if (midiPlay.load() && audioSeq && audioSeq->loopTicks > 0)
+    {   // the MIDI preview: notes started like host notes, sample-exact inside the block
+        if (midiRestart.exchange(false)) seqPos = 0;
+        const auto& sq = *audioSeq;
+        const double spt = 60.0 / midiBpm() / 480.0 * hostSR;
+        double remaining = numSamples, offset = 0;
+        for (int guard = 0; guard < 64 && remaining > 0.5; ++guard)
+        {
+            const double endTick = std::min(sq.loopTicks, seqPos + remaining / spt);
+            auto it = std::lower_bound(sq.ev.begin(), sq.ev.end(), seqPos, [](const SeqEv& e, double t) { return e.tick < t; });
+            for (; it != sq.ev.end() && it->tick < endTick; ++it)
+                if (it->note >= 0 && it->note < 128)
+                    startVoice(res.noteToPad[(size_t) it->note], (float) it->vel / 100.f, (int) std::floor(offset + (it->tick - seqPos) * spt + 0.5));
+            const double used = (endTick - seqPos) * spt;
+            offset += used; remaining -= used; seqPos = endTick;
+            if (seqPos >= sq.loopTicks - 1e-9) seqPos = 0;
+            if (used <= 0 && seqPos != 0) break;
+        }
+    }
     int cur = 0;
     for (const auto meta : midi)
     {
@@ -483,7 +561,7 @@ void DrumSlicerProcessor::analyseSelection(bool force)
 
 void DrumSlicerProcessor::playSource(bool on)
 {
-    if (on) { stopPreview(); auto s = getSource(); if (!s) return; }
+    if (on) { stopPreview(); midiPlay = false; auto s = getSource(); if (!s) return; }
     srcPlay = on;
 }
 
@@ -814,7 +892,7 @@ bool DrumSlicerProcessor::previewKit(const juce::File& kit)
     { juce::SpinLock::ScopedLockType l(lock); old = preview; preview = b; previewSR = sr; }
     retire(std::move(old));
     { juce::SpinLock::ScopedLockType l(fileLock); previewDir = kit; }
-    srcPlay = false;
+    srcPlay = false; midiPlay = false;
     previewStop = false; previewPlaying = true;
     return true;
 }

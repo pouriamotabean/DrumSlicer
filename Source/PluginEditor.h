@@ -127,9 +127,27 @@ struct Look : juce::LookAndFeel_V4
     void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool, bool) override
     {
         const bool primary = b.getProperties()["primary"];
-        g.setFont(font(primary ? 13.f : 10.5f, true, primary ? 0.18f : 0.12f));
+        const bool compact = b.getProperties()["compact"];
+        g.setFont(font(primary ? (compact ? 11.5f : 13.f) : 10.5f, true, primary ? (compact ? 0.06f : 0.18f) : 0.12f));
         g.setColour(primary ? juce::Colour(0xff1a1206) : (b.getToggleState() ? amber : text.withAlpha(b.isEnabled() ? 0.85f : 0.3f)));
         g.drawText(b.getButtonText(), b.getLocalBounds(), juce::Justification::centred);
+    }
+};
+
+// a small square play / stop button
+struct PlayButton : juce::Button
+{
+    PlayButton() : juce::Button("play") {}
+    void paintButton(juce::Graphics& g, bool over, bool) override
+    {
+        auto r = getLocalBounds().toFloat().reduced(0.5f);
+        const bool on = getToggleState();
+        g.setColour(on ? amber.withAlpha(0.18f) : juce::Colour(0xff1c1e23).brighter(over ? 0.08f : 0.f)); g.fillRoundedRectangle(r, 8.f);
+        g.setColour(on ? amber : panelEdge.brighter(0.3f)); g.drawRoundedRectangle(r, 8.f, 1.f);
+        g.setColour(!isEnabled() ? faint : on ? amber : ui::text);
+        const auto c = r.getCentre();
+        if (on) g.fillRoundedRectangle(juce::Rectangle<float>(10.f, 10.f).withCentre(c), 1.5f);
+        else { juce::Path t; t.addTriangle(c.x - 4.5f, c.y - 7.f, c.x - 4.5f, c.y + 7.f, c.x + 7.f, c.y); g.fillPath(t); }
     }
 };
 
@@ -514,8 +532,9 @@ private:
 };
 
 // ---------------------------------------------------------------- your samples, inside ReKit
-// Your sample folders (added once, remembered), click = listen as loud as the pad, double-click / drag onto
-// a pad / USE = it becomes that pad's "C". Arrow keys walk the list and play each file.
+// FOLDERS: your sample folders (added once, remembered), click = listen as loud as the pad.
+// SIMILAR: the sounds of your archive nearest to the pad's sound (scanned once; loops and long files left out).
+// Double-click / drag onto a pad / USE = it becomes that pad's "C". Arrow keys walk the list and play each file.
 class SampleBrowser : public juce::Component, private juce::ListBoxModel, private juce::Timer
 {
 public:
@@ -530,13 +549,23 @@ public:
         list.setModel(this); list.setRowHeight(24); list.setOutlineThickness(0);
         list.setColour(juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
         list.setWantsKeyboardFocus(true);
-        for (auto* b : { &addBtn, &remBtn, &upBtn, &useBtn, &revealBtn, &closeBtn }) addAndMakeVisible(b);
+        for (auto* b : { &addBtn, &remBtn, &upBtn, &useBtn, &revealBtn, &closeBtn, &tabFolders, &tabSimilar, &scanBtn, &limitBtn, &moreBtn }) addAndMakeVisible(b);
         addChildComponent(firstBtn);
         firstBtn.setButtonText("ADD SAMPLE FOLDER"); firstBtn.getProperties().set("primary", true);
         firstBtn.onClick = [this] { addFolder(); };
         addBtn.setButtonText("+"); remBtn.setButtonText("-"); upBtn.setButtonText("UP");
         useBtn.setButtonText("USE ON PAD"); useBtn.getProperties().set("primary", true);
         revealBtn.setButtonText("OPEN FOLDER"); closeBtn.setButtonText("X");
+        tabFolders.setButtonText("FOLDERS"); tabSimilar.setButtonText("SIMILAR");
+        tabFolders.onClick = [this] { setMode(0); };
+        tabSimilar.onClick = [this] { setMode(1); };
+        scanBtn.setButtonText("RESCAN"); scanBtn.setTooltip("Look for new / changed files in your sample folders (RESCAN ALL with SHIFT)");
+        scanBtn.onClick = [this] { proc.library->scan(juce::ModifierKeys::currentModifiers.isShiftDown()); repaint(); };
+        limitBtn.setTooltip("Files longer than this are loops / long files and left out (click to change)");
+        limitBtn.onClick = [this] { const float l = proc.library->maxSeconds(); const float n = l < 6 ? 8.f : l < 9 ? 10.f : l < 11 ? 15.f : 5.f;
+                                    proc.library->setMaxSeconds(n); saveSettings(); updateLimit(); proc.library->scan(false); };
+        moreBtn.setButtonText("MORE"); moreBtn.setTooltip("5 more");
+        moreBtn.onClick = [this] { want += 5; findSimilar(true); };
         addBtn.setTooltip("Add a sample folder (remembered)"); remBtn.setTooltip("Remove this folder from the list (files stay)");
         revealBtn.setTooltip("Show the selected file in Explorer");
         addAndMakeVisible(roots);
@@ -554,10 +583,12 @@ public:
         revealBtn.onClick = [this] { if (auto f = selectedFile(); f.existsAsFile()) f.revealToUser(); else if (dir.isDirectory()) dir.revealToUser(); };
         closeBtn.onClick = [this] { if (onClose) onClose(); };
         loadSettings();
+        updateLimit();
     }
     ~SampleBrowser() override { saveSettings(); }
 
-    void showFor() { refreshRoots(); updateControls(); if (!dir.isDirectory() && !rootDirs.isEmpty()) open(rootDirs[0]); else rebuild(); list.grabKeyboardFocus(); repaint(); }
+    void showFor() { refreshRoots(); if (!dir.isDirectory() && !rootDirs.isEmpty()) open(rootDirs[0]); else rebuild(); setMode(mode); list.grabKeyboardFocus(); repaint(); }
+    void showSimilar() { setMode(1); }
     void visibilityChanged() override { if (isVisible()) startTimerHz(10); else { stopTimer(); proc.stopPreview(); saveSettings(); } }
 
     void paint(juce::Graphics& g) override
@@ -566,13 +597,9 @@ public:
         g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(c.translated(0, 2), 12.f);
         g.setColour(juce::Colour(0xff15161a)); g.fillRoundedRectangle(c, 12.f);
         g.setColour(ui::panelEdge.brighter(0.3f)); g.drawRoundedRectangle(c.reduced(0.5f), 12.f, 1.f);
-        g.setColour(ui::text); g.setFont(ui::font(14.f, true, 0.3f));
-        g.drawText("SAMPLES", 16, 10, 120, 22, juce::Justification::centredLeft);
         const auto tn = targetName ? targetName() : juce::String();
         g.setColour(tn.isNotEmpty() ? ui::amber : ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
-        g.drawText(tn.isNotEmpty() ? "FOR " + tn + "  -  PAD LEVEL" : juce::String("SELECT A PAD"), 118, 10, getWidth() - 160, 22, juce::Justification::centredLeft);
-        g.setColour(ui::dim); g.setFont(ui::font(9.f, true, 0.1f));
-        g.drawText(dir.isDirectory() ? shortPath(dir) : juce::String(), 16, 94, getWidth() - 32, 14, juce::Justification::centredLeft);
+        g.drawText(tn.isNotEmpty() ? "FOR " + tn : juce::String("SELECT A PAD"), 176, 10, getWidth() - 220, 22, juce::Justification::centredLeft);
         if (rootDirs.isEmpty())
         {   // first time: say what this is
             auto r = juce::Rectangle<int>(20, 60, getWidth() - 40, 170);
@@ -582,25 +609,53 @@ public:
             g.drawFittedText("1.  Add your one-shot folder (once - it is remembered).\n"
                              "2.  Click a file (or use the arrow keys): you hear it as loud as the pad.\n"
                              "3.  Double-click it, drag it onto a pad, or press USE ON PAD:\n"
-                             "     it becomes the pad's sound C. The MIDI stays the same.",
+                             "     it becomes the pad's sound C. The MIDI stays the same.\n"
+                             "4.  SIMILAR: the sounds of your folders nearest to the pad.",
                              r.withTrimmedTop(6), juce::Justification::topLeft, 8, 1.f);
+            return;
         }
-        else if (items.isEmpty())
+        if (mode == 0)
+        {
+            g.setColour(ui::dim); g.setFont(ui::font(9.f, true, 0.1f));
+            g.drawText(dir.isDirectory() ? shortPath(dir) : juce::String(), 16, 94, getWidth() - 32, 14, juce::Justification::centredLeft);
+            if (items.isEmpty()) { g.setColour(ui::dim); g.setFont(ui::font(10.f, true, 0.2f)); g.drawText("NOTHING HERE", list.getBounds(), juce::Justification::centred); }
+            return;
+        }
+        // SIMILAR: what the library knows
+        auto& lib = *proc.library;
+        g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(9.f, true, 0.1f));
+        g.drawText(lib.status(), 14, 40, getWidth() - 150, 20, juce::Justification::centredLeft);
+        if (lib.scanning())
+        {
+            const auto bar = juce::Rectangle<float>(14.f, 62.f, (float) getWidth() - 28.f, 4.f);
+            g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(bar, 2.f);
+            g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * lib.progress()), 2.f);
+        }
+        g.setColour(ui::text.withAlpha(0.8f)); g.setFont(ui::font(9.5f, true, 0.15f));
+        g.drawText(queryText, 14, 72, getWidth() - 90, 20, juce::Justification::centredLeft);
+        if (matches.empty())
         {
             g.setColour(ui::dim); g.setFont(ui::font(10.f, true, 0.2f));
-            g.drawText("NOTHING HERE", list.getBounds(), juce::Justification::centred);
+            const auto ix = lib.index();
+            const juce::String why = !havePad ? "SELECT A PAD WITH A SOUND"
+                                   : (!ix || ix->oneShots == 0) ? (lib.scanning() ? "SCANNING YOUR FOLDERS ..." : "PRESS RESCAN TO READ YOUR FOLDERS")
+                                   : "NOTHING FOUND";
+            g.drawText(why, list.getBounds(), juce::Justification::centred);
         }
     }
     void resized() override
     {
         const int w = getWidth(), h = getHeight();
+        tabFolders.setBounds(12, 10, 76, 22); tabSimilar.setBounds(92, 10, 76, 22);
         closeBtn.setBounds(w - 36, 10, 24, 22);
         roots.setBounds(12, 38, w - 24 - 64, 24);
         addBtn.setBounds(w - 72, 38, 28, 24); remBtn.setBounds(w - 40, 38, 28, 24);
         upBtn.setBounds(12, 66, 44, 24);
         filter.setBounds(62, 66, w - 74, 24);
-        list.setBounds(8, 110, w - 16, h - 110 - 46);
-        firstBtn.setBounds(30, 196, w - 60, 40);
+        scanBtn.setBounds(w - 132, 38, 64, 22); limitBtn.setBounds(w - 64, 38, 52, 22);
+        moreBtn.setBounds(w - 72, 70, 60, 22);
+        list.setBounds(8, mode == 0 ? 110 : 96, w - 16, h - (mode == 0 ? 110 : 96) - 46);
+        firstBtn.setBounds(30, 210, w - 60, 40);
         useBtn.setBounds(12, h - 40, (w - 32) / 2 + 20, 30);
         revealBtn.setBounds(useBtn.getRight() + 8, h - 40, w - 12 - useBtn.getRight() - 8, 30);
     }
@@ -610,11 +665,18 @@ private:
     juce::ListBox list;
     juce::ComboBox roots;
     juce::TextEditor filter;
-    juce::TextButton addBtn, remBtn, upBtn, useBtn, revealBtn, closeBtn, firstBtn;
+    juce::TextButton addBtn, remBtn, upBtn, useBtn, revealBtn, closeBtn, firstBtn, tabFolders, tabSimilar, scanBtn, limitBtn, moreBtn;
     juce::Array<juce::File> rootDirs, items;       // items: folders first, then audio files
     juce::File dir;
     std::unique_ptr<juce::FileChooser> chooser;
     bool wasPlaying = false;
+    int mode = 0;                                  // 0 = FOLDERS, 1 = SIMILAR
+    // SIMILAR
+    std::vector<ds::Match> matches;
+    std::shared_ptr<const ds::LibIndex> holder;    // the matches point into it
+    juce::String queryKey, queryText;
+    bool havePad = false;
+    int want = 5;
 
     static juce::File settingsFile() { return ds::root().getChildFile("browser.txt"); }
     static bool isAudio(const juce::File& f) { return f.hasFileExtension("wav;wave;aif;aiff;flac;mp3;ogg"); }
@@ -632,6 +694,8 @@ private:
             const auto k = l.upToFirstOccurrenceOf("=", false, false), v = l.fromFirstOccurrenceOf("=", false, false);
             if (k == "root" && juce::File::isAbsolutePath(v) && juce::File(v).isDirectory()) rootDirs.addIfNotAlreadyThere(juce::File(v));
             else if (k == "last" && juce::File::isAbsolutePath(v)) dir = juce::File(v);
+            else if (k == "limit" && v.getFloatValue() >= 1.f) proc.library->setMaxSeconds(v.getFloatValue());
+            else if (k == "mode") mode = v.getIntValue() == 1 ? 1 : 0;
         }
         if (!isInsideRoot(dir)) dir = juce::File();
     }
@@ -640,7 +704,26 @@ private:
         juce::StringArray lines;
         for (auto& r : rootDirs) lines.add("root=" + r.getFullPathName());
         if (dir.isDirectory()) lines.add("last=" + dir.getFullPathName());
+        lines.add("limit=" + juce::String(proc.library->maxSeconds(), 1));
+        lines.add("mode=" + juce::String(mode));
         ds::writeText(settingsFile(), lines.joinIntoString("\n"));
+    }
+    void updateLimit() { limitBtn.setButtonText("< " + juce::String(juce::roundToInt(proc.library->maxSeconds())) + " S"); }
+    void setMode(int m)
+    {
+        mode = m;
+        tabFolders.setToggleState(mode == 0, juce::dontSendNotification); tabSimilar.setToggleState(mode == 1, juce::dontSendNotification);
+        list.setRowHeight(mode == 0 ? 24 : 40);
+        updateControls();
+        resized();
+        if (mode == 1)
+        {
+            if (!proc.library->scanning()) proc.library->scan(false);   // new / changed files only: quick
+            want = 5; findSimilar(true);
+        }
+        else rebuild();
+        saveSettings();
+        repaint();
     }
     void refreshRoots()
     {
@@ -652,8 +735,10 @@ private:
     }
     void updateControls()
     {   // no folder yet: only the explanation and one big button
-        const bool any = !rootDirs.isEmpty();
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &roots, &remBtn, &upBtn, &filter, &list, &useBtn, &revealBtn, &addBtn }) c->setVisible(any);
+        const bool any = !rootDirs.isEmpty(), f = any && mode == 0, sm = any && mode == 1;
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &roots, &remBtn, &upBtn, &filter, &addBtn }) c->setVisible(f);
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &scanBtn, &limitBtn, &moreBtn }) c->setVisible(sm);
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &list, &useBtn, &revealBtn, &tabFolders, &tabSimilar }) c->setVisible(any);
         firstBtn.setVisible(!any);
     }
     void addFolder()
@@ -667,6 +752,7 @@ private:
                 if (!d.isDirectory()) return;
                 rootDirs.addIfNotAlreadyThere(d);
                 saveSettings(); open(d);
+                proc.library->scan(false);                 // the archive learns the new folder in the background
             });
     }
     void removeFolder()
@@ -676,6 +762,7 @@ private:
         rootDirs.remove(i);
         dir = rootDirs.isEmpty() ? juce::File() : rootDirs[0];
         saveSettings(); refreshRoots(); rebuild();
+        proc.library->scan(false);
     }
     void open(const juce::File& d)
     {
@@ -685,6 +772,7 @@ private:
     }
     void rebuild()
     {
+        if (mode != 0) return;
         items.clear();
         if (dir.isDirectory())
         {
@@ -703,24 +791,69 @@ private:
         }
         list.updateContent(); list.deselectAllRows(); list.repaint(); repaint();
     }
+    // the pad's sound as it is chosen now (A / B / C) against the library
+    void findSimilar(bool force)
+    {
+        if (mode != 1) return;
+        auto r = proc.getResult();
+        const int pad = targetPad ? targetPad() : -1;
+        havePad = r && pad >= 0 && pad < ds::kPads && r->pads[(size_t) pad].valid;
+        const int src = havePad ? proc.padSource(pad) : 0;
+        auto ix = proc.library->index();
+        const juce::String key = havePad ? juce::String(proc.getResultVersion()) + "|" + juce::String(pad) + "|" + juce::String(src) + "|"
+                                           + juce::String((juce::pointer_sized_int) ix.get()) + "|" + juce::String(want) : juce::String();
+        if (!force && key == queryKey) return;
+        queryKey = key;
+        matches.clear(); holder.reset();
+        if (havePad)
+        {
+            const auto& pd = r->pads[(size_t) pad];
+            matches = proc.library->nearest(pd.get(src == 1, src == 2), r->sr, pd.name, want, holder);
+            queryText = "LIKE  " + pd.name + "  (" + juce::String::charToString((juce::juce_wchar) ('A' + src)) + ")";
+        }
+        else queryText.clear();
+        moreBtn.setEnabled(!matches.empty());
+        list.updateContent(); list.deselectAllRows(); list.repaint(); repaint();
+    }
     juce::File selectedFile() const
     {
         const int r = list.getSelectedRow();
+        if (mode == 1) return r >= 0 && r < (int) matches.size() ? juce::File(matches[(size_t) r].e->path) : juce::File();
         return r >= 0 && r < items.size() && items[r].existsAsFile() ? items[r] : juce::File();
+    }
+    juce::File rowFile(int row) const
+    {
+        if (mode == 1) return row >= 0 && row < (int) matches.size() ? juce::File(matches[(size_t) row].e->path) : juce::File();
+        return row >= 0 && row < items.size() ? items[row] : juce::File();
     }
     void play(const juce::File& f) { if (f.existsAsFile()) { proc.previewSample(f, targetPad ? targetPad() : -1); list.repaint(); } }
 
-    int getNumRows() override { return items.size(); }
+    int getNumRows() override { return mode == 1 ? (int) matches.size() : items.size(); }
     void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool sel) override
     {
-        if (row < 0 || row >= items.size()) return;
-        const auto& f = items[row];
-        const bool folder = f.isDirectory();
+        const auto f = rowFile(row);
+        if (f == juce::File()) return;
+        const bool folder = mode == 0 && f.isDirectory();
         const bool playing = !folder && proc.isPreviewing() && proc.previewingKit() == f;
         const auto r = juce::Rectangle<float>(2.f, 1.f, (float) w - 4.f, (float) h - 2.f);
         if (sel) { g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(r, 5.f); }
         if (playing) { g.setColour(ui::amber); g.fillRoundedRectangle(r.withWidth(3.f), 1.5f); }
-        // icon: folder or a small wave
+        if (mode == 1)
+        {   // name, how it differs, how near, where it lives
+            const auto& m = matches[(size_t) row];
+            g.setColour(playing ? ui::amber : ui::text); g.setFont(ui::font(10.5f, true, 0.03f));
+            g.drawText(f.getFileNameWithoutExtension(), 12, 3, w - 70, 16, juce::Justification::centredLeft);
+            g.setColour(ui::amber.withAlpha(0.85f)); g.setFont(ui::font(8.5f, true, 0.15f));
+            g.drawText(m.tags.isEmpty() ? juce::String("VERY CLOSE") : m.tags.joinIntoString("  "), 12, 20, w / 2, 14, juce::Justification::centredLeft);
+            g.setColour(ui::dim); g.setFont(ui::font(8.5f, false, 0.05f));
+            g.drawText(f.getParentDirectory().getFileName(), w / 2, 20, w / 2 - 60, 14, juce::Justification::centredRight);
+            const auto bar = juce::Rectangle<float>((float) w - 52.f, 9.f, 40.f, 4.f);
+            g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(bar, 2.f);
+            g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * juce::jlimit(0.f, 1.f, m.score / 100.f)), 2.f);
+            g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(8.5f, true, 0.05f));
+            g.drawText(juce::String(juce::roundToInt(m.score)) + "%", w - 56, 18, 46, 14, juce::Justification::centredRight);
+            return;
+        }
         const auto ic = juce::Rectangle<float>(10.f, (float) h / 2.f - 6.f, 14.f, 12.f);
         if (folder) { g.setColour(ui::dim.brighter(0.2f)); g.drawRoundedRectangle(ic, 2.f, 1.2f); g.fillRect(ic.getX(), ic.getY() - 2.f, 6.f, 2.5f); }
         else
@@ -736,18 +869,20 @@ private:
     void selectedRowsChanged(int row) override       // also the arrow keys: each file plays as you walk
     {
         selectedAt = juce::Time::getMillisecondCounter();
-        if (row >= 0 && row < items.size() && items[row].existsAsFile()) play(items[row]);
+        const auto f = rowFile(row);
+        if (f.existsAsFile()) play(f);
     }
     void listBoxItemClicked(int row, const juce::MouseEvent&) override
     {   // a click on the row that was already selected plays it again (a new selection has just played)
         if (juce::Time::getMillisecondCounter() - selectedAt < 250) return;
-        if (row >= 0 && row < items.size() && items[row].existsAsFile()) play(items[row]);
+        const auto f = rowFile(row);
+        if (f.existsAsFile()) play(f);
     }
     void activate(int row)
     {
-        if (row < 0 || row >= items.size()) return;
-        if (items[row].isDirectory()) open(items[row]);
-        else if (onUse) onUse(items[row]);
+        const auto f = rowFile(row);
+        if (mode == 0 && f.isDirectory()) open(f);
+        else if (f.existsAsFile() && onUse) onUse(f);
     }
     void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override { activate(row); }
     void returnKeyPressed(int row) override { activate(row); }
@@ -755,16 +890,26 @@ private:
     juce::var getDragSourceDescription(const juce::SparseSet<int>& rows) override
     {
         if (rows.size() != 1) return {};
-        const int r = rows[0];
-        return r >= 0 && r < items.size() && items[r].existsAsFile() ? juce::var("rekit-sample:" + items[r].getFullPathName()) : juce::var();
+        const auto f = rowFile(rows[0]);
+        return f.existsAsFile() ? juce::var("rekit-sample:" + f.getFullPathName()) : juce::var();
     }
     bool keyPressed(const juce::KeyPress& k) override
     {
-        if (k == juce::KeyPress::backspaceKey && !filter.hasKeyboardFocus(true)) { upBtn.triggerClick(); return true; }
+        if (k == juce::KeyPress::backspaceKey && mode == 0 && !filter.hasKeyboardFocus(true)) { upBtn.triggerClick(); return true; }
         if (k == juce::KeyPress::escapeKey) { if (onClose) onClose(); return true; }
         return false;
     }
-    void timerCallback() override { const bool p = proc.isPreviewing(); if (p || p != wasPlaying) list.repaint(); wasPlaying = p; }
+    void timerCallback() override
+    {
+        const bool p = proc.isPreviewing(); if (p || p != wasPlaying) list.repaint(); wasPlaying = p;
+        if (mode == 1)
+        {
+            findSimilar(false);                    // the pad, its A / B / C or the library changed
+            if (proc.library->scanning() || scanWas) repaint();
+            scanWas = proc.library->scanning();
+        }
+    }
+    bool scanWas = false;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SampleBrowser)
 };
 
@@ -830,8 +975,12 @@ public:
         reBtn.onClick = [this] { proc.reanalyse(); };
         reBtn.setTooltip("ANALYSE: learn the sounds of the selected part.  RE-ANALYSE: the same part again (ignores the cache)");
 
+        addAndMakeVisible(playMidi);
+        playMidi.setTooltip("Listen to the MIDI (EXACT / SYNC / TIGHT as chosen) with your kit as it is now, at the project tempo, looped");
+        playMidi.onClick = [this] { proc.playMidi(!proc.isMidiPlaying()); };
         addAndMakeVisible(dragMidi);
         dragMidi.getProperties().set("primary", true);
+        dragMidi.getProperties().set("compact", true);
         dragMidi.setButtonText("DRAG MIDI");
         dragMidi.setTooltip("Drag onto a MIDI / instrument track in your DAW");
         dragMidi.onDrag = [this]
@@ -994,7 +1143,8 @@ public:
             punch[(size_t) i].setBounds(690, 503, 42, 42); sus[(size_t) i].setBounds(796, 503, 42, 42); pitch[(size_t) i].setBounds(902, 503, 42, 42);
         }
         master.setBounds(669, 362, 42, 42); sens.setBounds(749, 362, 42, 42); grid.setBounds(829, 362, 42, 42); bpm.setBounds(909, 362, 42, 42);
-        dragMidi.setBounds(666, 440, 106, 36);
+        playMidi.setBounds(666, 440, 34, 36);
+        dragMidi.setBounds(704, 440, 68, 36);
         modeBtn[0].setBounds(776, 440, 46, 36); modeBtn[1].setBounds(824, 440, 46, 36); modeBtn[2].setBounds(872, 440, 46, 36);
         exportBtn.setBounds(922, 440, 48, 36);
         srcBtn[0].setBounds(32, 450, 102, 22); srcBtn[1].setBounds(133, 450, 102, 22); srcBtn[2].setBounds(234, 450, 122, 22);
@@ -1020,13 +1170,15 @@ public:
         m.addSubMenu("MOVE ITS HITS TO ...  (THIS PAD GOES)", into, into.getNumItems() > 0);
         m.addSeparator();
         m.addItem(300, "CHOOSE YOUR SAMPLE (C) ...  (LISTEN FIRST)");
+        m.addItem(302, "FIND SIMILAR IN YOUR SAMPLES ...");
         m.addItem(301, "REMOVE YOUR SAMPLE", res->pads[(size_t) pad].user.getNumSamples() > 0);
         m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(localAreaToGlobal(padRect(pad))),
             [this, pad, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
             {
                 if (sp == nullptr || id == 0) return;
                 if (id >= 100 && id < 200) { proc.setPadType(pad, DrumSlicerProcessor::padTypes()[(size_t) (id - 100)]); toast("PAD  " + proc.getResult()->pads[(size_t) pad].name); }
-                else if (id == 300) { selected = pad; openSamples(); }   // the SAMPLES panel: listen at the pad's level, then use
+                else if (id == 300) { selected = pad; openSamples(); }
+                else if (id == 302) { selected = pad; openSamples(); samples.showSimilar(); }   // the SAMPLES panel: listen at the pad's level, then use
                 else if (id == 301) { proc.clearPadSample(pad); toast("BACK TO A"); }
                 else if (id >= 200) { const int q = id - 200; proc.mergePad(pad, q); selected = q; toast("HITS MOVED TO  " + proc.getResult()->pads[(size_t) q].name); }
                 updateVisibility(); repaint();
@@ -1158,6 +1310,9 @@ public:
             wasPlaying = proc.isSourcePlaying();
         }
         browseBtn.setToggleState(samples.isVisible(), juce::dontSendNotification);
+        playMidi.setToggleState(proc.isMidiPlaying(), juce::dontSendNotification);
+        playMidi.setEnabled(res != nullptr);
+        if (!res && proc.isMidiPlaying()) proc.playMidi(false);
         if (samples.isVisible() && selected != browsedPad) { browsedPad = selected; samples.repaint(); }
         const bool toasting = juce::Time::getMillisecondCounter() < toastUntil;
         if (lit || proc.isBusy() || wasBusy || toasting || wasToasting) repaint();
@@ -1214,7 +1369,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.6.2";
+            const juce::String ver = "v1.8.0";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -1580,6 +1735,7 @@ private:
     std::array<juce::TextButton, 3> modeBtn;
     std::array<juce::TextButton, 3> srcBtn;
     ui::DragButton dragMidi, dragWav;
+    ui::PlayButton playMidi;
     ShapeView shape;
     juce::TooltipWindow tips { this, 700 };
     std::unique_ptr<juce::FileChooser> chooser;
