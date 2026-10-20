@@ -37,6 +37,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         p.push_back(std::make_unique<F>(juce::ParameterID{ "punch" + s, 1 }, n + " Punch",   NR(-12.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "sus" + s, 1 },   n + " Sustain", NR(-12.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "pitch" + s, 1 }, n + " Pitch",   NR(-12.f, 12.f, 0.01f), 0.f));
+        p.push_back(std::make_unique<F>(juce::ParameterID{ "tone" + s, 1 },  n + " Tone",    NR(-12.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "best" + juce::String(i), 1 }, n + " Best hit", false));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "usec" + juce::String(i), 1 }, n + " Your sample", false));
     }
@@ -66,7 +67,89 @@ ShapeParams DrumSlicerProcessor::shapeParams(int i) const
     p.start = v("st"); p.end = v("en"); p.attack = v("atk"); p.hold = v("hold"); p.decay = v("dcy");
     p.punch = v("punch"); p.sustain = v("sus"); p.best = v("best") > 0.5f;
     p.attackCurve = v("fic"); p.fadeOut = v("fo"); p.fadeOutCurve = v("foc"); p.user = v("usec") > 0.5f;
+    p.tone = v("tone");
     return p;
+}
+
+// ---------------------------------------------------------------- a shape per source (A / B / C)
+const char* const* DrumSlicerProcessor::shapeIds()
+{
+    static const char* const ids[kShapeN] = { "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy", "punch", "sus", "pitch", "tone" };
+    return ids;
+}
+std::array<float, DrumSlicerProcessor::kShapeN> DrumSlicerProcessor::shownShape(int pad) const
+{
+    std::array<float, kShapeN> v {};
+    for (int k = 0; k < kShapeN; ++k) v[(size_t) k] = apvts.getRawParameterValue(juce::String(shapeIds()[k]) + juce::String(pad))->load();
+    return v;
+}
+void DrumSlicerProcessor::showShape(int pad, const std::array<float, kShapeN>& v)
+{
+    for (int k = 0; k < kShapeN; ++k)
+        if (auto* p = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(pad))) p->setValueNotifyingHost(p->convertTo0to1(v[(size_t) k]));
+}
+void DrumSlicerProcessor::switchSlot(int pad, int src)
+{
+    if (pad < 0 || pad >= ds::kPads || src < 0 || src > 2) return;
+    std::array<float, kShapeN> load {}; bool doLoad = false;
+    const int before = padSource(pad);               // (called before the A / B / C switch itself changes)
+    {
+        std::lock_guard<std::mutex> g(slotLock);
+        int own = slotOwner[(size_t) pad];
+        if (own < 0) { own = before; slotOwner[(size_t) pad] = before; }   // not known yet: what is shown belongs to what is chosen
+        if (own == src) return;
+        slots[(size_t) pad][(size_t) own].valid = true; slots[(size_t) pad][(size_t) own].v = shownShape(pad);
+        // a slot never set yet takes the shape shown now (projects of older versions: all three alike)
+        if (slots[(size_t) pad][(size_t) src].valid) { load = slots[(size_t) pad][(size_t) src].v; doLoad = true; }
+        slotOwner[(size_t) pad] = src;
+    }
+    if (doLoad) showShape(pad, load);
+}
+void DrumSlicerProcessor::resetShape(int pad, int src)
+{
+    if (pad < 0 || pad >= ds::kPads || src < 0 || src > 2) return;
+    std::array<float, kShapeN> v {};
+    for (int k = 0; k < kShapeN; ++k)
+        if (auto* p = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(pad))) v[(size_t) k] = p->convertFrom0to1(p->getDefaultValue());
+    bool shown;
+    {
+        std::lock_guard<std::mutex> g(slotLock);
+        slots[(size_t) pad][(size_t) src] = { true, v };
+        shown = slotOwner[(size_t) pad] == src;
+    }
+    if (shown) showShape(pad, v);
+}
+juce::ValueTree DrumSlicerProcessor::slotsTree()
+{
+    juce::ValueTree t("SLOTS");
+    std::lock_guard<std::mutex> g(slotLock);
+    for (int p = 0; p < ds::kPads; ++p)
+    {
+        t.setProperty("own" + juce::String(p), slotOwner[(size_t) p], nullptr);
+        for (int s = 0; s < 3; ++s)
+        {
+            if (!slots[(size_t) p][(size_t) s].valid || s == slotOwner[(size_t) p]) continue;     // the shown one is in the parameters
+            juce::StringArray a; for (float x : slots[(size_t) p][(size_t) s].v) a.add(juce::String(x, 4));
+            t.setProperty("p" + juce::String(p) + "s" + juce::String(s), a.joinIntoString(","), nullptr);
+        }
+    }
+    return t;
+}
+void DrumSlicerProcessor::slotsFromTree(const juce::ValueTree& t)
+{
+    std::lock_guard<std::mutex> g(slotLock);
+    for (int p = 0; p < ds::kPads; ++p)
+    {
+        slotOwner[(size_t) p] = t.isValid() ? (int) t.getProperty("own" + juce::String(p), -1) : -1;
+        for (int s = 0; s < 3; ++s)
+        {
+            auto& sl = slots[(size_t) p][(size_t) s];
+            sl.valid = false;
+            const auto str = t.isValid() ? t.getProperty("p" + juce::String(p) + "s" + juce::String(s)).toString() : juce::String();
+            juce::StringArray a; a.addTokens(str, ",", "");
+            if (a.size() == kShapeN) { for (int k = 0; k < kShapeN; ++k) sl.v[(size_t) k] = a[k].getFloatValue(); sl.valid = true; }
+        }
+    }
 }
 
 // trim -> transient shaper (punch on the attack, sustain on the rest) -> attack / hold / decay envelope
@@ -79,6 +162,16 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double s
     offset = s0;
     juce::AudioBuffer<float> o(2, n);
     for (int c = 0; c < 2; ++c) o.copyFrom(c, 0, raw, std::min(c, raw.getNumChannels() - 1), s0, n);
+    if (std::abs(p.tone) > 0.05f)
+    {   // TONE: a tilt around ~800 Hz, + = brighter (highs up, lows down by half each), - = darker / duller
+        const float k = (float) std::exp(-2.0 * juce::MathConstants<double>::pi * 800.0 / sr);
+        const float gl = juce::Decibels::decibelsToGain(-p.tone * 0.5f), gh = juce::Decibels::decibelsToGain(p.tone * 0.5f);
+        for (int c = 0; c < 2; ++c)
+        {
+            auto* d = o.getWritePointer(c); float lp = 0;
+            for (int i = 0; i < n; ++i) { lp = (1.f - k) * d[i] + k * lp; d[i] = lp * gl + (d[i] - lp) * gh; }
+        }
+    }
     const bool shapeT = std::abs(p.punch) > 0.05f || std::abs(p.sustain) > 0.05f;
     auto coef = [&](double ms) { return (float) std::exp(-1.0 / (ms * 0.001 * sr)); };
     const float fa = coef(0.5), fr = coef(30), sa = coef(15), sr2 = coef(150), gsm = coef(2);
@@ -118,6 +211,7 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double s
 
 void DrumSlicerProcessor::timerCallback()
 {
+    for (int p = 0; p < ds::kPads; ++p) switchSlot(p, padSource(p));   // A / B / C changed from anywhere (host, project)
     reshape();
     rebuildSeq();
 }
@@ -629,6 +723,7 @@ void DrumSlicerProcessor::getStateInformation(juce::MemoryBlock& d)
     st.setProperty("loopPath", getLoopFile().getFullPathName(), nullptr);
     st.setProperty("kitPath", getKitDir().getFullPathName(), nullptr);
     st.setProperty("snap", snap.load(), nullptr);
+    st.appendChild(slotsTree(), nullptr);
     if (auto r = getResult())
     {
         std::lock_guard<std::mutex> g(embedLock);
@@ -648,6 +743,7 @@ void DrumSlicerProcessor::setStateInformation(const void* data, int size)
     if (emb.isValid()) { emb = emb.createCopy(); st.removeChild(st.getChildWithName("EMBED"), nullptr); }
     const juce::String kp = st.getProperty("kitPath").toString(), lp = st.getProperty("loopPath").toString();
     snap = (bool) st.getProperty("snap", true);
+    { auto sl = st.getChildWithName("SLOTS"); slotsFromTree(sl.createCopy()); if (sl.isValid()) st.removeChild(sl, nullptr); }
     apvts.replaceState(st);
     restoreAsync(emb, kp.isNotEmpty() ? juce::File(kp) : juce::File(), lp.isNotEmpty() ? juce::File(lp) : juce::File());
 }
@@ -821,9 +917,133 @@ bool DrumSlicerProcessor::addPad(int pad, const juce::String& type, const juce::
     const auto loop = getLoopFile(); const auto kit = getKitDir();
     publish(r, kit, loop, orphan());
     if (kit == juce::File() && loop.existsAsFile()) ds::saveCache(loop, *r);
+    for (int s = 0; s < 3; ++s) resetShape(pad, s);  // a new pad: nothing of the old one
     setPadSource(pad, 2);
     audition(pad);
     return true;
+}
+
+// ---------------------------------------------------------------- MATCH TO A
+static ShapeParams shapeFrom(const std::array<float, DrumSlicerProcessor::kShapeN>& v)
+{   // st en atk fic fo foc hold dcy punch sus pitch tone
+    ShapeParams p;
+    p.start = v[0]; p.end = v[1]; p.attack = v[2]; p.attackCurve = v[3]; p.fadeOut = v[4]; p.fadeOutCurve = v[5];
+    p.hold = v[6]; p.decay = v[7]; p.punch = v[8]; p.sustain = v[9]; p.tone = v[11];
+    return p;
+}
+// the sound as it plays: shaped, then at its pitch (the voice plays it faster / slower)
+static juce::AudioBuffer<float> asHeard(const juce::AudioBuffer<float>& raw, double sr, const std::array<float, DrumSlicerProcessor::kShapeN>& v)
+{
+    int off = 0;
+    auto sh = shapeShot(raw, sr, shapeFrom(v), off);
+    const double ratio = std::pow(2.0, v[10] / 12.0);
+    if (std::abs(ratio - 1.0) < 1e-4) return sh;
+    const int n = std::max(1, (int) (sh.getNumSamples() / ratio));
+    juce::AudioBuffer<float> o(2, n);
+    for (int c = 0; c < 2; ++c)
+    {
+        const float* s = sh.getReadPointer(std::min(c, sh.getNumChannels() - 1)); float* d = o.getWritePointer(c);
+        for (int i = 0; i < n; ++i) { const double p = i * ratio; const int i0 = (int) p; const float fr = (float) (p - i0);
+            d[i] = i0 + 1 < sh.getNumSamples() ? s[i0] + (s[i0 + 1] - s[i0]) * fr : (i0 < sh.getNumSamples() ? s[i0] : 0.f); }
+    }
+    return o;
+}
+
+DrumSlicerProcessor::MatchSuggestion DrumSlicerProcessor::suggestMatch(int pad)
+{
+    MatchSuggestion m;
+    auto r = getResult();
+    if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid) { m.why = "NO SOUND ON THIS PAD"; return m; }
+    const auto& pd = r->pads[(size_t) pad];
+    if (pd.user.getNumSamples() == 0) { m.why = "LOAD YOUR SAMPLE (C) FIRST"; return m; }
+    // A as you hear it: its own shape (shown now if A is chosen, else its slot)
+    std::array<float, kShapeN> vA = shownShape(pad), vC = shownShape(pad), neutral {};
+    for (int k = 0; k < kShapeN; ++k)
+        if (auto* p = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(pad))) neutral[(size_t) k] = p->convertFrom0to1(p->getDefaultValue());
+    {
+        std::lock_guard<std::mutex> g(slotLock);
+        const int own = slotOwner[(size_t) pad];
+        if (own != 0 && slots[(size_t) pad][0].valid) vA = slots[(size_t) pad][0].v;
+        if (own != 2) vC = slots[(size_t) pad][2].valid ? slots[(size_t) pad][2].v : neutral;
+    }
+    ds::Feat fT, fC;
+    if (!ds::fingerprint(asHeard(pd.audio, r->sr, vA), r->sr, fT) || !ds::fingerprint(pd.user, r->sr, fC)) { m.why = "COULD NOT MEASURE"; return m; }
+    auto ix = library->index();
+    ds::LibIndex def; def.stats();
+    const ds::LibIndex& stats = (ix && ix->oneShots >= 50) ? *ix : def;
+    const auto fam = ds::familyOf(pd.name);
+    auto eval = [&](const std::array<float, kShapeN>& v) {
+        ds::Feat f; if (!ds::fingerprint(asHeard(pd.user, r->sr, v), r->sr, f)) return 1.0e9f;
+        return ds::distance(fT, f, stats, fam); };
+    m.before = ds::scoreOf(eval(vC));
+    // start from your sample untouched; its pitch to A's (an octave off counts as near)
+    auto v = neutral;
+    if (fT[ds::fPitchConf] > 0.5f && fC[ds::fPitchConf] > 0.5f)
+    {
+        float st = (fT[ds::fPitch] - fC[ds::fPitch]) * 12.f;
+        while (st > 6.f) st -= 12.f; while (st < -6.f) st += 12.f;
+        v[10] = std::round(st * 10.f) / 10.f;
+    }
+    float best = eval(v);
+    auto tryList = [&](std::initializer_list<int> idx, const std::vector<std::vector<float>>& options) {
+        for (const auto& opt : options)
+        {
+            auto t = v; int j = 0; for (int k : idx) t[(size_t) k] = opt[(size_t) j++];
+            const float d = eval(t); if (d < best - 1e-4f) { best = d; v = t; }
+        } };
+    const double lenT = std::exp2(fT[ds::fLen]) - 1.0;           // A's heard length, ms
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        { std::vector<std::vector<float>> o; for (float d : { -1.f, -0.5f, 0.5f, 1.f, 12.f, -12.f }) o.push_back({ juce::jlimit(-12.f, 12.f, v[10] + d) }); tryList({ 10 }, o); }
+        {   // length: an end and a fade out (in C's own time: its pitch changes its speed)
+            const double ratio = std::pow(2.0, v[10] / 12.0);
+            std::vector<std::vector<float>> o;
+            o.push_back({ 2000.f, 0.f });
+            for (double f : { 1.0, 1.3, 1.7, 2.3, 3.2, 4.5, 6.5 })
+                for (double fo : { 0.0, 0.3, 0.5, 0.7, 0.9 })
+                {
+                    const double en = juce::jlimit(5.0, 2000.0, lenT * f * ratio);
+                    o.push_back({ (float) en, (float) (en * fo) });
+                }
+            tryList({ 1, 4 }, o);
+        }
+        { std::vector<std::vector<float>> o; for (float t = -12.f; t <= 12.01f; t += 1.5f) o.push_back({ t }); tryList({ 11 }, o); }
+        { std::vector<std::vector<float>> o; for (float t = -9.f; t <= 9.01f; t += 1.5f) o.push_back({ t }); tryList({ 8 }, o); }
+        { std::vector<std::vector<float>> o; for (float t = -9.f; t <= 9.01f; t += 1.5f) o.push_back({ t }); tryList({ 9 }, o); }
+        { std::vector<std::vector<float>> o; for (float t : { 0.f, 0.5f, 1.f, 2.f, 4.f, 8.f }) o.push_back({ t }); tryList({ 2 }, o); }
+    }
+    m.after = ds::scoreOf(best);
+    m.v = v; m.ok = true;
+    auto num = [](float x, int dec) { return juce::String(x > 0 ? "+" : "") + juce::String(x, dec); };
+    if (std::abs(v[10]) > 0.05f) m.lines.add("PITCH  " + num(v[10], 1) + " ST");
+    if (v[1] < 1999.f) m.lines.add("LENGTH  END " + juce::String(juce::roundToInt(v[1])) + " MS" + (v[4] > 0.5f ? ",  FADE OUT " + juce::String(juce::roundToInt(v[4])) + " MS" : juce::String()));
+    if (std::abs(v[11]) > 0.05f) m.lines.add("TONE  " + juce::String(v[11] < 0 ? "DARKER " : "BRIGHTER ") + juce::String(std::abs(v[11]), 1) + " DB");
+    if (std::abs(v[8]) > 0.05f) m.lines.add("PUNCH  " + num(v[8], 1) + " DB");
+    if (std::abs(v[9]) > 0.05f) m.lines.add("SUSTAIN  " + num(v[9], 1) + " DB");
+    if (v[2] > 0.05f) m.lines.add("FADE IN  " + juce::String(v[2], 1) + " MS  (SOFTER ATTACK)");
+    if (m.lines.isEmpty()) m.lines.add("NOTHING TO CHANGE: IT IS AS NEAR AS IT GETS");
+    return m;
+}
+
+void DrumSlicerProcessor::applyMatch(int pad, const MatchSuggestion& m, float amount)
+{
+    if (!m.ok || pad < 0 || pad >= ds::kPads) return;
+    setPadSource(pad, 2);                            // C is the one shown (and shaped)
+    const auto cur = shownShape(pad);
+    undoShape[(size_t) pad] = cur; undoValid[(size_t) pad] = true;
+    auto v = m.v;
+    if (amount < 0.999f) for (int k = 0; k < kShapeN; ++k) v[(size_t) k] = cur[(size_t) k] + amount * (m.v[(size_t) k] - cur[(size_t) k]);
+    showShape(pad, v);
+    audition(pad);
+}
+
+void DrumSlicerProcessor::undoMatch(int pad)
+{
+    if (!canUndoMatch(pad)) return;
+    setPadSource(pad, 2);
+    showShape(pad, undoShape[(size_t) pad]);
+    undoValid[(size_t) pad] = false;
+    audition(pad);
 }
 
 // ---------------------------------------------------------------- your samples ("C")
@@ -837,6 +1057,7 @@ bool DrumSlicerProcessor::setPadSample(int pad, const juce::File& f)
     r->pads[(size_t) pad].user = std::move(shot);
     r->pads[(size_t) pad].userName = f.getFileNameWithoutExtension();
     publish(r, getKitDir(), getLoopFile(), orphan());
+    resetShape(pad, 2);                              // a new sample of yours starts unshaped
     setPadSource(pad, 2);
     audition(pad);
     return true;
@@ -854,6 +1075,7 @@ void DrumSlicerProcessor::clearPadSample(int pad)
 
 void DrumSlicerProcessor::setPadSource(int pad, int src)
 {
+    switchSlot(pad, src);                            // the knobs now show this source's own shape
     if (auto* p = apvts.getParameter("best" + juce::String(pad))) p->setValueNotifyingHost(src == 1 ? 1.f : 0.f);
     if (auto* p = apvts.getParameter("usec" + juce::String(pad))) p->setValueNotifyingHost(src == 2 ? 1.f : 0.f);
 }
@@ -911,6 +1133,7 @@ juce::File DrumSlicerProcessor::saveKit(const juce::String& rawName)
     // the settings (shape, A / B, volume, pan, pitch, MIDI mode) without the window size or file paths
     auto st = apvts.copyState();
     for (auto id : { "loopPath", "kitPath", "uiWidth" }) st.removeProperty(id, nullptr);
+    st.appendChild(slotsTree(), nullptr);
     if (auto xml = st.createXml()) ok = ok && ds::writeText(ds::kitData(tmp).getChildFile("settings.xml"), xml->toString());
     // ready-to-use files next to it: the sounds as you hear them + both MIDI versions
     auto sh = getShaped();
@@ -969,6 +1192,7 @@ void DrumSlicerProcessor::loadKit(const juce::File& kit, bool applySettings)
                 if (id == "master" || id == "sens") continue;                // your mix level stays
                 if (auto* p = apvts.getParameter(id)) p->setValueNotifyingHost(p->convertTo0to1((float) c.getProperty("value")));
             }
+            slotsFromTree(vt->getChildWithName("SLOTS"));          // the kit's other A / B / C shapes
             publish(r, kit, ds::kitLoop(kit));
             setStatus("KIT LOADED");
             busy = false;

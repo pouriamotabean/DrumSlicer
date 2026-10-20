@@ -9,7 +9,7 @@
 // per-pad sound shaping (start / end trim, attack-hold-decay, punch / sustain), rendered off the audio thread
 // fades: curve -1..1 (0 = straight line, + = stays louder, - = drops / rises later), gain = t^(2^(-3 curve))
 struct ShapeParams { float start = 0, end = 2000, attack = 0, hold = 2000, decay = 2000, punch = 0, sustain = 0,
-                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0; bool best = false, user = false;
+                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0, tone = 0; bool best = false, user = false;
                      bool operator!=(const ShapeParams& o) const { return std::memcmp(this, &o, sizeof(*this)) != 0; } };
 struct Shaped
 {
@@ -101,6 +101,18 @@ public:
     bool setPadSample(int pad, const juce::File& f);
     void clearPadSample(int pad);
     void setPadSource(int pad, int src);             // 0 = A, 1 = B, 2 = C
+    // every source of a pad (A, B, C) keeps its own shape + pitch + tone: the knobs and the sound editor show the
+    // chosen one. Switching saves the shown values into its slot and brings the other one's back.
+    static constexpr int kShapeN = 12;
+    static const char* const* shapeIds();            // st en atk fic fo foc hold dcy punch sus pitch tone
+    void resetShape(int pad, int src);               // a new sound starts neutral (only that slot)
+    // MATCH TO A: the shape (pitch, length, tone, punch, sustain, fade in) that brings your sample C nearest to
+    // the pad's A as you hear it - found by trying, measured with the same ears as the SIMILAR search
+    struct MatchSuggestion { bool ok = false; std::array<float, kShapeN> v {}; float before = 0, after = 0; juce::StringArray lines; juce::String why; };
+    MatchSuggestion suggestMatch(int pad);
+    void applyMatch(int pad, const MatchSuggestion& m, float amount);   // amount 1 = all of it, 0.5 = half way
+    bool canUndoMatch(int pad) const { return pad >= 0 && pad < ds::kPads && undoValid[(size_t) pad]; }
+    void undoMatch(int pad);
     int padSource(int pad) const;
     void setPadType(int pad, const juce::String& type);
     bool addPad(int pad, const juce::String& type, const juce::File& f);   // an empty pad: a new sound of yours ("" = from its file name)
@@ -150,6 +162,17 @@ private:
     // message thread, so the audio thread never frees big buffers when it lets go of its copy.
     void publish(std::shared_ptr<ds::Result> r, const juce::File& kit, const juce::File& loop, const juce::String& orphanName = {});
     void setSource(std::shared_ptr<ds::Source> s, juce::int64 a, juce::int64 b);
+    struct Slot { bool valid = false; std::array<float, kShapeN> v {}; };
+    std::array<std::array<float, kShapeN>, ds::kPads> undoShape {};
+    std::array<bool, ds::kPads> undoValid {};
+    std::array<std::array<Slot, 3>, ds::kPads> slots {};
+    std::array<int, ds::kPads> slotOwner { -1, -1, -1, -1, -1, -1, -1, -1 };
+    std::mutex slotLock;
+    std::array<float, kShapeN> shownShape(int pad) const;
+    void showShape(int pad, const std::array<float, kShapeN>& v);
+    void switchSlot(int pad, int src);
+    juce::ValueTree slotsTree();
+    void slotsFromTree(const juce::ValueTree& t);
     struct SeqEv { double tick; int note; int vel; };
     struct Seq { std::vector<SeqEv> ev; double loopTicks = 0; };
     std::shared_ptr<const Seq> seq, audioSeq;

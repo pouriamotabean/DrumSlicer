@@ -12,23 +12,32 @@
 namespace ds
 {
 // ---------------------------------------------------------------- fingerprint
-// what a drum sound is like, in numbers you could say out loud:
+// what a drum sound is like, measured the way it is heard (the level is taken out: peak = 1):
 enum FeatIdx
 {
     fAttack = 0,     // rise time, log2 ms
-    fPunch,          // first 15 ms vs the body (15 - 150 ms), dB: high = punchy click, low = soft
-    fDecay20,        // time to fall 20 dB below the peak, log2 ms
-    fDecay40,        // time to fall 40 dB, log2 ms
-    fBrightA,        // spectral centre of the attack (0 - 40 ms), log2 Hz
-    fBrightB,        // spectral centre of the body (40 - 300 ms), log2 Hz
-    fNoise,          // flatness of the body: noise (snare wires, hats) vs tone (808, tom)
-    fAir,            // energy above 5 kHz, dB of the total
-    fSub,            // energy below 80 Hz, dB of the total
+    fPunch,          // first 15 ms vs the body (15 - 150 ms), dB
+    fLen,            // HEARD LENGTH: time until the body is 20 dB down, log2 ms (what you call short / long)
+    fLen10,          // time until 10 dB down, log2 ms (how fast the body goes)
+    fTail,           // time until 40 dB down, log2 ms (the quiet end: tail / room)
+    fRoom,           // energy 150 - 500 ms vs the first 50 ms, dB (dry vs roomy)
+    fHard,           // HARDNESS: 2 - 12 kHz energy in the attack, dB of the whole sound (crack, stick; soft = low)
+    fBright,         // 2 - 8 kHz of the whole sound, dB (bright vs dull / muffled)
+    fAir,            // above 8 kHz, dB
+    fSub,            // below 80 Hz, dB
+    fNoise,          // flatness of the body: noise (wires, hats) vs tone (808, tom)
     fPitch,          // pitch of the body, log2 Hz
     fPitchConf,      // how clearly it has one (0..1)
-    fBands,          // 24 bands 30 Hz - 16 kHz, dB relative to the loudest band
+    fGlide,          // pitch at the start minus pitch of the body, semitones (a kick's drop, an 808 glide)
+    fCentA,          // spectral centre of the attack, log2 Hz
+    fCentB,          // spectral centre of the body, log2 Hz
+    fTimbre,         // 8 timbre coefficients (cepstrum of the 24 bands)
+    kTimbre = 8,
+    fBands = fTimbre + kTimbre,      // 24 bands 30 Hz - 16 kHz, dB relative to the loudest
     kBands = 24,
-    kFeat = fBands + kBands
+    fShape = fBands + kBands,        // the sound's picture: 8 bands x 10 moments (0 - 400 ms), dB of its loudest cell
+    kShapeB = 8, kShapeT = 10,
+    kFeat = fShape + kShapeB * kShapeT
 };
 using Feat = std::array<float, kFeat>;
 
@@ -42,7 +51,7 @@ inline bool fingerprint(const juce::AudioBuffer<float>& in, double sr, Feat& f)
     float pk = 0;
     for (int i = 0; i < n0; ++i) { m[(size_t) i] = 0.5f * (L[i] + R[i]); pk = std::max(pk, std::abs(m[(size_t) i])); }
     if (pk < 1.0e-5f) return false;
-    // start at the attack (leading silence of a file does not count), 2 s at most
+    // start at the attack (leading silence of a file does not count), 2 s at most; silence after it adds nothing
     int s0 = 0; while (s0 < n0 && std::abs(m[(size_t) s0]) < 0.03f * pk) ++s0;
     s0 = std::max(0, s0 - (int) (0.001 * sr));
     const int n = std::min(n0 - s0, (int) (2.0 * sr));
@@ -50,23 +59,37 @@ inline bool fingerprint(const juce::AudioBuffer<float>& in, double sr, Feat& f)
     for (int i = 0; i < n; ++i) m[(size_t) i] = m[(size_t) (i + s0)] / pk;
     m.resize((size_t) n);
 
-    // envelope: peak over 1 ms
+    // envelope: rms over 2 ms (closer to loudness than the raw peak)
     const int H = std::max(1, (int) (0.001 * sr)), K = std::max(1, n / H);
     std::vector<float> env((size_t) K);
-    for (int k = 0; k < K; ++k) { float e = 0; for (int i = k * H; i < std::min(n, (k + 1) * H); ++i) e = std::max(e, std::abs(m[(size_t) i])); env[(size_t) k] = e; }
+    for (int k = 0; k < K; ++k)
+    {
+        double e = 0; int c = 0;
+        for (int i = std::max(0, k * H - H / 2); i < std::min(n, (k + 1) * H + H / 2); ++i) { e += (double) m[(size_t) i] * m[(size_t) i]; ++c; }
+        env[(size_t) k] = (float) std::sqrt(e / std::max(1, c));
+    }
     int kp = 0; for (int k = 1; k < std::min(K, 80); ++k) if (env[(size_t) k] > env[(size_t) kp]) kp = k;
     const float ep = std::max(1.0e-6f, env[(size_t) kp]);
     int k10 = 0; while (k10 < kp && env[(size_t) k10] < 0.1f * ep) ++k10;
     int k90 = k10; while (k90 < kp && env[(size_t) k90] < 0.9f * ep) ++k90;
     f[fAttack] = (float) std::log2(1.0 + (k90 - k10));
-    auto fallTo = [&](float db) { const float t = ep * std::pow(10.f, db / 20.f); int last = kp;
-        for (int k = kp; k < K; ++k) if (env[(size_t) k] >= t) last = k; return (float) std::log2(1.0 + (last - kp)); };
-    f[fDecay20] = fallTo(-20.f); f[fDecay40] = fallTo(-40.f);
+    // the first time it stays below a level (a later bump of the tail does not make the body longer)
+    auto fallTo = [&](float db, int holdMs) { const float t = ep * std::pow(10.f, db / 20.f);
+        for (int k = kp; k < K; ++k)
+        {
+            if (env[(size_t) k] >= t) continue;
+            bool stays = true;
+            for (int j = k; j < std::min(K, k + holdMs); ++j) if (env[(size_t) j] >= t) { stays = false; break; }
+            if (stays) return (float) std::log2(1.0 + (k - kp));
+        }
+        return (float) std::log2(1.0 + (K - kp)); };
+    f[fLen10] = fallTo(-10.f, 8); f[fLen] = fallTo(-20.f, 15); f[fTail] = fallTo(-40.f, 30);
     auto energy = [&](double a, double b) { const int i0 = std::min(n, (int) (a * sr)), i1 = std::min(n, (int) (b * sr)); double e = 0;
         for (int i = i0; i < i1; ++i) e += (double) m[(size_t) i] * m[(size_t) i]; return i1 > i0 ? e / (i1 - i0) : 0.0; };
     f[fPunch] = (float) (10.0 * std::log10((energy(0, 0.015) + 1e-12) / (energy(0.015, 0.15) + 1e-12)));
+    f[fRoom] = (float) (10.0 * std::log10((energy(0.15, 0.5) + 1e-12) / (energy(0, 0.05) + 1e-12)));
 
-    // spectra: 2048-point frames
+    // spectra: 2048-point frames for the colour, 512-point frames for the picture in time
     constexpr int order = 11, N = 1 << order;
     juce::dsp::FFT fft(order);
     std::vector<float> win((size_t) N), buf((size_t) (2 * N));
@@ -78,28 +101,30 @@ inline bool fingerprint(const juce::AudioBuffer<float>& in, double sr, Feat& f)
         for (int b = 0; b < N / 2; ++b) pw[(size_t) b] += (double) buf[(size_t) b] * buf[(size_t) b]; };
     const double binHz = sr / N;
     std::vector<double> pa((size_t) (N / 2), 0.0), pb((size_t) (N / 2), 0.0);
-    spectrum(-N / 4, pa);                                              // the attack: centred on the first ~10 ms
-    const int hop = N / 2;
+    spectrum(-N / 2 + (int) (0.012 * sr), pa);                       // the attack: the window ends ~12 ms in
     int frames = 0;
-    for (int st = (int) (0.04 * sr) - N / 2; st < std::min(n, (int) (0.30 * sr)); st += hop) { spectrum(st, pb); ++frames; }
+    for (int st = (int) (0.04 * sr) - N / 2; st < std::min(n, (int) (0.30 * sr)); st += N / 2) { spectrum(st, pb); ++frames; }
     if (frames == 0) spectrum(0, pb);
     auto centre = [&](const std::vector<double>& p) { double num = 0, den = 0;
         for (int b = 1; b < N / 2; ++b) { const double hz = b * binHz; if (hz < 20) continue; num += p[(size_t) b] * std::log2(hz); den += p[(size_t) b]; }
         return den > 0 ? (float) (num / den) : 7.f; };
-    f[fBrightA] = centre(pa); f[fBrightB] = centre(pb);
-    std::vector<double> all((size_t) (N / 2)); double tot = 0;
-    for (int b = 0; b < N / 2; ++b) { all[(size_t) b] = pa[(size_t) b] + pb[(size_t) b]; tot += all[(size_t) b]; }
+    f[fCentA] = centre(pa); f[fCentB] = centre(pb);
+    std::vector<double> all((size_t) (N / 2)); double tot = 0, totA = 0;
+    for (int b = 0; b < N / 2; ++b) { all[(size_t) b] = pa[(size_t) b] + pb[(size_t) b]; tot += all[(size_t) b]; totA += pa[(size_t) b]; }
     tot = std::max(tot, 1e-18);
-    double air = 0, sub = 0;
-    for (int b = 1; b < N / 2; ++b) { const double hz = b * binHz; if (hz >= 5000) air += all[(size_t) b]; if (hz < 80) sub += all[(size_t) b]; }
-    f[fAir] = (float) (10.0 * std::log10(air / tot + 1e-9));
-    f[fSub] = (float) (10.0 * std::log10(sub / tot + 1e-9));
+    auto bandDb = [&](const std::vector<double>& p, double lo, double hi, double ref) { double e = 0;
+        for (int b = 1; b < N / 2; ++b) { const double hz = b * binHz; if (hz >= lo && hz < hi) e += p[(size_t) b]; }
+        return (float) (10.0 * std::log10(e / ref + 1e-9)); };
+    f[fHard] = bandDb(pa, 2000, 12000, tot);
+    f[fBright] = bandDb(all, 2000, 8000, tot);
+    f[fAir] = bandDb(all, 8000, 20000, tot);
+    f[fSub] = bandDb(all, 0, 80, tot);
     {   // flatness 300 Hz - 8 kHz of the body
         double lg = 0, ar = 0; int c = 0;
         for (int b = 1; b < N / 2; ++b) { const double hz = b * binHz; if (hz < 300 || hz > 8000) continue; const double p = pb[(size_t) b] + 1e-14; lg += std::log(p); ar += p; ++c; }
-        f[fNoise] = c > 0 ? (float) (lg / c - std::log(ar / c)) : -10.f;            // 0 = white noise, very negative = pure tone
+        f[fNoise] = c > 0 ? (float) (lg / c - std::log(ar / c)) : -10.f;
     }
-    {   // 24 log bands
+    {   // 24 log bands + their cepstrum (timbre coefficients)
         std::array<double, kBands> bands {};
         for (int b = 1; b < N / 2; ++b)
         {
@@ -109,27 +134,74 @@ inline bool fingerprint(const juce::AudioBuffer<float>& in, double sr, Feat& f)
             bands[(size_t) k] += all[(size_t) b];
         }
         double mx = 1e-18; for (double v : bands) mx = std::max(mx, v);
-        for (int k = 0; k < kBands; ++k) f[(size_t) (fBands + k)] = (float) std::max(-60.0, 10.0 * std::log10(bands[(size_t) k] / mx + 1e-12));
+        std::array<float, kBands> db {};
+        for (int k = 0; k < kBands; ++k) { db[(size_t) k] = (float) std::max(-60.0, 10.0 * std::log10(bands[(size_t) k] / mx + 1e-12)); f[(size_t) (fBands + k)] = db[(size_t) k]; }
+        for (int c = 0; c < kTimbre; ++c)
+        {
+            double v = 0;
+            for (int k = 0; k < kBands; ++k) v += db[(size_t) k] * std::cos(juce::MathConstants<double>::pi * (c + 1) * (k + 0.5) / kBands);
+            f[(size_t) (fTimbre + c)] = (float) (v / kBands);
+        }
     }
-    {   // pitch of the body (40 - 250 ms): normalised autocorrelation, 30 Hz - 1 kHz
-        const int a = std::min(n, (int) (0.04 * sr)), b = std::min(n, (int) (0.25 * sr));
+    {   // the picture: 8 bands x 10 moments, 512-point frames every ~3 ms
+        constexpr int o2 = 9, N2 = 1 << o2;
+        juce::dsp::FFT fft2(o2);
+        std::vector<float> w2((size_t) N2), b2((size_t) (2 * N2));
+        for (int i = 0; i < N2; ++i) w2[(size_t) i] = 0.5f - 0.5f * std::cos(2.f * juce::MathConstants<float>::pi * i / (N2 - 1));
+        static const double tEdge[kShapeT + 1] = { 0, 0.005, 0.012, 0.022, 0.036, 0.055, 0.08, 0.12, 0.18, 0.26, 0.40 };
+        std::array<double, kShapeB * kShapeT> cell {}; std::array<int, kShapeT> cnt {};
+        const int hop2 = std::max(1, (int) (0.003 * sr));
+        for (int st = -N2 / 2; st + N2 / 2 < std::min(n, (int) (0.40 * sr)); st += hop2)
+        {
+            const double tc = (st + N2 / 2) / sr;
+            int ti = 0; while (ti < kShapeT - 1 && tc >= tEdge[ti + 1]) ++ti;
+            std::fill(b2.begin(), b2.end(), 0.f);
+            for (int i = 0; i < N2; ++i) { const int j = st + i; b2[(size_t) i] = (j >= 0 && j < n) ? m[(size_t) j] * w2[(size_t) i] : 0.f; }
+            fft2.performFrequencyOnlyForwardTransform(b2.data());
+            for (int b = 1; b < N2 / 2; ++b)
+            {
+                const double hz = b * sr / N2;
+                if (hz < 40 || hz >= 16000) continue;
+                const int k = juce::jlimit(0, kShapeB - 1, (int) (std::log2(hz / 40.0) / std::log2(16000.0 / 40.0) * kShapeB));
+                cell[(size_t) (ti * kShapeB + k)] += (double) b2[(size_t) b] * b2[(size_t) b];
+            }
+            ++cnt[(size_t) ti];
+        }
+        double mx = 1e-18;
+        for (int t = 0; t < kShapeT; ++t) for (int k = 0; k < kShapeB; ++k) { auto& c = cell[(size_t) (t * kShapeB + k)]; c /= std::max(1, cnt[(size_t) t]); mx = std::max(mx, c); }
+        for (int i = 0; i < kShapeB * kShapeT; ++i) f[(size_t) (fShape + i)] = (float) std::max(-60.0, 10.0 * std::log10(cell[(size_t) i] / mx + 1e-12));
+    }
+    // pitch: normalised autocorrelation, 30 Hz - 1 kHz; of the body (40 - 250 ms) and of the start (8 - 40 ms)
+    auto pitchOf = [&](double t0, double t1, float& conf) {
+        const int a = std::min(n, (int) (t0 * sr)), b = std::min(n, (int) (t1 * sr));
         const int lagMin = (int) (sr / 1000.0), lagMax = std::min((int) (sr / 30.0), (b - a) / 2);
         float best = 0; int bestLag = 0;
         if (lagMax > lagMin + 2)
         {
-            // decimate for speed: work on every d-th sample
+            // a low sound is alike to itself at a tiny shift too: look only after the curve has first gone down
+            // (below 0.2), then take the highest peak - the real period, not the shortest lag
             const int d = std::max(1, (int) (sr / 11025.0));
-            for (int lag = lagMin; lag <= lagMax; lag += d)
+            std::vector<float> rs; std::vector<int> lags;
+            for (int lag = d; lag <= lagMax; lag += d)
             {
                 double num = 0, e0 = 0, e1 = 0;
                 for (int i = a; i + lag < b; i += d) { const double x = m[(size_t) i], y = m[(size_t) (i + lag)]; num += x * y; e0 += x * x; e1 += y * y; }
-                const float r = (float) (num / std::sqrt(e0 * e1 + 1e-18));
-                if (r > best) { best = r; bestLag = lag; }
+                rs.push_back((float) (num / std::sqrt(e0 * e1 + 1e-18))); lags.push_back(lag);
             }
+            size_t i0 = 0; while (i0 < rs.size() && rs[i0] > 0.2f) ++i0;
+            for (size_t i = i0; i < rs.size(); ++i)
+                if (lags[i] >= lagMin && rs[i] > best && (i == 0 || rs[i] >= rs[i - 1]) && (i + 1 >= rs.size() || rs[i] >= rs[i + 1])) { best = rs[i]; bestLag = lags[i]; }
+            // a peak at twice the period is often as high: prefer the shorter one when it is nearly as good
+            if (bestLag > 0)
+                for (size_t i = i0; i < rs.size(); ++i)
+                    if (std::abs(lags[i] * 2 - bestLag) <= 2 * d && rs[i] > 0.9f * best && lags[i] >= lagMin) { best = rs[i]; bestLag = lags[i]; break; }
         }
-        f[fPitchConf] = std::max(0.f, best);
-        f[fPitch] = bestLag > 0 ? (float) std::log2(sr / bestLag) : 7.f;
-    }
+        conf = std::max(0.f, best);
+        return bestLag > 0 ? (float) std::log2(sr / bestLag) : 7.f; };
+    float cb = 0, cs = 0;
+    f[fPitch] = pitchOf(0.04, 0.25, cb); f[fPitchConf] = cb;
+    const float ps = pitchOf(0.008, 0.04, cs);
+    f[fGlide] = (cb > 0.5f && cs > 0.5f) ? juce::jlimit(-24.f, 24.f, (ps - f[fPitch]) * 12.f) : 0.f;
     return true;
 }
 
@@ -190,71 +262,73 @@ struct LibIndex
             if (e.status == 0) { ++oneShots; for (int i = 0; i < kFeat; ++i) { s[(size_t) i] += e.feat[(size_t) i]; s2[(size_t) i] += (double) e.feat[(size_t) i] * e.feat[(size_t) i]; } }
             else if (e.status == 1) ++longs; else if (e.status == 4) ++bad; else if (e.status == 3) { ++loops; ++byName; } else ++loops;
         }
+        // typical spreads (also the floor: one odd archive must not make a feature count for everything)
+        static const float def[fTimbre] = { 1.5f, 5.f, 1.2f, 1.2f, 1.5f, 8.f, 6.f, 6.f, 8.f, 8.f, 1.2f, 1.f, 0.3f, 4.f, 0.8f, 0.8f };
         for (int i = 0; i < kFeat; ++i)
         {
             const double c = std::max(1, oneShots), mu = s[(size_t) i] / c, var = std::max(0.0, s2[(size_t) i] / c - mu * mu);
+            const float d0 = i < fTimbre ? def[i] : i < fBands ? 4.f : 10.f;
             mean[(size_t) i] = (float) mu;
-            sd[(size_t) i] = (float) std::max(std::sqrt(var), 1e-3);
-        }
-        // typical spreads when the archive is still small
-        if (oneShots < 50)
-        {
-            const float def[] = { 1.5f, 6.f, 1.5f, 1.5f, 0.8f, 0.8f, 1.5f, 8.f, 8.f, 1.f, 0.3f };
-            for (int i = 0; i < fBands; ++i) sd[(size_t) i] = def[i];
-            for (int i = fBands; i < kFeat; ++i) sd[(size_t) i] = 10.f;
+            sd[(size_t) i] = oneShots < 50 ? d0 : (float) juce::jlimit(0.5 * d0, 2.0 * d0, std::sqrt(var));
         }
     }
 };
 
 struct Match { const LibEntry* e = nullptr; float dist = 0, score = 0; juce::StringArray tags; };
 
-// weighted distance: each family listens for different things
+// how different two sounds are, weighted for the drum: what you hear first counts most
 inline float distance(const Feat& q, const Feat& c, const LibIndex& ix, Family fam, juce::StringArray* tags = nullptr)
 {
-    struct W { float attack, punch, decay, bright, noise, air, sub, pitch, bands; };
+    struct W { float len, tail, hard, bright, sub, noise, pitch, glide, timbre, shape; };
     static const W w[] = {
-        /* kick  */ { 0.8f, 1.6f, 1.6f, 1.0f, 0.6f, 0.6f, 1.4f, 1.8f, 1.0f },
-        /* snare */ { 0.8f, 1.0f, 1.4f, 1.4f, 1.4f, 1.0f, 0.4f, 0.7f, 1.2f },
-        /* hat   */ { 0.6f, 0.6f, 2.0f, 1.8f, 1.0f, 1.2f, 0.2f, 0.2f, 1.2f },
-        /* tom   */ { 0.8f, 1.0f, 1.4f, 1.0f, 1.0f, 0.6f, 0.6f, 1.8f, 1.2f },
-        /* any   */ { 0.8f, 1.0f, 1.4f, 1.2f, 1.0f, 0.8f, 0.8f, 1.0f, 1.2f } };
+        /* kick  */ { 2.0f, 0.6f, 1.6f, 1.0f, 1.4f, 0.6f, 1.8f, 0.8f, 1.0f, 1.5f },
+        /* snare */ { 1.8f, 0.8f, 1.6f, 1.6f, 0.4f, 1.2f, 0.8f, 0.2f, 1.2f, 1.5f },
+        /* hat   */ { 2.0f, 1.0f, 1.0f, 1.8f, 0.2f, 1.0f, 0.2f, 0.0f, 1.2f, 1.5f },
+        /* tom   */ { 1.8f, 0.6f, 1.2f, 1.0f, 0.6f, 1.0f, 1.8f, 0.6f, 1.2f, 1.5f },
+        /* any   */ { 1.8f, 0.8f, 1.2f, 1.2f, 0.8f, 1.0f, 1.0f, 0.4f, 1.2f, 1.5f } };
     const W& k = w[fam];
     auto z = [&](int i) { const float d = (q[(size_t) i] - c[(size_t) i]) / ix.sd[(size_t) i]; return d * d; };
     float d = 0;
-    d += k.attack * z(fAttack);
-    d += k.punch * z(fPunch);
-    d += k.decay * 0.5f * (z(fDecay20) + z(fDecay40));
-    d += k.bright * 0.5f * (z(fBrightA) + z(fBrightB));
-    d += k.noise * z(fNoise);
-    d += k.air * z(fAir);
+    d += k.len * (0.7f * z(fLen) + 0.3f * z(fLen10));
+    d += k.tail * 0.5f * (z(fTail) + z(fRoom));
+    d += k.hard * (0.6f * z(fHard) + 0.25f * z(fPunch) + 0.15f * z(fAttack));
+    d += k.bright * (0.5f * z(fBright) + 0.25f * z(fAir) + 0.25f * z(fCentB));
     d += k.sub * z(fSub);
+    d += k.noise * z(fNoise);
     if (q[fPitchConf] > 0.5f && c[fPitchConf] > 0.5f)
     {
         float semis = std::abs(q[fPitch] - c[fPitch]) * 12.f;
         semis = std::min(semis, std::abs(semis - 12.f) + 1.f);          // an octave off is "nearly the same note"
         d += k.pitch * (semis / 3.f) * (semis / 3.f);
+        d += k.glide * z(fGlide);
     }
     else if ((q[fPitchConf] > 0.5f) != (c[fPitchConf] > 0.5f)) d += k.pitch * 0.6f;
-    float bd = 0; for (int i = fBands; i < kFeat; ++i) { const float x = (q[(size_t) i] - c[(size_t) i]) / 10.f; bd += x * x; }
-    d += k.bands * bd / kBands * 4.f;
+    float td = 0; for (int i = fTimbre; i < fTimbre + kTimbre; ++i) td += z(i);
+    d += k.timbre * td / kTimbre;
+    float sd2 = 0; for (int i = fShape; i < kFeat; ++i) { const float x = (q[(size_t) i] - c[(size_t) i]) / 10.f; sd2 += x * x; }
+    d += k.shape * sd2 / (kShapeB * kShapeT) * 4.f;
     if (tags != nullptr)
-    {   // how it differs from the pad, in words
-        const float dp = c[fPunch] - q[fPunch];
-        if (dp > 3.f) tags->add("PUNCHIER"); else if (dp < -3.f) tags->add("SOFTER");
-        const float db = c[fBrightB] - q[fBrightB];
-        if (db > 0.35f) tags->add("BRIGHTER"); else if (db < -0.35f) tags->add("DARKER");
-        const float dd = c[fDecay40] - q[fDecay40];
-        if (dd > 0.5f) tags->add("LONGER"); else if (dd < -0.5f) tags->add("SHORTER");
+    {   // how it differs from the pad, in the words you would use
+        const float dl = c[fLen] - q[fLen];
+        if (dl > 0.4f) tags->add("LONGER"); else if (dl < -0.4f) tags->add("SHORTER");
+        const float dh = c[fHard] - q[fHard], dp = c[fPunch] - q[fPunch];
+        if (dh > 3.f || (dh > 1.5f && dp > 3.f)) tags->add("HARDER"); else if (dh < -3.f || (dh < -1.5f && dp < -3.f)) tags->add("SOFTER");
+        const float db = c[fBright] - q[fBright];
+        if (db > 3.f) tags->add("BRIGHTER"); else if (db < -3.f) tags->add("DULLER");
         if (q[fPitchConf] > 0.5f && c[fPitchConf] > 0.5f)
         {
             const int st = (int) std::lround((c[fPitch] - q[fPitch]) * 12.f);
             if (std::abs(st) >= 1 && std::abs(st) <= 11) tags->add((st > 0 ? "+" : "") + juce::String(st) + " ST");
         }
+        const float dr = c[fRoom] - q[fRoom];
+        if (dr > 5.f) tags->add("ROOMIER"); else if (dr < -5.f) tags->add("DRIER");
+        if (fam == famKick) { const float ds = c[fSub] - q[fSub]; if (ds > 4.f) tags->add("MORE SUB"); else if (ds < -4.f) tags->add("LESS SUB"); }
         const float dn = c[fNoise] - q[fNoise];
-        if (dn > 1.0f) tags->add("NOISIER"); else if (dn < -1.0f) tags->add("CLEANER");
+        if (dn > 1.2f) tags->add("NOISIER"); else if (dn < -1.2f) tags->add("CLEANER");
     }
     return d;
 }
+inline float scoreOf(float dist) { return 100.f / (1.f + 0.12f * dist); }
 
 class Library : private juce::Thread
 {
@@ -328,7 +402,7 @@ public:
             if (dup) continue;
             distance(q, mt.e->feat, *ix, fam, &mt.tags);
             while (mt.tags.size() > 3) mt.tags.remove(mt.tags.size() - 1);
-            mt.score = 100.f / (1.f + 0.15f * mt.dist);
+            mt.score = scoreOf(mt.dist);
             out.push_back(mt);
         }
         return out;
@@ -457,7 +531,7 @@ private:
         juce::MemoryBlock mb;
         if (!indexFile().loadFileAsData(mb) || mb.getSize() < 12) return;
         juce::MemoryInputStream in(mb, false);
-        if (in.readInt() != 0x524b4c42 /* RKLB */ || in.readInt() != 2) return;     // older index: read the folders again
+        if (in.readInt() != 0x524b4c42 /* RKLB */ || in.readInt() != 4) return;     // older index: read the folders again
         const int count = in.readInt();
         if (count < 0 || count > 2000000) return;
         auto ix = std::make_shared<LibIndex>();
@@ -477,7 +551,7 @@ private:
     static void save(const LibIndex& ix)
     {
         juce::MemoryOutputStream out;
-        out.writeInt(0x524b4c42); out.writeInt(2); out.writeInt((int) ix.items.size());
+        out.writeInt(0x524b4c42); out.writeInt(4); out.writeInt((int) ix.items.size());
         for (auto& e : ix.items)
         {
             out.writeString(e.path); out.writeInt64(e.size); out.writeInt64(e.mtime);

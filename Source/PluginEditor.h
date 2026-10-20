@@ -951,6 +951,7 @@ public:
             knob(punch[(size_t) i], "punch" + s, sdB);
             knob(sus[(size_t) i], "sus" + s, sdB);
             knob(pitch[(size_t) i], "pitch" + s, [](double v) { return juce::String(v > 0 ? "+" : "") + juce::String(v, std::abs(v - std::round(v)) < 0.005 ? 0 : 2) + " st"; });
+            knob(tone[(size_t) i], "tone" + s, [](double v) { return std::abs(v) < 0.05 ? juce::String("0") : juce::String(v > 0 ? "BRIGHT +" : "DARK ") + juce::String(std::abs(v), 1); });
         }
         knob(master, "master", dB);
         knob(sens, "sens", [](double v) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
@@ -1018,6 +1019,10 @@ public:
                                                    : "A sample of yours: drop a file on the pad (or right-click the pad > LOAD YOUR SAMPLE)");
             srcBtn[(size_t) b].onClick = [this, b] { setSource(selected, b); };
         }
+        addAndMakeVisible(matchBtn);
+        matchBtn.setButtonText("MATCH TO A");
+        matchBtn.setTooltip("Shape your sample C (pitch, length, tone, punch, sustain, fade in) to come nearest to A - shown first, you decide");
+        matchBtn.onClick = [this] { matchMenu(selected); };
         addAndMakeVisible(browseBtn);
         browseBtn.setButtonText("BROWSE");
         browseBtn.setTooltip("Your sample folders: click = listen (as loud as this pad), double-click or drag onto a pad = YOUR SAMPLE (C)");
@@ -1146,7 +1151,8 @@ public:
         for (int i = 0; i < ds::kPads; ++i)
         {
             vol[(size_t) i].setBounds(712, 266, 64, 64); pan[(size_t) i].setBounds(858, 266, 64, 64);
-            punch[(size_t) i].setBounds(690, 503, 42, 42); sus[(size_t) i].setBounds(796, 503, 42, 42); pitch[(size_t) i].setBounds(902, 503, 42, 42);
+            punch[(size_t) i].setBounds(676, 503, 42, 42); sus[(size_t) i].setBounds(752, 503, 42, 42);
+            pitch[(size_t) i].setBounds(828, 503, 42, 42); tone[(size_t) i].setBounds(904, 503, 42, 42);
         }
         master.setBounds(669, 362, 42, 42); sens.setBounds(749, 362, 42, 42); grid.setBounds(829, 362, 42, 42); bpm.setBounds(909, 362, 42, 42);
         playMidi.setBounds(666, 440, 34, 36);
@@ -1156,6 +1162,7 @@ public:
         srcBtn[0].setBounds(32, 450, 102, 22); srcBtn[1].setBounds(133, 450, 102, 22); srcBtn[2].setBounds(234, 450, 122, 22);
         dragWav.setBounds(552, 450, 80, 22);
         browseBtn.setBounds(464, 450, 80, 22);
+        matchBtn.setBounds(362, 450, 96, 22);
         samples.setBounds(rightPanel.getX(), rightPanel.getY(), rightPanel.getWidth(), soundPanel.getBottom() - rightPanel.getY());
         shape.setBounds(30, 478, 604, 96);
     }
@@ -1191,6 +1198,30 @@ public:
             });
     }
 
+    // MATCH TO A: what would change, how much nearer it gets; apply / half way / undo
+    void matchMenu(int pad)
+    {
+        auto m = std::make_shared<DrumSlicerProcessor::MatchSuggestion>(proc.suggestMatch(pad));
+        juce::PopupMenu menu;
+        if (!m->ok) { menu.addSectionHeader(m->why); menu.addItem(3, "UNDO LAST MATCH", proc.canUndoMatch(pad)); }
+        else
+        {
+            menu.addSectionHeader("MATCH C TO A:   " + juce::String(juce::roundToInt(m->before)) + "%   ->   " + juce::String(juce::roundToInt(m->after)) + "%");
+            for (auto& l : m->lines) menu.addItem(100, "   " + l, false);
+            menu.addSeparator();
+            menu.addItem(1, "APPLY");
+            menu.addItem(2, "APPLY HALF WAY  (KEEP MORE OF YOUR SAMPLE)");
+            menu.addItem(3, "UNDO LAST MATCH", proc.canUndoMatch(pad));
+        }
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&matchBtn),
+            [this, pad, m, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
+            {
+                if (sp == nullptr || id == 0) return;
+                if (id == 1 || id == 2) { proc.applyMatch(pad, *m, id == 1 ? 1.f : 0.5f); toast(juce::String("MATCHED  ") + (id == 2 ? "HALF WAY" : juce::String(juce::roundToInt(m->after)) + "%")); }
+                else if (id == 3) { proc.undoMatch(pad); toast("MATCH UNDONE"); }
+                shape.invalidate(); repaint();
+            });
+    }
     void openSamples() { updateVisibility(); samples.setVisible(true); samples.toFront(false); samples.showFor(); repaint(); }
     void openKits() { kitBrowser.setBounds(getLocalBounds()); kitBrowser.refresh(); kitBrowser.setVisible(true); kitBrowser.toFront(false); }
 
@@ -1316,6 +1347,7 @@ public:
             wasPlaying = proc.isSourcePlaying();
         }
         browseBtn.setToggleState(samples.isVisible(), juce::dontSendNotification);
+        matchBtn.setEnabled(hasPad && res->pads[(size_t) selected].user.getNumSamples() > 0 && proc.padSource(selected) == 2);
         playMidi.setToggleState(proc.isMidiPlaying(), juce::dontSendNotification);
         playMidi.setEnabled(res != nullptr);
         if (!res && proc.isMidiPlaying()) proc.playMidi(false);
@@ -1375,7 +1407,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.8.1";
+            const juce::String ver = "v1.9.0";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -1707,12 +1739,13 @@ private:
         knobLabel(g, vol[(size_t) selected], "VOL"); knobLabel(g, pan[(size_t) selected], "PAN");
         knobLabel(g, master, "MASTER", 1); knobLabel(g, sens, "SENS", 1); knobLabel(g, grid, "GRID", 1); knobLabel(g, bpm, "BPM", 1);
         knobLabel(g, punch[(size_t) selected], "PUNCH", 1); knobLabel(g, sus[(size_t) selected], "SUSTAIN", 1); knobLabel(g, pitch[(size_t) selected], "PITCH", 1);
+        knobLabel(g, tone[(size_t) selected], "TONE", 1);
     }
 
     void updateVisibility()
     {
         for (int i = 0; i < ds::kPads; ++i)
-            for (auto* k : { &vol[(size_t) i], &pan[(size_t) i], &punch[(size_t) i], &sus[(size_t) i], &pitch[(size_t) i] }) k->setVisible(i == selected);
+            for (auto* k : { &vol[(size_t) i], &pan[(size_t) i], &punch[(size_t) i], &sus[(size_t) i], &pitch[(size_t) i], &tone[(size_t) i] }) k->setVisible(i == selected);
         shape.pad = selected; shape.invalidate();
     }
 
@@ -1730,10 +1763,10 @@ private:
     int dragWhat = 0;                                // 1 = START, 2 = END
     bool wasPlaying = false;
 
-    std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch;
+    std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch, tone;
     juce::Slider master, sens, grid, bpm;
     std::vector<std::unique_ptr<juce::SliderParameterAttachment>> atts;
-    juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn, browseBtn;
+    juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn, browseBtn, matchBtn;
     KitBrowser kitBrowser { proc };
     SampleBrowser samples { proc };
     int browsedPad = -1;
