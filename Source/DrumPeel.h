@@ -1472,6 +1472,40 @@ private:
             }
             if (!lowTom) L[c] = F[c].f0 < 250 ? "tom" : "perc";
         }
+        // a snare with a big low body (and its rattle split off as a sound of its own, or hardly any rattle - low
+        // bitrate, a soft snare): the low rule names its body a tom. It is the snare when (a) it sounds together
+        // with the snare's rattle, or (b) there is no real snare and it plays like one - often, through the groove
+        // (a tom plays in fills, a few times; this one plays as often as a quarter of the kicks or more)
+        {
+            int kickHits = 0; for (size_t c = 0; c < n; ++c) if (L[c] == "kick") kickHits += (int) snd[c].t.size();
+            int sn = -1; for (size_t c = 0; c < n; ++c) if (L[c] == "snare" && (sn < 0 || F[c].weight > F[(size_t) sn].weight)) sn = (int) c;
+            const double tol = 0.045 * sr;
+            auto together = [&](size_t a2, size_t b2) {          // share of a2's hits with a b2 hit next to it
+                if (snd[a2].t.empty() || snd[b2].t.empty()) return 0.0;
+                int k = 0; for (double ta : snd[a2].t) { for (double tb : snd[b2].t) if (std::abs(ta - tb) <= tol) { ++k; break; } }
+                return (double) k / snd[a2].t.size(); };
+            int bestTom = -1;
+            for (size_t c = 0; c < n; ++c)
+            {
+                if (L[c] != "tom" || F[c].low >= 0.8) continue;
+                if (sn >= 0 && together(c, (size_t) sn) >= 0.5) { L[c] = "snare"; continue; }
+                if (bestTom < 0 || F[c].weight > F[(size_t) bestTom].weight) bestTom = (int) c;
+            }
+            // a "cymbal" (long ring: a hat in a lot of reverb) that plays through the groove, as often as half the
+            // kicks or more, is a hat: a crash plays now and then, not on every 1/8
+            for (size_t c = 0; c < n; ++c)
+                if (L[c] == "cymbal" && (int) snd[c].t.size() >= std::max(16, kickHits / 2)) L[c] = "ohat";
+            const bool weakSnare = sn < 0 || (bestTom >= 0 && F[(size_t) sn].weight < 0.25 * F[(size_t) bestTom].weight);
+            if (bestTom >= 0 && weakSnare && L[(size_t) bestTom] == "tom"
+                && (int) snd[(size_t) bestTom].t.size() >= std::max(8, kickHits / 4))
+            {
+                L[(size_t) bestTom] = "snare";
+                // its twins (same pitch, sounding alike) go with it
+                for (size_t c = 0; c < n; ++c)
+                    if (L[c] == "tom" && std::abs(std::log2(std::max(1.0, F[c].f0) / std::max(1.0, F[(size_t) bestTom].f0))) <= 0.17
+                        && profDist(F[c], F[(size_t) bestTom]) <= 9.0) L[c] = "snare";
+            }
+        }
         // leftovers are no instrument of their own: they join the closest one. A leftover plays very few times
         // and quietly, or is next to silent. (Hats are quiet next to a kick but play often: they stay.)
         auto weak = [&](size_t c) { return (snd[c].t.size() <= 3 && F[c].weight < 0.03 * wmax) || F[c].weight < 1e-4 * wmax; };
@@ -1860,6 +1894,10 @@ private:
             bool junk = n.velocity <= 2;
             if (!junk && n.velocity < 0.1 * p90[n.pad])
                 for (const auto& m : out.notes) if (m.pad != n.pad && std::abs(m.time - n.time) < 0.012 * sr && m.velocity > n.velocity) { junk = true; break; }
+            // the same drum again right after a much stronger hit of it: the rest of that hit (a snare's rattle found
+            // as a hit of its own), not a new one. (A grace note comes BEFORE the stroke and stays.)
+            if (!junk)
+                for (const auto& m : out.notes) if (m.pad == n.pad && n.time > m.time && n.time - m.time < 0.045 * sr && n.velocity < 0.2 * m.velocity) { junk = true; break; }
             if (!junk) keep.push_back(n);
         }
         std::vector<int> cnt(out.pads.size(), 0); for (auto& n : keep) cnt[(size_t) n.pad]++;
@@ -2226,8 +2264,11 @@ inline Output analyseLong(const Buf& x, double sr, double onsetThreshold, const 
         }
         double best = base, bc = cost(base);
         for (double b2 = 0.985 * base; b2 <= 1.015 * base; b2 += 0.002) { const double c = cost(b2); if (c < bc) { bc = c; best = b2; } }
-        const double nice = std::round(best * 2) / 2;
-        if (std::abs(nice - best) < 0.12 && cost(nice) < 1.3 * bc) best = nice;
+        // a whole / half BPM only when it changes next to nothing over the song: 65.15 rounded to 65 is 0.23 % -
+        // after two minutes the grid is 0.28 s (more than a 1/16) off. Allowed: under 30 ms at the end of the song.
+        const double nice = std::round(best * 2) / 2, songSec = x.n / sr;
+        if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "tempo: window %.3f base %.3f best %.3f nice %.1f (drift %.0f ms)\n", o.bpm, base, best, nice, std::abs(nice - best) / best * songSec * 1000);
+        if (std::abs(nice - best) / best * songSec < 0.030 && cost(nice) < 1.1 * bc) best = nice;
         o.bpm = best;
     }
     if (progress) progress(1.f, "done");

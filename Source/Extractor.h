@@ -80,8 +80,25 @@ inline bool loadAudio(const juce::File& file, juce::AudioBuffer<float>& out, dou
     sr = rd->sampleRate;
     const int n = (int) std::min<juce::int64>(rd->lengthInSamples, (juce::int64) (sr * maxSeconds));
     out.setSize(2, n);
-    if (!rd->read(&out, 0, n, 0, true, true)) return false;
-    if (rd->numChannels < 2) out.copyFrom(1, 0, out, 0, 0, n);
+    out.clear();
+    // read in pieces: the length an MP3 says it has can be far off (VBR files without a length header - Suno
+    // exports: 121 s of audio said to be 579 s). Reading past the real end fails: what was read up to there is kept.
+    int B = 1 << 16, got = 0;
+    juce::AudioBuffer<float> tmp(2, B);
+    while (got < n)
+    {
+        const int k = std::min(B, n - got);
+        tmp.clear();
+        if (!rd->read(&tmp, 0, k, got, true, true))
+        {   // near the real end: smaller pieces, down to about one MP3 frame
+            if (k <= 1024) break;
+            B = std::max(512, k / 2); continue;
+        }
+        for (int c = 0; c < 2; ++c) out.copyFrom(c, got, tmp, std::min(c, (int) rd->numChannels - 1), 0, k);
+        got += k;
+    }
+    if (got < 4096) return false;
+    if (got < n) out.setSize(2, got, true);
     return true;
 }
 

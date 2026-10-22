@@ -6,6 +6,15 @@
 #if HAS_ASSETS
  #include <BinaryData.h>
 #endif
+#if JUCE_WINDOWS
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+ #endif
+ #include <windows.h>
+#endif
 
 // =====================================================================================================
 //  REKIT UI  -  dark graphite, one amber accent.   by Pouria Motabean
@@ -1497,6 +1506,10 @@ public:
             const auto msg = proc.matchMessage();
             if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY")) toast(msg); }
         }
+        {   // a file that could not be read keeps the loop you had: said out loud, not only in the status line
+            const auto st = proc.getStatus();
+            if (st != lastStatus) { lastStatus = st; if (st.startsWith("COULD NOT")) toast(st + "  -  THE LOOP YOU HAD STAYS"); }
+        }
         playMidi.setToggleState(proc.isMidiPlaying(), juce::dontSendNotification);
         playMidi.setEnabled(res != nullptr);
         if (!res && proc.isMidiPlaying()) proc.playMidi(false);
@@ -1556,7 +1569,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.12.1";
+            const juce::String ver = "v1.12.2";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -1924,7 +1937,7 @@ private:
     juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn, browseBtn, matchBtn;
     KitBrowser kitBrowser { proc };
     SampleBrowser samples { proc };
-    juce::String lastMatchMsg;
+    juce::String lastMatchMsg, lastStatus;
     int browsedPad = -1;
     juce::String toastText; juce::uint32 toastUntil = 0; bool wasToasting = false;
     std::array<juce::TextButton, 3> modeBtn;
@@ -1951,6 +1964,29 @@ public:
         const int w = juce::jlimit(700, 2000, (int) proc.apvts.state.getProperty("uiWidth", 1000));
         setSize(w, juce::roundToInt(w * 0.6));
     }
+    // Cubase sometimes puts a just-inserted instrument's window behind its own (until the instrument button is
+    // pressed): when the window first shows, its frame is brought to the front - once, and only if it is not there
+    void parentHierarchyChanged() override
+    {
+        if (raised || getPeer() == nullptr) return;
+        raised = true;
+        for (int ms : { 120, 600 })
+            juce::Timer::callAfterDelay(ms, [sp = juce::Component::SafePointer<DrumSlicerEditor>(this)] { if (sp != nullptr) sp->raiseFrame(); });
+    }
+    void raiseFrame()
+    {
+       #if JUCE_WINDOWS
+        if (auto* peer = getPeer())
+            if (auto h = (HWND) peer->getNativeHandle())
+                if (auto root = GetAncestor(h, GA_ROOT))
+                    if (GetForegroundWindow() != root && IsWindowVisible(root))
+                    {
+                        SetWindowPos(root, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        SetForegroundWindow(root);
+                    }
+       #endif
+    }
+    bool raised = false;
     void resized() override
     {
         panel.setBounds(0, 0, 1000, 600);
