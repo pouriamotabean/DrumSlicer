@@ -1199,10 +1199,10 @@ static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::arra
             float v = sm[(size_t) k];
             const bool emptyC = LC[(size_t) k] < topC - 55.f, emptyT = LT[(size_t) k] < topT - 55.f;
             if (v > 0 && (emptyC || emptyT)) v = 0;                  // nothing there to bring up (only noise would grow)
-            c[(size_t) k] = std::clamp(v, -18.f, mt::centres()[(size_t) k] < 80.f ? 4.f : 12.f);
+            c[(size_t) k] = std::clamp(v, -18.f, mt::centres()[(size_t) k] < 80.f ? 8.f : 12.f);   // (a kick's sub may need it)
         } };
     m.eq = diffCurve(LC); limit(m.eq);
-    for (int it = 0; it < 3; ++it)
+    for (int it = 0; it < 5; ++it)
     {
         juce::AudioBuffer<float> t; t.makeCopyOf(Cw); mt::applyEq(t, sr, m.eq, 1.f);
         const auto res = diffCurve(mt::bandLevels(t, sr));
@@ -1311,6 +1311,26 @@ static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::arra
         const float s2 = scoreAt(m, amt);
         if (s2 > m.after + 0.3f) { m.after = s2; m.bestAmount = amt; }
     }
+    // PITCH, fine: the note found by ear-free detection is only a start (snares, noisy hits: often none at all);
+    // the pitch that really sounds nearest is looked for around it, by the same score
+    if (m.usePitch)
+    {
+        const float p0 = v[10];
+        auto tryAt = [&](float st) { auto keep = v[10]; v[10] = st; const float s2 = scoreAt(m, m.bestAmount); v[10] = keep; return s2; };
+        float best = p0, bestS = m.after;
+        for (float d : { -3.f, -2.f, -1.f, 1.f, 2.f, 3.f }) { const float s2 = tryAt(p0 + d); if (s2 > bestS + 0.3f) { bestS = s2; best = p0 + d; } }
+        const float c0 = best;
+        for (float d : { -0.5f, -0.25f, 0.25f, 0.5f }) { const float s2 = tryAt(c0 + d); if (s2 > bestS + 0.2f) { bestS = s2; best = c0 + d; } }
+        best = juce::jlimit(-24.f, 24.f, best);
+        if (best != p0) { m.pitch = best; v[10] = best; m.after = bestS; }
+    }
+    // LOUDNESS: as loud as A sounds (A with its own GAIN), measured the way the ear adds a hit up
+    {
+        int o2 = 0; auto sp = shapeFrom(v); sp.matchAmount = m.bestAmount;
+        const auto Cf = atRate(shapeShot(C, sr, sp, o2, &m), std::pow(2.0, v[10] / 12.0));
+        const float lT = mt::loudnessOf(T, sr) + vA[12], lC = mt::loudnessOf(Cf, sr);
+        m.gainDb = (lC > -100.f && lT > -100.f) ? juce::jlimit(-24.f, 12.f, std::round((lT - lC) * 10.f) / 10.f) : 0.f;
+    }
     return m;
 }
 
@@ -1361,6 +1381,7 @@ void DrumSlicerProcessor::startMatch(int pad)
             v[10] = m.usePitch ? m.pitch : neutral[10];
             v[1] = m.useLen ? m.en : neutral[1]; v[4] = m.useLen ? m.fo : neutral[4];
             v[11] = neutral[11]; v[8] = neutral[8]; v[9] = neutral[9];   // tone / punch / sustain: the match does that now
+            v[12] = m.gainDb;                                              // as loud as A sounds
             showShape(pad, v);
             if (auto* p = apvts.getParameter("mamt" + juce::String(pad))) p->setValueNotifyingHost(p->convertTo0to1(100.f * m.bestAmount));
             audition(pad);

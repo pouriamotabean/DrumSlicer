@@ -3,6 +3,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_data_structures/juce_data_structures.h>
 #include "DrumPeel.h"
+#include "MatchDSP.h"
 #include <array>
 #include <vector>
 #include <memory>
@@ -340,15 +341,17 @@ inline bool loadUserShot(const juce::File& f, const Pad& pad, double kitSr, juce
         for (int c = 0; c < 2; ++c) { juce::LagrangeInterpolator li; li.process(ratio, a.getReadPointer(c), b.getWritePointer(c), n2); }
         a = std::move(b);
     }
-    // match the pad's peak, but never move the sample more than 12 dB: a kick dropped on a quiet hat pad
-    // must stay audible (an energy match used to pull it down by ~40 dB)
+    // as loud as the pad SOUNDS (ear-weighted, a short hit added up over ~50 ms - not its peak: a long hat with the
+    // same peak as a short one is much louder), but never moved more than 12 dB: a kick dropped on a quiet hat pad
+    // must stay audible
     const float pa = pad.audio.getNumSamples() > 0 ? pad.audio.getMagnitude(0, pad.audio.getNumSamples()) : 0.0f;
     const float pu = a.getMagnitude(0, a.getNumSamples());
     if (pu <= 1.0e-6f) return false;
     {
-        const float target = pa > 1.0e-4f ? pa : 0.7f;
-        const float g = juce::jlimit(0.25f, 4.0f, target / pu);
-        a.applyGain(g);
+        float g;
+        if (pa > 1.0e-4f) g = juce::Decibels::decibelsToGain(mt::loudnessOf(pad.audio, kitSr) - mt::loudnessOf(a, kitSr));
+        else g = 0.7f / pu;
+        a.applyGain(juce::jlimit(0.25f, 4.0f, g));
     }
     const float pk = a.getMagnitude(0, a.getNumSamples());
     if (pk > 0.99f) a.applyGain(0.99f / pk);

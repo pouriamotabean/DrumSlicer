@@ -32,6 +32,7 @@ struct MatchData
     std::array<float, mt::kEnvB * mt::kEnvT> shape {};
     std::array<float, mt::kGlideN> glide {};            // PITCH DROP: semitones along the first 120 ms
     float roomRt = 0, roomMix = 0, roomPre = 0, pitch = 0, en = 2000, fo = 0, before = 0, after = 0, driveDb = 0, widthDb = 0;
+    float gainDb = 0.f;                                  // GAIN of C that makes it as loud as A sounds
     float bestAmount = 1.f;                              // the MATCH knob it is nearest at
 };
 void applyMatchChain(juce::AudioBuffer<float>& x, double sr, const MatchData& m, float amount);

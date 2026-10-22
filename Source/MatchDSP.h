@@ -369,6 +369,29 @@ inline float crestOf(const juce::AudioBuffer<float>& x, double fs)
 }
 
 // STEREO WIDTH: side vs mid of the first 300 ms (dB), and a side gain to change it
+// how loud a hit SOUNDS (dB): weighted like the ear (little sub, more presence), and the ear adds up a short
+// hit over ~50 ms - a 5 ms click with the same peak as a long hat sounds much quieter. Peak level says nothing of it.
+inline float loudnessOf(const juce::AudioBuffer<float>& x, double fs)
+{
+    const int n = x.getNumSamples();
+    if (n < 16) return -120.f;
+    Biquad hp1, hp2, pr; hp1.setHPF(fs, 45.0); hp2.setHPF(fs, 45.0); pr.setPeak(fs, 3200.0, 0.5, 4.0);
+    const double k = 1.0 / (0.05 * fs);
+    double y = 0, top = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        double e = 0;
+        for (int c = 0; c < 2; ++c)
+        {
+            const float v = x.getSample(std::min(c, x.getNumChannels() - 1), i);
+            const float w = pr.process(hp2.process(hp1.process(v, c), c), c);
+            e += 0.5 * (double) w * w;
+        }
+        y += (e - y) * k; top = std::max(top, y);
+    }
+    return (float) (10.0 * std::log10(std::max(1.0e-12, top)));
+}
+
 inline float widthOf(const juce::AudioBuffer<float>& x, double fs)
 {
     if (x.getNumChannels() < 2) return -60.f;
