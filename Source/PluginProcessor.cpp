@@ -995,7 +995,7 @@ void DrumSlicerProcessor::clearPadSound(int pad)
     auto& pd = r->pads[(size_t) pad];
     pd.audio.setSize(2, 64); pd.audio.clear();       // silent: the hits stay in the MIDI and wait for a new sound
     pd.best.setSize(2, 64); pd.best.clear();
-    pd.user.setSize(0, 0); pd.userName.clear(); pd.userPath.clear();
+    pd.user.setSize(0, 0); pd.userName.clear(); pd.userPath.clear(); pd.clearLayer();
     matchOff(pad);
     publish(r, getKitDir(), getLoopFile(), orphan());
     for (int s = 0; s < 3; ++s) resetShape(pad, s);
@@ -1030,6 +1030,7 @@ bool DrumSlicerProcessor::tryOnPad(int pad, const juce::File& f)
     {   // what the pad had, to go back to
         const auto& pd = cur->pads[(size_t) pad];
         trying.on = true; trying.pad = pad; trying.user.makeCopyOf(pd.user); trying.name = pd.userName; trying.path = pd.userPath;
+        trying.base.makeCopyOf(pd.userBase); trying.lname = pd.layerName; trying.lpath = pd.layerPath;
         trying.src = padSource(pad);
         trying.wasPlaying = midiPlay.load();
         trying.match = getMatch(pad);
@@ -1045,6 +1046,7 @@ bool DrumSlicerProcessor::tryOnPad(int pad, const juce::File& f)
     r->pads[(size_t) pad].user = std::move(shot);
     r->pads[(size_t) pad].userName = f.getFileNameWithoutExtension();
     r->pads[(size_t) pad].userPath = f.getFullPathName();
+    r->pads[(size_t) pad].clearLayer();
     publish(r, getKitDir(), getLoopFile(), orphan());
     resetShape(pad, 2);
     matchOff(pad);
@@ -1066,6 +1068,7 @@ void DrumSlicerProcessor::endTry(bool keep)
     auto r = std::make_shared<ds::Result>(*cur);
     auto& pd = r->pads[(size_t) pad];
     pd.user = std::move(trying.user); pd.userName = trying.name; pd.userPath = trying.path;
+    pd.userBase = std::move(trying.base); pd.layerName = trying.lname; pd.layerPath = trying.lpath;
     publish(r, getKitDir(), getLoopFile(), orphan());
     {
         std::lock_guard<std::mutex> g(slotLock);
@@ -1373,20 +1376,203 @@ void DrumSlicerProcessor::startMatch(int pad)
                 matchMsg = "ALREADY AS NEAR AS IT GETS  (" + juce::String(juce::roundToInt(m.before)) + "%)";
                 return;
             }
-            setPadSource(pad, 2);
-            { std::lock_guard<std::mutex> g(matchLock); match[(size_t) pad] = m; ++matchVer[(size_t) pad];
-              matchMsg = "MATCHED  " + juce::String(juce::roundToInt(m.before)) + "% -> " + juce::String(juce::roundToInt(m.after)) + "%"; }
-            // the knobs it sets (you can still turn them): pitch, length; the amount back to 100 %
-            auto v = shownShape(pad);
-            v[10] = m.usePitch ? m.pitch : neutral[10];
-            v[1] = m.useLen ? m.en : neutral[1]; v[4] = m.useLen ? m.fo : neutral[4];
-            v[11] = neutral[11]; v[8] = neutral[8]; v[9] = neutral[9];   // tone / punch / sustain: the match does that now
-            v[12] = m.gainDb;                                              // as loud as A sounds
-            showShape(pad, v);
-            if (auto* p = apvts.getParameter("mamt" + juce::String(pad))) p->setValueNotifyingHost(p->convertTo0to1(100.f * m.bestAmount));
-            audition(pad);
+            applyMatch(pad, m, neutral, "MATCHED  " + juce::String(juce::roundToInt(m.before)) + "% -> " + juce::String(juce::roundToInt(m.after)) + "%");
         });
     }).detach();
+}
+
+// a match takes over the pad's C: its data, and the knobs it sets (you can still turn them): pitch, length,
+// gain; tone / punch / sustain back to neutral (the match does that now); the amount where it is nearest
+void DrumSlicerProcessor::applyMatch(int pad, const MatchData& m, const std::array<float, kShapeN>& neutral, const juce::String& msg)
+{
+    setPadSource(pad, 2);
+    { std::lock_guard<std::mutex> g(matchLock); match[(size_t) pad] = m; ++matchVer[(size_t) pad]; matchMsg = msg; }
+    auto v = shownShape(pad);
+    v[10] = m.usePitch ? m.pitch : neutral[10];
+    v[1] = m.useLen ? m.en : neutral[1]; v[4] = m.useLen ? m.fo : neutral[4];
+    v[11] = neutral[11]; v[8] = neutral[8]; v[9] = neutral[9];
+    v[12] = m.gainDb;
+    showShape(pad, v);
+    if (auto* p = apvts.getParameter("mamt" + juce::String(pad))) p->setValueNotifyingHost(p->convertTo0to1(100.f * m.bestAmount));
+    audition(pad);
+}
+
+// ---------------------------------------------------------------- LAYER MATCH
+// "lo" below fc, "hi" above it (Linkwitz-Riley 24 dB/oct: the two parts add up flat); hi moved so its attack is on
+// lo's, in the polarity that adds up (not cancels) at the split; each part brought to the target's own level on
+// its side of the split. fc = 0: the two simply mixed, half each.
+static juce::AudioBuffer<float> layerOf(const juce::AudioBuffer<float>& lo, const juce::AudioBuffer<float>& hi, double sr, double fc,
+                                        const std::array<float, mt::kBands>& LT)
+{
+    const int oLo = mt::onsetOf(lo), oHi = mt::onsetOf(hi), shift = oLo - oHi;
+    const int n = std::max(lo.getNumSamples(), hi.getNumSamples() + std::max(0, shift));
+    juce::AudioBuffer<float> a(2, n), b(2, n); a.clear(); b.clear();
+    for (int c = 0; c < 2; ++c)
+    {
+        a.copyFrom(c, 0, lo, std::min(c, lo.getNumChannels() - 1), 0, lo.getNumSamples());
+        for (int i = 0; i < hi.getNumSamples(); ++i) { const int t = i + shift; if (t >= 0 && t < n) b.setSample(c, t, hi.getSample(std::min(c, hi.getNumChannels() - 1), i)); }
+    }
+    auto energyBelow = [&](const std::array<float, mt::kBands>& L, bool below) { double e = 0;
+        for (int k = 0; k < mt::kBands; ++k) if ((mt::centres()[(size_t) k] < fc) == below) e += std::pow(10.0, L[(size_t) k] / 10.0); return e; };
+    if (fc > 0)
+    {
+        mt::Biquad l1, l2, h1, h2; l1.setLPF(sr, fc); l2.setLPF(sr, fc); h1.setHPF(sr, fc); h2.setHPF(sr, fc);
+        for (int c = 0; c < 2; ++c)
+        {
+            float* pa = a.getWritePointer(c); float* pb = b.getWritePointer(c);
+            for (int i = 0; i < n; ++i) { pa[i] = l2.process(l1.process(pa[i], c), c); pb[i] = h2.process(h1.process(pb[i], c), c); }
+        }
+        const auto La = mt::bandLevels(a, sr), Lb = mt::bandLevels(b, sr);
+        const double ea = energyBelow(La, true), eb = energyBelow(Lb, false), ta = energyBelow(LT, true), tb = energyBelow(LT, false);
+        if (ea > 1e-12) a.applyGain((float) juce::jlimit(0.125, 8.0, std::sqrt(ta / ea)));
+        if (eb > 1e-12) b.applyGain((float) juce::jlimit(0.125, 8.0, std::sqrt(tb / eb)));
+    }
+    else { a.applyGain(0.5f); b.applyGain(0.5f); }
+    // polarity: the one that adds up in the first 50 ms
+    const int w = std::min(n, (int) (0.05 * sr));
+    double ePlus = 0, eMinus = 0;
+    for (int c = 0; c < 2; ++c) for (int i = 0; i < w; ++i) { const double x = a.getSample(c, i), y = b.getSample(c, i); ePlus += (x + y) * (x + y); eMinus += (x - y) * (x - y); }
+    const float sgn = eMinus > ePlus ? -1.f : 1.f;
+    for (int c = 0; c < 2; ++c) a.addFrom(c, 0, b, c, 0, n, sgn);
+    return a;
+}
+
+void DrumSlicerProcessor::startLayer(int pad)
+{
+    auto r = getResult();
+    if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid || r->pads[(size_t) pad].user.getNumSamples() == 0 || matching.load()) return;
+    const auto& pd = r->pads[(size_t) pad];
+    if (pd.audio.getMagnitude(0, pd.audio.getNumSamples()) < 1.0e-6f)
+    { std::lock_guard<std::mutex> g(matchLock); matchMsg = "A HAS NO SOUND: NOTHING TO MATCH TO"; return; }
+    // the partners: the sounds of your folders most like A (not your own sample)
+    std::vector<juce::String> paths;
+    {
+        std::shared_ptr<const ds::LibIndex> holder;
+        const auto near = library->nearest(pd.audio, r->sr, pd.name, 40, holder, pd.userPath);
+        for (auto& m : near) if (m.e != nullptr && m.e->path != pd.layerPath) paths.push_back(m.e->path);
+    }
+    if (paths.empty()) { std::lock_guard<std::mutex> g(matchLock); matchMsg = "NO LAYER: ADD A SAMPLE FOLDER (SAMPLES) FIRST"; return; }
+    setPadSource(pad, 2);
+    std::array<float, kShapeN> vA = shownShape(pad), neutral {};
+    for (int k = 0; k < kShapeN; ++k)
+        if (auto* p = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(pad))) neutral[(size_t) k] = p->convertFrom0to1(p->getDefaultValue());
+    { std::lock_guard<std::mutex> g(slotLock); if (slots[(size_t) pad][0].valid) vA = slots[(size_t) pad][0].v; }
+    auto ix = library->index();
+    auto stats = std::make_shared<ds::LibIndex>();
+    if (ix && ix->oneShots >= 50) { stats->mean = ix->mean; stats->sd = ix->sd; stats->oneShots = ix->oneShots; } else stats->stats();
+    auto A = std::make_shared<juce::AudioBuffer<float>>(); A->makeCopyOf(pd.audio);
+    auto C = std::make_shared<juce::AudioBuffer<float>>(); C->makeCopyOf(pd.layered() ? pd.userBase : pd.user);   // your own sample
+    auto Bb = std::make_shared<juce::AudioBuffer<float>>(); Bb->makeCopyOf(pd.best);
+    auto ref = std::make_shared<ds::Pad>(); ref->audio.makeCopyOf(pd.audio); ref->valid = true;
+    const double sr = r->sr; const auto fam = ds::familyOf(pd.name);
+    matching = true;
+    { std::lock_guard<std::mutex> g(matchLock); matchMsg = "LAYERING ..."; }
+    std::thread([this, a = alive, A, Bb, C, vA, neutral, stats, ref, sr, fam, pad, paths]
+    {
+        WorkerScope ws;
+        int off = 0;
+        const auto T = atRate(shapeShot(*A, sr, shapeFrom(vA), off), std::pow(2.0, vA[10] / 12.0));
+        ds::Feat fT; ds::fingerprint(T, sr, fT);
+        const auto LT = mt::bandLevels(T, sr);
+        // your sample alone, matched: what a layer has to beat
+        const auto mine = computeMatch(*A, vA, *C, neutral, neutral, MatchData(), false, sr, fam, *stats, Bb.get());
+        struct Cand { float quick; int path; double fc; bool cLow; };
+        std::vector<Cand> cands;
+        // split points where both sides really carry the sound (10 % of A's energy or more each, as the ear weighs it;
+        // your side at least 35 %): a layer is your
+        // sample AND another, not the other one with a little of yours under or over it
+        std::vector<std::pair<double, double>> splits { { 0.0, 0.5 } };   // split, A's share below it
+        {   // (energy as the ear weighs it: A-weighting - by plain energy the lows would always be "everything")
+            auto aw = [](double f) { const double f2 = f * f;
+                const double ra = (12194.0 * 12194.0 * f2 * f2) / ((f2 + 20.6 * 20.6) * std::sqrt((f2 + 107.7 * 107.7) * (f2 + 737.9 * 737.9)) * (f2 + 12194.0 * 12194.0));
+                return 20.0 * std::log10(std::max(1e-9, ra)) + 2.0; };
+            std::array<double, mt::kBands> w {}; double tot = 0;
+            for (int k = 0; k < mt::kBands; ++k) { w[(size_t) k] = std::pow(10.0, (LT[(size_t) k] + aw(mt::centres()[(size_t) k])) / 10.0); tot += w[(size_t) k]; }
+            juce::String dbg;
+            for (double fc : { 120.0, 170.0, 230.0, 320.0, 450.0, 650.0, 1000.0, 1600.0, 2500.0, 4000.0, 6000.0 })
+            {
+                double lo = 0; for (int k = 0; k < mt::kBands; ++k) if (mt::centres()[(size_t) k] < fc) lo += w[(size_t) k];
+                const double fr = tot > 0 ? lo / tot : 0;
+                dbg << juce::roundToInt(fc) << ":" << juce::roundToInt(fr * 100) << "% ";
+                if (fr >= 0.1 && fr <= 0.9) splits.push_back({ fc, fr });
+            }
+            if (std::getenv("REKIT_DEBUG")) std::fprintf(stderr, "layer splits (share below): %s\n", dbg.toRawUTF8());
+        }
+        ds::Feat fC; const bool haveFC = ds::fingerprint(*C, sr, fC);
+        for (size_t i = 0; i < paths.size(); ++i)
+        {
+            if (!a->load()) break;
+            { std::lock_guard<std::mutex> g(matchLock); matchMsg = "LAYERING  " + juce::String((int) i + 1) + "/" + juce::String((int) paths.size()); }
+            juce::AudioBuffer<float> c2;
+            if (!ds::loadUserShot(juce::File(paths[i]), *ref, sr, c2)) continue;
+            {   // a copy of your own sample (the same file in another folder) is no partner
+                ds::Feat f2; if (haveFC && ds::fingerprint(c2, sr, f2) && ds::distance(fC, f2, *stats, fam) < 0.05f) continue;
+            }
+            for (const auto& [fc, below] : splits)
+                for (int role = 0; role < (fc > 0 ? 2 : 1); ++role)
+                {
+                    const bool cLow = role == 0;
+                    // yours stays the main sound: at least 35 % of it (the other one adds, it does not take over)
+                    if (fc > 0 && (cLow ? below : 1.0 - below) < 0.35) continue;
+                    const auto L = cLow ? layerOf(*C, c2, sr, fc, LT) : layerOf(c2, *C, sr, fc, LT);
+                    ds::Feat f; if (!ds::fingerprint(L, sr, f)) continue;
+                    cands.push_back({ ds::scoreOf(ds::distance(fT, f, *stats, fam)), (int) i, fc, cLow });
+                }
+        }
+        std::sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) { return x.quick > y.quick; });
+        // the nearest few, matched for real
+        MatchData best; juce::AudioBuffer<float> bestL; int bestPath = -1; double bestFc = 0; bool bestLow = true;
+        best.after = mine.after + 1.5f;                                  // a layer has to be clearly nearer
+        for (size_t k = 0; k < std::min<size_t>(5, cands.size()) && a->load(); ++k)
+        {
+            { std::lock_guard<std::mutex> g(matchLock); matchMsg = "LAYERING  BEST " + juce::String((int) k + 1) + "/5"; }
+            const auto& cd = cands[k];
+            juce::AudioBuffer<float> c2;
+            if (!ds::loadUserShot(juce::File(paths[(size_t) cd.path]), *ref, sr, c2)) continue;
+            auto L = cd.cLow ? layerOf(*C, c2, sr, cd.fc, LT) : layerOf(c2, *C, sr, cd.fc, LT);
+            // as loud as A sounds, and no louder than full scale (as a sample of yours is brought in)
+            L.applyGain(juce::Decibels::decibelsToGain(juce::jlimit(-12.f, 12.f, mt::loudnessOf(*A, sr) - mt::loudnessOf(L, sr))));
+            const float pk = std::max(L.getMagnitude(0, 0, L.getNumSamples()), L.getMagnitude(1, 0, L.getNumSamples()));
+            if (pk > 0.99f) L.applyGain(0.99f / pk);
+            auto m = computeMatch(*A, vA, L, neutral, neutral, MatchData(), false, sr, fam, *stats, Bb.get());
+            if (m.after > best.after) { best = m; bestL = std::move(L); bestPath = cd.path; bestFc = cd.fc; bestLow = cd.cLow; }
+        }
+        juce::MessageManager::callAsync([this, a, best, bestL, bestPath, bestFc, bestLow, mine, pad, neutral, paths]
+        {
+            if (!a->load()) return;
+            matching = false;
+            auto cur = getResult();
+            if (!cur || !cur->pads[(size_t) pad].valid || cur->pads[(size_t) pad].user.getNumSamples() == 0) return;
+            if (bestPath < 0)
+            {
+                std::lock_guard<std::mutex> g(matchLock);
+                matchMsg = "NO LAYER GETS NEARER THAN YOUR SAMPLE ALONE  (" + juce::String(juce::roundToInt(mine.after)) + "%)";
+                return;
+            }
+            auto r2 = std::make_shared<ds::Result>(*cur);
+            auto& p2 = r2->pads[(size_t) pad];
+            if (!p2.layered()) p2.userBase.makeCopyOf(p2.user);
+            p2.user = bestL;
+            const juce::File f2(paths[(size_t) bestPath]);
+            p2.layerName = f2.getFileNameWithoutExtension(); p2.layerPath = f2.getFullPathName();
+            publish(r2, getKitDir(), getLoopFile(), orphan());
+            const juce::String how = bestFc <= 0 ? juce::String("MIXED") : (bestLow ? "YOURS LOW / IT HIGH" : "IT LOW / YOURS HIGH") + juce::String("  @ ") + juce::String(juce::roundToInt(bestFc)) + " HZ";
+            applyMatch(pad, best, neutral, "LAYERED WITH " + p2.layerName.toUpperCase() + "  (" + how + ")  " + juce::String(juce::roundToInt(mine.after)) + "% -> " + juce::String(juce::roundToInt(best.after)) + "%");
+        });
+    }).detach();
+}
+
+void DrumSlicerProcessor::removeLayer(int pad)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid || !cur->pads[(size_t) pad].layered()) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    auto& p = r->pads[(size_t) pad];
+    p.user = std::move(p.userBase); p.clearLayer();
+    publish(r, getKitDir(), getLoopFile(), orphan());
+    removeMatch(pad);                                // the match was made for the layer
+    { std::lock_guard<std::mutex> g(matchLock); matchMsg = "LAYER REMOVED: YOUR SAMPLE ALONE"; }
+    audition(pad);
 }
 
 std::shared_ptr<DrumSlicerProcessor::RankState> DrumSlicerProcessor::startRank(int pad, int src, const std::vector<juce::String>& paths)
@@ -1534,6 +1720,7 @@ bool DrumSlicerProcessor::setPadSample(int pad, const juce::File& f)
     r->pads[(size_t) pad].user = std::move(shot);
     r->pads[(size_t) pad].userName = f.getFileNameWithoutExtension();
     r->pads[(size_t) pad].userPath = f.getFullPathName();
+    r->pads[(size_t) pad].clearLayer();
     publish(r, getKitDir(), getLoopFile(), orphan());
     resetShape(pad, 2);                              // a new sample of yours starts unshaped
     matchOff(pad);
@@ -1547,7 +1734,7 @@ void DrumSlicerProcessor::clearPadSample(int pad)
     auto cur = getResult();
     if (!cur || pad < 0 || pad >= ds::kPads) return;
     auto r = std::make_shared<ds::Result>(*cur);
-    r->pads[(size_t) pad].user.setSize(0, 0); r->pads[(size_t) pad].userName.clear(); r->pads[(size_t) pad].userPath.clear();
+    r->pads[(size_t) pad].user.setSize(0, 0); r->pads[(size_t) pad].userName.clear(); r->pads[(size_t) pad].userPath.clear(); r->pads[(size_t) pad].clearLayer();
     matchOff(pad);
     publish(r, getKitDir(), getLoopFile(), orphan());
     setPadSource(pad, 0);

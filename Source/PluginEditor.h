@@ -6,7 +6,7 @@
 #if HAS_ASSETS
  #include <BinaryData.h>
 #endif
-void rekitRaiseFrame(void* nativeHandle);   // WinRaise.cpp (does nothing outside Windows)
+bool rekitHoldFront(void* nativeHandle, bool on, bool wasHeld);   // WinRaise.cpp (does nothing outside Windows)
 
 // =====================================================================================================
 //  REKIT UI  -  dark graphite, one amber accent.   by Pouria Motabean
@@ -1341,6 +1341,10 @@ public:
         menu.addSeparator();
         menu.addItem(10, "MATCH AGAIN");
         menu.addItem(11, "REMOVE MATCH");
+        menu.addSeparator();
+        const bool lay = r->pads[(size_t) pad].layered();
+        menu.addItem(12, lay ? "LAYER AGAIN  (ANOTHER SECOND SAMPLE)" : "LAYER MATCH  (ADD A SECOND SAMPLE OF YOURS)");
+        if (lay) menu.addItem(13, "REMOVE LAYER  (" + r->pads[(size_t) pad].layerName.toUpperCase() + ")");
         menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&matchBtn),
             [this, pad, m, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
             {
@@ -1353,6 +1357,8 @@ public:
                 }
                 else if (id == 10) { proc.startMatch(pad); toast("MATCHING C TO A ..."); }
                 else if (id == 11) { proc.removeMatch(pad); toast("MATCH REMOVED"); }
+                else if (id == 12) { proc.startLayer(pad); toast("LOOKING FOR A SECOND SAMPLE ..."); }
+                else if (id == 13) { proc.removeLayer(pad); }
                 shape.invalidate(); repaint();
             });
     }
@@ -1476,7 +1482,7 @@ public:
         for (juce::Component* c : std::initializer_list<juce::Component*> { &srcBtn[0], &srcBtn[1], &dragWav }) c->setEnabled(hasPad);
         const bool hasC = hasPad && res->pads[(size_t) selected].user.getNumSamples() > 0;
         srcBtn[2].setEnabled(hasC);
-        srcBtn[2].setTooltip(hasC ? "Your sample: " + res->pads[(size_t) selected].userName
+        srcBtn[2].setTooltip(hasC ? "Your sample: " + res->pads[(size_t) selected].userName + (res->pads[(size_t) selected].layered() ? " + " + res->pads[(size_t) selected].layerName + " (layered)" : juce::String())
                                   : juce::String("A sample of yours: drop a file on the pad (or right-click the pad > LOAD YOUR SAMPLE)"));
         {
             const bool hasSrc = proc.getSource() != nullptr, done = proc.selectionAnalysed();
@@ -1492,11 +1498,11 @@ public:
                                && res->pads[(size_t) selected].audio.getMagnitude(0, res->pads[(size_t) selected].audio.getNumSamples()) > 1.0e-6f;   // a cleared pad has no A
             const auto md = proc.getMatch(selected);
             matchBtn.setEnabled(canMatch && !proc.isMatching());
-            matchBtn.setButtonText(proc.isMatching() ? "MATCHING..." : (canMatch && md.on) ? "MATCH " + juce::String(juce::roundToInt(md.after)) + "%" : juce::String("MATCH TO A"));
+            matchBtn.setButtonText(proc.isMatching() ? (proc.matchMessage().startsWith("LAYERING") ? proc.matchMessage().replace("LAYERING  ", "LAYER ") : juce::String("MATCHING...")) : (canMatch && md.on) ? "MATCH " + juce::String(juce::roundToInt(md.after)) + "%" : juce::String("MATCH TO A"));
             matchBtn.setToggleState(canMatch && md.on, juce::dontSendNotification);
             for (int i = 0; i < ds::kPads; ++i) mamt[(size_t) i].setEnabled(i == selected && canMatch && md.on);
             const auto msg = proc.matchMessage();
-            if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY")) toast(msg); }
+            if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY") || msg.startsWith("LAYERED") || msg.startsWith("NO LAYER") || msg.startsWith("LAYER REMOVED")) toast(msg); }
         }
         {   // a file that could not be read keeps the loop you had: said out loud, not only in the status line
             const auto st = proc.getStatus();
@@ -1561,7 +1567,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.12.3";
+            const juce::String ver = "v1.12.4";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -1956,20 +1962,21 @@ public:
         const int w = juce::jlimit(700, 2000, (int) proc.apvts.state.getProperty("uiWidth", 1000));
         setSize(w, juce::roundToInt(w * 0.6));
     }
-    // Cubase sometimes puts a just-inserted instrument's window behind its own (until the instrument button is
-    // pressed): when the window first shows, its frame is brought to the front - once, and only if it is not there
+    // Cubase sometimes puts a just-inserted instrument's window behind its own right after opening it: the frame is
+    // held in front for the first second (so it never goes), then let go as a normal window
     void parentHierarchyChanged() override
     {
         if (raised || getPeer() == nullptr) return;
         raised = true;
-        for (int ms : { 120, 600 })
-            juce::Timer::callAfterDelay(ms, [sp = juce::Component::SafePointer<DrumSlicerEditor>(this)] { if (sp != nullptr) sp->raiseFrame(); });
+        held = rekitHoldFront(getPeer()->getNativeHandle(), true, false);
+        juce::Timer::callAfterDelay(1000, [sp = juce::Component::SafePointer<DrumSlicerEditor>(this)]
+        {
+            if (sp != nullptr && sp->getPeer() != nullptr) rekitHoldFront(sp->getPeer()->getNativeHandle(), false, sp->held);
+            if (sp != nullptr) sp->held = false;
+        });
     }
-    void raiseFrame()
-    {
-        if (auto* peer = getPeer()) rekitRaiseFrame(peer->getNativeHandle());
-    }
-    bool raised = false;
+    ~DrumSlicerEditor() override { if (held && getPeer() != nullptr) rekitHoldFront(getPeer()->getNativeHandle(), false, true); }
+    bool raised = false, held = false;
     void resized() override
     {
         panel.setBounds(0, 0, 1000, 600);

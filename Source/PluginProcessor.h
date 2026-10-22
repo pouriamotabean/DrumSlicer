@@ -135,6 +135,12 @@ public:
     enum MatchPart { partEq = 0, partShape, partRoom, partPitch, partLen, partGlide, partDrive, partWidth };
     void setMatchPart(int pad, int part, bool on);
     void removeMatch(int pad);
+    // LAYER MATCH: your sample (C) + a second one from your folders, split at a frequency (one gives the lows, the
+    // other the highs), then matched to A as one sound. The pair, split and balance that come nearest are looked for
+    // among the sounds most like A; kept only when it gets nearer than your sample alone. REMOVE LAYER: back to yours.
+    void startLayer(int pad);
+    void removeLayer(int pad);
+    void applyMatch(int pad, const MatchData& m, const std::array<float, kShapeN>& neutral, const juce::String& msg);
     juce::String matchMessage() const { std::lock_guard<std::mutex> g(matchLock); return matchMsg; }
     // SIMILAR, ranked by how near each sound gets AFTER a match (its texture is what a match cannot change):
     // every candidate is matched to the pad's sound in the background
@@ -209,7 +215,7 @@ private:
     void publish(std::shared_ptr<ds::Result> r, const juce::File& kit, const juce::File& loop, const juce::String& orphanName = {});
     void setSource(std::shared_ptr<ds::Source> s, juce::int64 a, juce::int64 b);
     struct Slot { bool valid = false; std::array<float, kShapeN> v {}; };
-    struct TryState { bool on = false; int pad = -1; juce::AudioBuffer<float> user; juce::String name, path; int src = 0; Slot cslot; juce::File file; bool wasPlaying = false; MatchData match; };
+    struct TryState { bool on = false; int pad = -1; juce::AudioBuffer<float> user, base; juce::String name, path, lname, lpath; int src = 0; Slot cslot; juce::File file; bool wasPlaying = false; MatchData match; };
     TryState trying;
     mutable std::mutex matchLock;
     std::array<MatchData, ds::kPads> match {};

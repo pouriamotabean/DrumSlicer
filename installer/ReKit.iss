@@ -1,6 +1,6 @@
 ; Windows installer for ReKit (Inno Setup 6). Built by GitHub Actions: iscc installer\ReKit.iss
 #define AppName "ReKit"
-#define AppVersion "1.12.3"
+#define AppVersion "1.12.4"
 #define Publisher "Pouria Motabean"
 
 [Setup]

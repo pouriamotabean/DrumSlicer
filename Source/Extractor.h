@@ -24,6 +24,11 @@ struct Pad
     juce::AudioBuffer<float> best;           // "best hit": the cleanest real hit, others subtracted, learned tail
     juce::AudioBuffer<float> user;           // "C": a sample of yours dropped on the pad (level-matched to A)
     juce::String userName, userPath;       // (path: so a search never offers you the sample you already chose)
+    // LAYER MATCH: "user" is then your sample + a second one, layered; your own sample alone is kept to go back to
+    juce::AudioBuffer<float> userBase;
+    juce::String layerName, layerPath;
+    bool layered() const { return userBase.getNumSamples() > 0; }
+    void clearLayer() { userBase.setSize(0, 0); layerName.clear(); layerPath.clear(); }
     bool valid = false;
     const juce::AudioBuffer<float>& get(bool useBest, bool useUser = false) const
     {
@@ -408,9 +413,12 @@ inline bool saveKitData(const juce::File& kit, const Result& r)
         ok = writeWav24(d.getChildFile(base + "_A.wav"), pd.audio, r.sr) && ok;
         ok = writeWav24(d.getChildFile(base + "_B.wav"), pd.best.getNumSamples() > 0 ? pd.best : pd.audio, r.sr) && ok;
         if (pd.user.getNumSamples() > 0) ok = writeWav24(d.getChildFile(base + "_C.wav"), pd.user, r.sr) && ok;
+        if (pd.user.getNumSamples() > 0 && pd.layered()) ok = writeWav24(d.getChildFile(base + "_CBASE.wav"), pd.userBase, r.sr) && ok;   // yours alone, under the layer
     }
     auto lines = infoLines(r); lines.insert(0, "kit=1");
     for (int p = 0; p < kPads; ++p) if (r.pads[(size_t) p].valid && r.pads[(size_t) p].user.getNumSamples() > 0) lines.add("user=" + juce::String(p) + "|" + r.pads[(size_t) p].userName);
+    for (int p = 0; p < kPads; ++p) if (r.pads[(size_t) p].valid && r.pads[(size_t) p].user.getNumSamples() > 0 && r.pads[(size_t) p].layered())
+        lines.add("layer=" + juce::String(p) + "|" + r.pads[(size_t) p].layerName + "|" + r.pads[(size_t) p].layerPath);
     return ok && writeText(d.getChildFile("kit.txt"), lines.joinIntoString("\n"));
 }
 
@@ -436,6 +444,19 @@ inline std::shared_ptr<Result> loadKitData(const juce::File& kit)
             pd.user.setSize(2, (int) rd->lengthInSamples);
             if (rd->read(&pd.user, 0, (int) rd->lengthInSamples, 0, true, true)) pd.userName = l.fromFirstOccurrenceOf("|", false, false);
             else pd.user.setSize(0, 0);
+        }
+    for (auto& l : lines)
+        if (l.startsWith("layer="))
+        {   // a layered C: your own sample alone comes back too (REMOVE LAYER)
+            juce::StringArray f; f.addTokens(l.fromFirstOccurrenceOf("=", false, false), "|", "");
+            const int p = f[0].getIntValue();
+            if (p < 0 || p >= kPads || !r->pads[(size_t) p].valid || r->pads[(size_t) p].user.getNumSamples() == 0) continue;
+            auto& pd = r->pads[(size_t) p];
+            std::unique_ptr<juce::AudioFormatReader> rd(fm.createReaderFor(d.getChildFile(pd.name.removeCharacters(" ") + "_CBASE.wav")));
+            if (rd == nullptr || rd->lengthInSamples <= 0) continue;
+            pd.userBase.setSize(2, (int) rd->lengthInSamples);
+            if (rd->read(&pd.userBase, 0, (int) rd->lengthInSamples, 0, true, true)) { pd.layerName = f[1]; pd.layerPath = f[2]; }
+            else pd.userBase.setSize(0, 0);
         }
     r->buildNoteMap();
     return r;
@@ -514,6 +535,8 @@ inline juce::ValueTree embedResult(const Result& r)
         t.setProperty("a", enc(pd.audio), nullptr);
         t.setProperty("b", pd.best.getNumSamples() > 0 ? enc(pd.best) : juce::String(), nullptr);
         if (pd.user.getNumSamples() > 0) { t.setProperty("c", enc(pd.user), nullptr); t.setProperty("cname", pd.userName, nullptr); t.setProperty("cpath", pd.userPath, nullptr); }
+        if (pd.user.getNumSamples() > 0 && pd.layered())
+        { t.setProperty("cbase", enc(pd.userBase), nullptr); t.setProperty("lname", pd.layerName, nullptr); t.setProperty("lpath", pd.layerPath, nullptr); }
         e.appendChild(t, nullptr);
     }
     juce::String hits; for (const auto& h : r.hits) hits << (juce::int64) h.time << ":" << h.pad << ":" << h.velocity << " ";
@@ -544,6 +567,8 @@ inline std::shared_ptr<Result> unembedResult(const juce::ValueTree& e)
         if (!dec(t.getProperty("a").toString(), pd.audio)) return nullptr;
         if (!dec(t.getProperty("b").toString(), pd.best)) pd.best.makeCopyOf(pd.audio);
         if (t.hasProperty("c") && dec(t.getProperty("c").toString(), pd.user)) { pd.userName = t.getProperty("cname").toString(); pd.userPath = t.getProperty("cpath").toString(); }
+        if (pd.user.getNumSamples() > 0 && t.hasProperty("cbase") && dec(t.getProperty("cbase").toString(), pd.userBase))
+        { pd.layerName = t.getProperty("lname").toString(); pd.layerPath = t.getProperty("lpath").toString(); }
         else pd.user.setSize(0, 0);
         pd.valid = true;
     }
