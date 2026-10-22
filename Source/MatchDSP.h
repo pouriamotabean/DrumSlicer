@@ -285,4 +285,103 @@ inline void tailOf(const juce::AudioBuffer<float>& x, double fs, float& roomDb, 
     }
     slope = c >= 3 ? (float) ((c * sxy - sx * sy) / std::max(1e-9, c * sxx - sx * sx)) : -100.f;
 }
+// ---------------------------------------------------------------- MATCH 3 (v1.12)
+// PITCH DROP: a kick / 808 / tom falls in pitch over its first ~120 ms; how fast and how far is a big part of
+// what it is. The pitch is followed at 8 moments and the sample is played faster / slower along the way.
+constexpr int kGlideN = 8;
+inline const float* glideTimes() { static const float t[kGlideN] = { 0.002f, 0.006f, 0.012f, 0.020f, 0.032f, 0.050f, 0.080f, 0.120f }; return t; }
+
+// pitch (Hz) around a moment: normalised autocorrelation over 30 ms, 30 - 500 Hz, the first real peak
+inline float pitchAt(const juce::AudioBuffer<float>& x, double fs, int centre, float& conf)
+{
+    conf = 0;
+    const int n = x.getNumSamples();
+    const int half = (int) (0.015 * fs), a = std::max(0, centre - half / 2), b = std::min(n, centre + half * 2);
+    const int lagMin = (int) (fs / 500.0), lagMax = std::min((int) (fs / 30.0), (b - a) / 2);
+    if (lagMax <= lagMin + 2) return 0;
+    const float* L = x.getReadPointer(0); const float* R = x.getReadPointer(x.getNumChannels() > 1 ? 1 : 0);
+    const int d = std::max(1, (int) (fs / 22050.0));
+    std::vector<float> rs; std::vector<int> lags;
+    for (int lag = d; lag <= lagMax; lag += d)
+    {
+        double num = 0, e0 = 0, e1 = 0;
+        for (int i = a; i + lag < b; i += d) { const double u = 0.5 * (L[i] + R[i]), v = 0.5 * (L[i + lag] + R[i + lag]); num += u * v; e0 += u * u; e1 += v * v; }
+        rs.push_back((float) (num / std::sqrt(e0 * e1 + 1e-18))); lags.push_back(lag);
+    }
+    size_t i0 = 0; while (i0 < rs.size() && rs[i0] > 0.2f) ++i0;
+    float best = 0; int bestLag = 0;
+    for (size_t i = i0; i < rs.size(); ++i)
+        if (lags[i] >= lagMin && rs[i] > best && (i == 0 || rs[i] >= rs[i - 1]) && (i + 1 >= rs.size() || rs[i] >= rs[i + 1])) { best = rs[i]; bestLag = lags[i]; }
+    conf = best;
+    return bestLag > 0 ? (float) (fs / bestLag) : 0.f;
+}
+inline std::array<float, kGlideN> pitchTrack(const juce::AudioBuffer<float>& x, double fs, std::array<float, kGlideN>& conf)
+{
+    std::array<float, kGlideN> f {};
+    const int on = onsetOf(x);
+    for (int k = 0; k < kGlideN; ++k) f[(size_t) k] = pitchAt(x, fs, on + (int) (glideTimes()[k] * fs), conf[(size_t) k]);
+    return f;
+}
+// played faster / slower along the way: semitones at the 8 moments (in between: a line), after them the last
+inline void applyGlide(juce::AudioBuffer<float>& x, double fs, const std::array<float, kGlideN>& semis, float amount)
+{
+    bool any = false; for (float v : semis) any = any || std::abs(v * amount) > 0.02f;
+    if (!any) return;
+    const int n = x.getNumSamples(), on = onsetOf(x);
+    auto semiAt = [&](double t) {
+        const float* gt = glideTimes();
+        if (t <= gt[0]) return semis[0];
+        for (int k = 0; k + 1 < kGlideN; ++k)
+            if (t < gt[k + 1]) { const double f = (t - gt[k]) / (gt[k + 1] - gt[k]); return (float) (semis[(size_t) k] * (1 - f) + semis[(size_t) k + 1] * f); }
+        return semis[kGlideN - 1]; };
+    juce::AudioBuffer<float> o(2, n); o.clear();
+    double pos = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        const int i0 = (int) pos; if (i0 + 1 >= n) break;
+        const float fr = (float) (pos - i0);
+        for (int c = 0; c < 2; ++c) { const float* s = x.getReadPointer(std::min(c, x.getNumChannels() - 1)); o.setSample(c, i, s[i0] + (s[i0 + 1] - s[i0]) * fr); }
+        const double t = (pos - on) / fs;
+        pos += pos < on ? 1.0 : std::pow(2.0, semiAt(t) * amount / 12.0);
+    }
+    x = std::move(o);
+}
+
+// SATURATION: a soft clipper; the level stays (peak kept), only the shape gets rounder / louder inside
+inline void applyDrive(juce::AudioBuffer<float>& x, float driveDb, float amount)
+{
+    const float d = driveDb * amount;
+    if (d <= 0.05f) return;
+    const int n = x.getNumSamples();
+    float pk = 1e-9f; for (int c = 0; c < x.getNumChannels(); ++c) pk = std::max(pk, x.getMagnitude(c, 0, n));
+    const float g = juce::Decibels::decibelsToGain(d) / pk, norm = 1.f / std::tanh(g * pk);
+    for (int c = 0; c < x.getNumChannels(); ++c) { auto* p = x.getWritePointer(c); for (int i = 0; i < n; ++i) p[i] = std::tanh(g * p[i]) * norm * pk; }
+}
+// how "dense" the attack is: peak vs loudness of the first 30 ms (dB); saturation lowers it
+inline float crestOf(const juce::AudioBuffer<float>& x, double fs)
+{
+    const int n = x.getNumSamples(), on = onsetOf(x), e = std::min(n, on + (int) (0.03 * fs));
+    if (e <= on) return 0;
+    const float* L = x.getReadPointer(0); const float* R = x.getReadPointer(x.getNumChannels() > 1 ? 1 : 0);
+    double s = 0; float pk = 0;
+    for (int i = on; i < e; ++i) { const float v = 0.5f * (L[i] + R[i]); s += (double) v * v; pk = std::max(pk, std::abs(v)); }
+    return (float) (20.0 * std::log10(pk / std::sqrt(s / (e - on) + 1e-20) + 1e-9));
+}
+
+// STEREO WIDTH: side vs mid of the first 300 ms (dB), and a side gain to change it
+inline float widthOf(const juce::AudioBuffer<float>& x, double fs)
+{
+    if (x.getNumChannels() < 2) return -60.f;
+    const int n = x.getNumSamples(), on = onsetOf(x), e = std::min(n, on + (int) (0.3 * fs));
+    double m = 0, sd = 0;
+    for (int i = on; i < e; ++i) { const double l = x.getSample(0, i), r = x.getSample(1, i); m += (l + r) * (l + r); sd += (l - r) * (l - r); }
+    return (float) std::max(-60.0, 10.0 * std::log10((sd + 1e-20) / (m + 1e-20)));
+}
+inline void applyWidth(juce::AudioBuffer<float>& x, float sideDb, float amount)
+{
+    const float g = juce::Decibels::decibelsToGain(sideDb * amount);
+    if (std::abs(g - 1.f) < 0.01f || x.getNumChannels() < 2) return;
+    auto* L = x.getWritePointer(0); auto* R = x.getWritePointer(1);
+    for (int i = 0; i < x.getNumSamples(); ++i) { const float m = 0.5f * (L[i] + R[i]), s = 0.5f * (L[i] - R[i]) * g; L[i] = m + s; R[i] = m - s; }
+}
 } // namespace mt

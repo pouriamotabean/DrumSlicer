@@ -1333,6 +1333,10 @@ public:
         menu.addItem(3, m.roomMix > 0 ? "ROOM  (A'S SPACE)" : "ROOM  (NOT NEEDED: C HAS AS MUCH)", m.roomMix > 0, m.useRoom && m.roomMix > 0);
         menu.addItem(4, "PITCH  " + juce::String(m.pitch > 0 ? "+" : "") + juce::String(m.pitch, 1) + " ST", true, m.usePitch);
         menu.addItem(5, m.en < 1999.f ? "LENGTH  END " + juce::String(juce::roundToInt(m.en)) + " MS" : juce::String("LENGTH  (AS IT IS)"), m.en < 1999.f, m.useLen && m.en < 1999.f);
+        bool glide = false; for (float v : m.glide) glide = glide || std::abs(v) > 0.05f;
+        menu.addItem(6, glide ? "PITCH DROP  (THE FALL OF ITS NOTE, LIKE A'S)" : juce::String("PITCH DROP  (NOT NEEDED / NOT TONAL)"), glide, m.useGlide && glide);
+        menu.addItem(7, m.driveDb > 0.05f ? "SATURATION  " + juce::String(m.driveDb, 1) + " DB DRIVE" : juce::String("SATURATION  (NOT NEEDED)"), m.driveDb > 0.05f, m.useDrive && m.driveDb > 0.05f);
+        menu.addItem(8, std::abs(m.widthDb) > 0.05f ? "WIDTH  " + juce::String(m.widthDb > 0 ? "WIDER " : "NARROWER ") + juce::String(std::abs(m.widthDb), 1) + " DB" : juce::String("WIDTH  (AS IT IS)"), std::abs(m.widthDb) > 0.05f, m.useWidth && std::abs(m.widthDb) > 0.05f);
         menu.addSeparator();
         menu.addItem(10, "MATCH AGAIN");
         menu.addItem(11, "REMOVE MATCH");
@@ -1340,9 +1344,10 @@ public:
             [this, pad, m, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
             {
                 if (sp == nullptr || id == 0) return;
-                if (id >= 1 && id <= 5)
+                if (id >= 1 && id <= 8)
                 {
-                    const bool cur = id == 1 ? m.useEq : id == 2 ? m.useShape : id == 3 ? m.useRoom : id == 4 ? m.usePitch : m.useLen;
+                    const bool cur = id == 1 ? m.useEq : id == 2 ? m.useShape : id == 3 ? m.useRoom : id == 4 ? m.usePitch : id == 5 ? m.useLen
+                                   : id == 6 ? m.useGlide : id == 7 ? m.useDrive : m.useWidth;
                     proc.setMatchPart(pad, id - 1, !cur);
                 }
                 else if (id == 10) { proc.startMatch(pad); toast("MATCHING C TO A ..."); }
@@ -1490,7 +1495,7 @@ public:
             matchBtn.setToggleState(canMatch && md.on, juce::dontSendNotification);
             for (int i = 0; i < ds::kPads; ++i) mamt[(size_t) i].setEnabled(i == selected && canMatch && md.on);
             const auto msg = proc.matchMessage();
-            if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED")) toast(msg); }
+            if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY")) toast(msg); }
         }
         playMidi.setToggleState(proc.isMidiPlaying(), juce::dontSendNotification);
         playMidi.setEnabled(res != nullptr);
@@ -1551,7 +1556,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.11.0";
+            const juce::String ver = "v1.12.0";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));

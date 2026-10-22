@@ -164,10 +164,13 @@ void DrumSlicerProcessor::slotsFromTree(const juce::ValueTree& t)
 
 // trim -> transient shaper (punch on the attack, sustain on the rest) -> attack / hold / decay envelope
 void applyMatchChain(juce::AudioBuffer<float>& x, double sr, const MatchData& m, float amount)
-{   // the same order it was measured in: EQ -> room -> shape
+{   // the same order it was measured in: pitch drop -> saturation -> EQ -> room -> shape -> width
+    if (m.useGlide) mt::applyGlide(x, sr, m.glide, amount);
+    if (m.useDrive) mt::applyDrive(x, m.driveDb, amount);
     if (m.useEq) mt::applyEq(x, sr, m.eq, amount);
     if (m.useRoom && m.roomMix > 0) mt::addRoom(x, sr, m.roomRt, m.roomMix * amount, m.roomPre);
     if (m.useShape) mt::applyShape(x, sr, m.shape, amount);
+    if (m.useWidth) mt::applyWidth(x, m.widthDb, amount);
 }
 
 juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& rawIn, double sr, const ShapeParams& p, int& offset, const MatchData* match)
@@ -1096,14 +1099,17 @@ static juce::AudioBuffer<float> atRate(const juce::AudioBuffer<float>& sh, doubl
     return o;
 }
 
-// everything MATCH TO A needs, measured off the message thread
+// everything MATCH TO A needs, measured off the message thread.
+// The target is A as heard; where B (the best real hit, others subtracted) is there too, only what BOTH have
+// counts as the sound (the bleed of other drums in A - hats in a snare's tail - is not copied onto your sample).
 static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::array<float, DrumSlicerProcessor::kShapeN>& vA,
                               const juce::AudioBuffer<float>& C, const std::array<float, DrumSlicerProcessor::kShapeN>& neutral,
                               const std::array<float, DrumSlicerProcessor::kShapeN>& vCnow, const MatchData& before, bool hadMatch,
-                              double sr, ds::Family fam, const ds::LibIndex& stats)
+                              double sr, ds::Family fam, const ds::LibIndex& stats, const juce::AudioBuffer<float>* B = nullptr)
 {
     MatchData m; m.on = true;
-    if (hadMatch) { m.useEq = before.useEq; m.useShape = before.useShape; m.useRoom = before.useRoom; m.usePitch = before.usePitch; m.useLen = before.useLen; }
+    if (hadMatch) { m.useEq = before.useEq; m.useShape = before.useShape; m.useRoom = before.useRoom; m.usePitch = before.usePitch; m.useLen = before.useLen;
+                    m.useGlide = before.useGlide; m.useDrive = before.useDrive; m.useWidth = before.useWidth; }
     auto heard = [&](const juce::AudioBuffer<float>& raw, const std::array<float, DrumSlicerProcessor::kShapeN>& v, const MatchData* md) {
         int off = 0; return atRate(shapeShot(raw, sr, shapeFrom(v), off, md), std::pow(2.0, v[10] / 12.0)); };
     const auto T = heard(A, vA, nullptr);
@@ -1121,20 +1127,70 @@ static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::arra
         m.pitch = std::round(st * 10.f) / 10.f;
     }
     const double rate = std::pow(2.0, (m.usePitch ? m.pitch : 0.f) / 12.0);
-    // A in C's own time: C will be played at "rate", so A is compared slowed down by it
+    // A (and B) in C's own time: C will be played at "rate", so the target is compared slowed down by it
     const auto Tc = atRate(T, 1.0 / rate);
+    juce::AudioBuffer<float> TcB;
+    const bool haveB = B != nullptr && B->getNumSamples() > 64 && B->getMagnitude(0, B->getNumSamples()) > 1.0e-6f;
+    if (haveB) TcB = atRate(heard(*B, vA, nullptr), 1.0 / rate);
     int off = 0;
-    const auto Cb = shapeShot(C, sr, shapeFrom(neutral), off);
-    // EQ: third-octave levels, A minus C, the overall level difference taken out; then checked and corrected
-    const auto LT = mt::bandLevels(Tc, sr);
-    auto LC = mt::bandLevels(Cb, sr);
-    float topC = -200, topT = -200; for (int k = 0; k < mt::kBands; ++k) { topC = std::max(topC, LC[(size_t) k]); topT = std::max(topT, LT[(size_t) k]); }
+    juce::AudioBuffer<float> Cw = shapeShot(C, sr, shapeFrom(neutral), off);   // the working copy, step by step
+    // 1. PITCH DROP (tonal drums): the pitch curve of C bent to A's; the overall note stays with PITCH
+    m.glide.fill(0.f);
+    {
+        std::array<float, mt::kGlideN> cT {}, cC {};
+        const auto pT = mt::pitchTrack(Tc, sr, cT), pC = mt::pitchTrack(Cw, sr, cC);
+        std::array<float, mt::kGlideN> semi {}; std::array<bool, mt::kGlideN> ok {}; int nOk = 0;
+        for (int k = 0; k < mt::kGlideN; ++k)
+            if (cT[(size_t) k] > 0.6f && cC[(size_t) k] > 0.6f && pT[(size_t) k] > 0 && pC[(size_t) k] > 0)
+            { semi[(size_t) k] = 12.f * std::log2(pT[(size_t) k] / pC[(size_t) k]); ok[(size_t) k] = true; ++nOk; }
+        if (nOk >= 4 && (fam == ds::famKick || fam == ds::famTom || fam == ds::famAny))
+        {
+            std::vector<float> v; for (int k = 0; k < mt::kGlideN; ++k) if (ok[(size_t) k]) v.push_back(semi[(size_t) k]);
+            std::sort(v.begin(), v.end());
+            const float med = v[v.size() / 2];                     // the note itself is PITCH's job: only the movement
+            for (int k = 0; k < mt::kGlideN; ++k)
+            {
+                if (!ok[(size_t) k]) { int j = k; while (j >= 0 && !ok[(size_t) j]) --j; if (j < 0) { j = k; while (j < mt::kGlideN && !ok[(size_t) j]) ++j; } semi[(size_t) k] = (j >= 0 && j < mt::kGlideN) ? semi[(size_t) j] : med; }
+                m.glide[(size_t) k] = std::clamp(semi[(size_t) k] - med, -7.f, 7.f);
+            }
+            if (m.useGlide) mt::applyGlide(Cw, sr, m.glide, 1.f);
+        }
+    }
+    // 2. SATURATION: A's attack denser (lower peak / loudness) than C's: round C off until they are alike
+    m.driveDb = 0;
+    {
+        const float crT = mt::crestOf(Tc, sr), crC = mt::crestOf(Cw, sr);
+        if (crC - crT > 1.5f)
+        {
+            float bestErr = crC - crT;
+            for (float d : { 1.5f, 3.f, 4.5f, 6.f, 8.f, 10.f, 13.f, 16.f })
+            {
+                juce::AudioBuffer<float> t; t.makeCopyOf(Cw); mt::applyDrive(t, d, 1.f);
+                const float err = std::abs(mt::crestOf(t, sr) - crT);
+                if (err < bestErr) { bestErr = err; m.driveDb = d; }
+            }
+            if (m.useDrive) mt::applyDrive(Cw, m.driveDb, 1.f);
+        }
+    }
+    // 3. EQ: third-octave levels, target minus C, the overall level difference taken out; checked and corrected
+    auto LT = mt::bandLevels(Tc, sr);
+    float topT = -200; for (float v : LT) topT = std::max(topT, v);
+    auto weightedMean = [&](const std::array<float, mt::kBands>& d) { double sum = 0, w = 0;
+        for (int k = 3; k <= 23; ++k) { const double wk = std::pow(10.0, (LT[(size_t) k] - topT) / 20.0); sum += d[(size_t) k] * wk; w += wk; }
+        return w > 0 ? (float) (sum / w) : 0.f; };
+    if (haveB)
+    {   // only what A and B both have (each band: the lower of the two, after their levels are lined up)
+        auto LB = mt::bandLevels(TcB, sr);
+        std::array<float, mt::kBands> d {}; for (int k = 0; k < mt::kBands; ++k) d[(size_t) k] = LB[(size_t) k] - LT[(size_t) k];
+        const float off2 = weightedMean(d);
+        for (int k = 0; k < mt::kBands; ++k) LT[(size_t) k] = std::min(LT[(size_t) k], LB[(size_t) k] - off2);
+        topT = -200; for (float v : LT) topT = std::max(topT, v);
+    }
+    const auto LC = mt::bandLevels(Cw, sr);
+    float topC = -200; for (float v : LC) topC = std::max(topC, v);
     auto diffCurve = [&](const std::array<float, mt::kBands>& lc) {
-        std::array<float, mt::kBands> d {}; double sum = 0, w = 0;
-        for (int k = 0; k < mt::kBands; ++k) { d[(size_t) k] = LT[(size_t) k] - lc[(size_t) k]; if (k >= 3 && k <= 23) { const double wk = std::pow(10.0, (LT[(size_t) k] - topT) / 20.0); sum += d[(size_t) k] * wk; w += wk; } }
-        const float mean = w > 0 ? (float) (sum / w) : 0.f;
-        for (auto& v : d) v -= mean;
-        return d; };
+        std::array<float, mt::kBands> d {}; for (int k = 0; k < mt::kBands; ++k) d[(size_t) k] = LT[(size_t) k] - lc[(size_t) k];
+        const float mean = weightedMean(d); for (auto& v : d) v -= mean; return d; };
     auto limit = [&](std::array<float, mt::kBands>& c) {
         std::array<float, mt::kBands> sm = c;
         for (int k = 0; k < mt::kBands; ++k) { float s2 = c[(size_t) k] * 2, ww = 2; if (k > 0) { s2 += c[(size_t) k - 1]; ww += 1; } if (k + 1 < mt::kBands) { s2 += c[(size_t) k + 1]; ww += 1; } sm[(size_t) k] = s2 / ww; }
@@ -1143,43 +1199,46 @@ static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::arra
             float v = sm[(size_t) k];
             const bool emptyC = LC[(size_t) k] < topC - 55.f, emptyT = LT[(size_t) k] < topT - 55.f;
             if (v > 0 && (emptyC || emptyT)) v = 0;                  // nothing there to bring up (only noise would grow)
-            const float fc = mt::centres()[(size_t) k];
-            c[(size_t) k] = std::clamp(v, -18.f, fc < 80.f ? 4.f : 12.f);
+            c[(size_t) k] = std::clamp(v, -18.f, mt::centres()[(size_t) k] < 80.f ? 4.f : 12.f);
         } };
     m.eq = diffCurve(LC); limit(m.eq);
     for (int it = 0; it < 3; ++it)
     {
-        juce::AudioBuffer<float> t; t.makeCopyOf(Cb); mt::applyEq(t, sr, m.eq, 1.f);
+        juce::AudioBuffer<float> t; t.makeCopyOf(Cw); mt::applyEq(t, sr, m.eq, 1.f);
         const auto res = diffCurve(mt::bandLevels(t, sr));
         for (int k = 0; k < mt::kBands; ++k) m.eq[(size_t) k] += 0.75f * res[(size_t) k];
         limit(m.eq);
     }
-    // ROOM: only when A has clearly more room than C; the decay from A's tail, the amount by trying
-    juce::AudioBuffer<float> Ce; Ce.makeCopyOf(Cb); if (m.useEq) mt::applyEq(Ce, sr, m.eq, 1.f);
+    if (m.useEq) mt::applyEq(Cw, sr, m.eq, 1.f);
+    // 4. ROOM: added only when the target has clearly more room than C (the target's tail = the cleaner of A / B)
     float roomT, slopeT, roomC, slopeC;
-    mt::tailOf(Tc, sr, roomT, slopeT); mt::tailOf(Ce, sr, roomC, slopeC);
+    mt::tailOf(Tc, sr, roomT, slopeT);
+    if (haveB) { float rb, sb; mt::tailOf(TcB, sr, rb, sb); if (rb < roomT) { roomT = rb; } slopeT = std::min(slopeT, sb); }
+    mt::tailOf(Cw, sr, roomC, slopeC);
     m.roomMix = 0;
     if (roomT > roomC + 3.f)
     {
-        m.roomRt = juce::jlimit(0.12f, 2.0f, slopeT < -5.f ? -60.f / slopeT : 0.6f);
+        m.roomRt = juce::jlimit(0.12f, 1.5f, slopeT < -5.f ? -60.f / slopeT : 0.5f);
         float bestErr = std::abs(roomT - roomC);
         for (float mix : { 0.02f, 0.035f, 0.05f, 0.075f, 0.1f, 0.14f, 0.2f, 0.28f, 0.4f })
         {
-            juce::AudioBuffer<float> t; t.makeCopyOf(Ce); mt::addRoom(t, sr, m.roomRt, mix, 2.f);
+            juce::AudioBuffer<float> t; t.makeCopyOf(Cw); mt::addRoom(t, sr, m.roomRt, mix, 2.f);
             float rr, ss; mt::tailOf(t, sr, rr, ss);
             if (std::abs(rr - roomT) < bestErr) { bestErr = std::abs(rr - roomT); m.roomMix = mix; m.roomPre = 2.f; }
         }
+        if (m.useRoom && m.roomMix > 0) mt::addRoom(Cw, sr, m.roomRt, m.roomMix, m.roomPre);
     }
-    juce::AudioBuffer<float> Cr; Cr.makeCopyOf(Ce); if (m.useRoom && m.roomMix > 0) mt::addRoom(Cr, sr, m.roomRt, m.roomMix, m.roomPre);
-    // SHAPE: the loudness over time in 3 bands, A minus C, twice checked
-    const auto ET = mt::envelopes(Tc, sr);
+    const bool cRoomier = roomC > roomT + 3.f;               // C has more room: its tail may go down further
+    // 5. SHAPE: the loudness over time in 8 bands, target minus C, twice checked
+    auto ET = mt::envelopes(Tc, sr);
+    if (haveB) { const auto EB = mt::envelopes(TcB, sr); for (int k = 0; k < mt::kEnvB * mt::kEnvT; ++k) ET[(size_t) k] = std::min(ET[(size_t) k], EB[(size_t) k]); }
     auto shapeLimit = [&](std::array<float, mt::kEnvB * mt::kEnvT>& g, const std::array<float, mt::kEnvB * mt::kEnvT>& ec) {
         for (int t = 0; t < mt::kEnvT; ++t)
             for (int b = 0; b < mt::kEnvB; ++b)
             {
                 auto& v = g[(size_t) (t * mt::kEnvB + b)];
                 if (ET[(size_t) (t * mt::kEnvB + b)] < -60.f && ec[(size_t) (t * mt::kEnvB + b)] < -60.f) v = 0;
-                v = std::clamp(v, -15.f, t >= 6 ? 6.f : 9.f);       // late on: a tail is not pumped up out of noise
+                v = std::clamp(v, (cRoomier && t >= 4) ? -24.f : -15.f, t >= 6 ? 6.f : 9.f);   // late on: a tail is not pumped up out of noise
             }
         auto sm = g;
         for (int t = 0; t < mt::kEnvT; ++t)
@@ -1191,27 +1250,35 @@ static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::arra
                 sm[(size_t) (t * mt::kEnvB + b)] = s2 / ww;
             }
         g = sm; };
-    auto EC = mt::envelopes(Cr, sr);
+    auto EC = mt::envelopes(Cw, sr);
     for (int k = 0; k < mt::kEnvB * mt::kEnvT; ++k) m.shape[(size_t) k] = ET[(size_t) k] - EC[(size_t) k];
     shapeLimit(m.shape, EC);
     for (int it = 0; it < 2; ++it)
     {
-        juce::AudioBuffer<float> t; t.makeCopyOf(Cr); mt::applyShape(t, sr, m.shape, 1.f);
+        juce::AudioBuffer<float> t; t.makeCopyOf(Cw); mt::applyShape(t, sr, m.shape, 1.f);
         const auto e2 = mt::envelopes(t, sr);
         for (int k = 0; k < mt::kEnvB * mt::kEnvT; ++k) m.shape[(size_t) k] += 0.7f * (ET[(size_t) k] - e2[(size_t) k]);
         shapeLimit(m.shape, e2);
     }
-    // LENGTH: after 400 ms the shape stops; a longer tail than A's is ended with a fade
+    if (m.useShape) mt::applyShape(Cw, sr, m.shape, 1.f);
+    // 6. WIDTH: side vs mid like A's (a mono hit stays mono, a wide one gets its width)
     {
-        juce::AudioBuffer<float> t; t.makeCopyOf(Cr); if (m.useShape) mt::applyShape(t, sr, m.shape, 1.f);
+        const float wT = mt::widthOf(Tc, sr), wC = mt::widthOf(Cw, sr);
+        // widening needs some side to start from (a mono hit made "wide" is only its noise made louder)
+        m.widthDb = (std::abs(wT - wC) > 1.f && wC > -55.f) ? std::clamp(wT - wC, -24.f, wC > -30.f ? 6.f : 0.f) : 0.f;
+        if (m.useWidth) mt::applyWidth(Cw, m.widthDb, 1.f);
+    }
+    // 7. LENGTH: after 400 ms the shape stops; a longer tail than the target's is ended with a fade
+    {
         auto endOf = [&](const juce::AudioBuffer<float>& x) {   // ms after the onset where it stays 45 dB down
             const int n = x.getNumSamples(), on = mt::onsetOf(x), H = std::max(1, (int) (0.002 * sr));
             float pk = 1e-9f; for (int c = 0; c < x.getNumChannels(); ++c) pk = std::max(pk, x.getMagnitude(c, 0, n));
             const float thr = pk * 0.0056f; int last = on;
             for (int i = on; i < n; i += H) if (x.getMagnitude(0, i, std::min(H, n - i)) > thr) last = i;
             return std::make_pair((last - on) / sr * 1000.0, on / sr * 1000.0); };
-        const auto [endT, onT] = endOf(Tc);
-        const auto [endC, onC] = endOf(t);
+        auto [endT, onT] = endOf(Tc);
+        if (haveB) { const auto eb = endOf(TcB); endT = std::min(endT, eb.first); }
+        const auto [endC, onC] = endOf(Cw);
         juce::ignoreUnused(onT);
         if (endC > endT * 1.15 && endT > 20)
         {
@@ -1220,10 +1287,29 @@ static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::arra
         }
     }
     // how near it got (as heard: at its pitch, with its length)
+    auto v = neutral; if (m.usePitch) v[10] = m.pitch; if (m.useLen) { v[1] = m.en; v[4] = m.fo; }
+    auto scoreAt = [&](const MatchData& md, float amount) {
+        int o2 = 0; auto sp = shapeFrom(v); sp.matchAmount = amount;
+        ds::Feat f; return ds::fingerprint(atRate(shapeShot(C, sr, sp, o2, &md), std::pow(2.0, v[10] / 12.0)), sr, f) ? ds::scoreOf(ds::distance(fT, f, stats, fam)) : 0.f; };
+    auto scoreOf = [&](const MatchData& md) { return scoreAt(md, 1.f); };
+    m.after = scoreOf(m);
+    // each optional step stays only if it really brings the sound nearer (else it is left out, not just switched off)
+    for (int step = 0; step < 4; ++step)
     {
-        auto v = neutral; if (m.usePitch) v[10] = m.pitch; if (m.useLen) { v[1] = m.en; v[4] = m.fo; }
-        ds::Feat f;
-        m.after = ds::fingerprint(heard(C, v, &m), sr, f) ? ds::scoreOf(ds::distance(fT, f, stats, fam)) : 0.f;
+        MatchData t = m;
+        if (step == 0) { bool any = false; for (float g : t.glide) any = any || std::abs(g) > 0.05f; if (!any) continue; t.glide.fill(0.f); }
+        if (step == 1) { if (t.driveDb <= 0.05f) continue; t.driveDb = 0; }
+        if (step == 2) { if (t.roomMix <= 0) continue; t.roomMix = 0; }
+        if (step == 3) { if (std::abs(t.widthDb) <= 0.05f) continue; t.widthDb = 0; }
+        const float s2 = scoreOf(t);
+        if (s2 > m.after + 0.3f) { m = t; m.after = s2; }
+    }
+    // how much of it: sometimes a part of the match is nearer than all of it
+    m.bestAmount = 1.f;
+    for (float amt : { 0.5f, 0.75f })
+    {
+        const float s2 = scoreAt(m, amt);
+        if (s2 > m.after + 0.3f) { m.after = s2; m.bestAmount = amt; }
     }
     return m;
 }
@@ -1233,7 +1319,8 @@ void DrumSlicerProcessor::startMatch(int pad)
     auto r = getResult();
     if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid || r->pads[(size_t) pad].user.getNumSamples() == 0 || matching.load()) return;
     const auto& pd = r->pads[(size_t) pad];
-    if (pd.audio.getMagnitude(0, pd.audio.getNumSamples()) < 1.0e-6f) return;   // A has no sound (cleared): nothing to match to
+    if (pd.audio.getMagnitude(0, pd.audio.getNumSamples()) < 1.0e-6f)
+    { std::lock_guard<std::mutex> g(matchLock); matchMsg = "A HAS NO SOUND: NOTHING TO MATCH TO"; return; }
     setPadSource(pad, 2);                            // C is the one shown (and shaped)
     std::array<float, kShapeN> vA = shownShape(pad), neutral {};
     for (int k = 0; k < kShapeN; ++k)
@@ -1246,19 +1333,26 @@ void DrumSlicerProcessor::startMatch(int pad)
     if (ix && ix->oneShots >= 50) { stats->mean = ix->mean; stats->sd = ix->sd; stats->oneShots = ix->oneShots; } else stats->stats();
     auto A = std::make_shared<juce::AudioBuffer<float>>(); A->makeCopyOf(pd.audio);
     auto C = std::make_shared<juce::AudioBuffer<float>>(); C->makeCopyOf(pd.user);
+    auto Bb = std::make_shared<juce::AudioBuffer<float>>(); Bb->makeCopyOf(pd.best);
     const double sr = r->sr; const auto fam = ds::familyOf(pd.name);
     matching = true;
     { std::lock_guard<std::mutex> g(matchLock); matchMsg = "MATCHING ..."; }
-    std::thread([this, a = alive, A, C, vA, neutral, vCnow, prev, stats, sr, fam, pad]
+    std::thread([this, a = alive, A, Bb, C, vA, neutral, vCnow, prev, stats, sr, fam, pad]
     {
         WorkerScope ws;
-        auto m = computeMatch(*A, vA, *C, neutral, vCnow, prev, prev.on, sr, fam, *stats);
+        auto m = computeMatch(*A, vA, *C, neutral, vCnow, prev, prev.on, sr, fam, *stats, Bb.get());
         juce::MessageManager::callAsync([this, a, m, pad, neutral]
         {
             if (!a->load()) return;
             matching = false;
             auto r2 = getResult();
             if (!r2 || !r2->pads[(size_t) pad].valid || r2->pads[(size_t) pad].user.getNumSamples() == 0) return;
+            if (m.after <= m.before + 0.5f)
+            {   // a match would not bring it nearer: nothing changes
+                std::lock_guard<std::mutex> g(matchLock);
+                matchMsg = "ALREADY AS NEAR AS IT GETS  (" + juce::String(juce::roundToInt(m.before)) + "%)";
+                return;
+            }
             setPadSource(pad, 2);
             { std::lock_guard<std::mutex> g(matchLock); match[(size_t) pad] = m; ++matchVer[(size_t) pad];
               matchMsg = "MATCHED  " + juce::String(juce::roundToInt(m.before)) + "% -> " + juce::String(juce::roundToInt(m.after)) + "%"; }
@@ -1268,7 +1362,7 @@ void DrumSlicerProcessor::startMatch(int pad)
             v[1] = m.useLen ? m.en : neutral[1]; v[4] = m.useLen ? m.fo : neutral[4];
             v[11] = neutral[11]; v[8] = neutral[8]; v[9] = neutral[9];   // tone / punch / sustain: the match does that now
             showShape(pad, v);
-            if (auto* p = apvts.getParameter("mamt" + juce::String(pad))) p->setValueNotifyingHost(1.f);
+            if (auto* p = apvts.getParameter("mamt" + juce::String(pad))) p->setValueNotifyingHost(p->convertTo0to1(100.f * m.bestAmount));
             audition(pad);
         });
     }).detach();
@@ -1282,6 +1376,7 @@ std::shared_ptr<DrumSlicerProcessor::RankState> DrumSlicerProcessor::startRank(i
     if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid || paths.empty()) { st->finished = true; return st; }
     const auto& pd = r->pads[(size_t) pad];
     auto T = std::make_shared<juce::AudioBuffer<float>>(); T->makeCopyOf(pd.get(src == 1, src == 2));
+    auto Tb = std::make_shared<juce::AudioBuffer<float>>(); if (src == 0) Tb->makeCopyOf(pd.best);   // A: its clean part with B
     if (T->getMagnitude(0, T->getNumSamples()) < 1.0e-6f) { st->finished = true; return st; }
     std::array<float, kShapeN> vT = shownShape(pad), neutral {};
     for (int k = 0; k < kShapeN; ++k)
@@ -1301,7 +1396,7 @@ std::shared_ptr<DrumSlicerProcessor::RankState> DrumSlicerProcessor::startRank(i
         ranks.erase(std::remove_if(ranks.begin(), ranks.end(), [](const std::weak_ptr<RankState>& w) { return w.expired(); }), ranks.end());
         ranks.push_back(st);
     }
-    std::thread([st, T, vT, neutral, ref, stats, sr, fam]
+    std::thread([st, T, Tb, vT, neutral, ref, stats, sr, fam]
     {
         WorkerScope ws;
         for (size_t i = 0; i < st->paths.size() && !st->cancel.load(); ++i)
@@ -1309,7 +1404,7 @@ std::shared_ptr<DrumSlicerProcessor::RankState> DrumSlicerProcessor::startRank(i
             juce::AudioBuffer<float> c;
             float score = 0.f;
             if (ds::loadUserShot(juce::File(st->paths[i]), *ref, sr, c))
-                score = computeMatch(*T, vT, c, neutral, neutral, MatchData(), false, sr, fam, *stats).after;
+                score = computeMatch(*T, vT, c, neutral, neutral, MatchData(), false, sr, fam, *stats, Tb.get()).after;
             { std::lock_guard<std::mutex> g(st->lock); st->after[i] = score; }
             ++st->done;
         }
@@ -1328,6 +1423,7 @@ void DrumSlicerProcessor::setMatchPart(int pad, int part, bool on)
         if (!md.on) return;
         if (part == partEq) md.useEq = on; else if (part == partShape) md.useShape = on; else if (part == partRoom) md.useRoom = on;
         else if (part == partPitch) md.usePitch = on; else if (part == partLen) md.useLen = on;
+        else if (part == partGlide) md.useGlide = on; else if (part == partDrive) md.useDrive = on; else if (part == partWidth) md.useWidth = on;
         ++matchVer[(size_t) pad]; m = md;
     }
     if (part == partPitch || part == partLen)
@@ -1371,10 +1467,13 @@ juce::ValueTree DrumSlicerProcessor::matchTree() const
         const auto& m = match[(size_t) p];
         if (!m.on) continue;
         juce::StringArray a;
-        a.add(juce::String((m.useEq ? 1 : 0) | (m.useShape ? 2 : 0) | (m.useRoom ? 4 : 0) | (m.usePitch ? 8 : 0) | (m.useLen ? 16 : 0)));
+        a.add(juce::String((m.useEq ? 1 : 0) | (m.useShape ? 2 : 0) | (m.useRoom ? 4 : 0) | (m.usePitch ? 8 : 0) | (m.useLen ? 16 : 0)
+                           | (m.useGlide ? 32 : 0) | (m.useDrive ? 64 : 0) | (m.useWidth ? 128 : 0)));
         for (float v : m.eq) a.add(juce::String(v, 3));
         for (float v : m.shape) a.add(juce::String(v, 3));
         for (float v : { m.roomRt, m.roomMix, m.roomPre, m.pitch, m.en, m.fo, m.before, m.after }) a.add(juce::String(v, 4));
+        for (float v : m.glide) a.add(juce::String(v, 3));
+        a.add(juce::String(m.driveDb, 3)); a.add(juce::String(m.widthDb, 3));
         t.setProperty("p" + juce::String(p), a.joinIntoString(","), nullptr);
     }
     return t;
@@ -1389,13 +1488,16 @@ void DrumSlicerProcessor::matchFromTree(const juce::ValueTree& t)
         m = MatchData(); ++matchVer[(size_t) p];
         if (!t.isValid()) continue;
         juce::StringArray a; a.addTokens(t.getProperty("p" + juce::String(p)).toString(), ",", "");
-        if (a.size() != 1 + mt::kBands + mt::kEnvB * mt::kEnvT + 8) continue;
+        const int base = 1 + mt::kBands + mt::kEnvB * mt::kEnvT + 8, full = base + mt::kGlideN + 2;
+        if (a.size() != base && a.size() != full) continue;   // (1.11: no pitch drop / saturation / width yet)
         int i = 0;
         const int fl = a[i++].getIntValue();
         m.useEq = fl & 1; m.useShape = fl & 2; m.useRoom = fl & 4; m.usePitch = fl & 8; m.useLen = fl & 16;
+        m.useGlide = a.size() == full ? (fl & 32) != 0 : true; m.useDrive = a.size() == full ? (fl & 64) != 0 : true; m.useWidth = a.size() == full ? (fl & 128) != 0 : true;
         for (auto& v : m.eq) v = a[i++].getFloatValue();
         for (auto& v : m.shape) v = a[i++].getFloatValue();
         for (float* v : { &m.roomRt, &m.roomMix, &m.roomPre, &m.pitch, &m.en, &m.fo, &m.before, &m.after }) *v = a[i++].getFloatValue();
+        if (a.size() == full) { for (auto& v : m.glide) v = a[i++].getFloatValue(); m.driveDb = a[i++].getFloatValue(); m.widthDb = a[i++].getFloatValue(); }
         m.on = true;
     }
 }

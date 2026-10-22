@@ -27,10 +27,12 @@ struct Shaped
 // MATCH TO A, as measured: EQ, room, shape over time (+ the pitch / length it set on the knobs)
 struct MatchData
 {
-    bool on = false, useEq = true, useShape = true, useRoom = true, usePitch = true, useLen = true;
+    bool on = false, useEq = true, useShape = true, useRoom = true, usePitch = true, useLen = true, useGlide = true, useDrive = true, useWidth = true;
     std::array<float, mt::kBands> eq {};
     std::array<float, mt::kEnvB * mt::kEnvT> shape {};
-    float roomRt = 0, roomMix = 0, roomPre = 0, pitch = 0, en = 2000, fo = 0, before = 0, after = 0;
+    std::array<float, mt::kGlideN> glide {};            // PITCH DROP: semitones along the first 120 ms
+    float roomRt = 0, roomMix = 0, roomPre = 0, pitch = 0, en = 2000, fo = 0, before = 0, after = 0, driveDb = 0, widthDb = 0;
+    float bestAmount = 1.f;                              // the MATCH knob it is nearest at
 };
 void applyMatchChain(juce::AudioBuffer<float>& x, double sr, const MatchData& m, float amount);
 juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double sr, const ShapeParams& p, int& offset, const MatchData* match = nullptr);
@@ -129,7 +131,7 @@ public:
     void startMatch(int pad);
     bool isMatching() const { return matching.load(); }
     MatchData getMatch(int pad) const { std::lock_guard<std::mutex> g(matchLock); return pad >= 0 && pad < ds::kPads ? match[(size_t) pad] : MatchData(); }
-    enum MatchPart { partEq = 0, partShape, partRoom, partPitch, partLen };
+    enum MatchPart { partEq = 0, partShape, partRoom, partPitch, partLen, partGlide, partDrive, partWidth };
     void setMatchPart(int pad, int part, bool on);
     void removeMatch(int pad);
     juce::String matchMessage() const { std::lock_guard<std::mutex> g(matchLock); return matchMsg; }
