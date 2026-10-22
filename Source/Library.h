@@ -31,6 +31,9 @@ enum FeatIdx
     fGlide,          // pitch at the start minus pitch of the body, semitones (a kick's drop, an 808 glide)
     fCentA,          // spectral centre of the attack, log2 Hz
     fCentB,          // spectral centre of the body, log2 Hz
+    fRough,          // TEXTURE: how much the highs flicker (snare wires, shaker grains, a clap's layers), dB
+    fGrain,          // how fast they flicker, log2 (flickers / s)
+    fBursts,         // separate hits inside the first 80 ms (1 = one hit, a clap has 3 - 5)
     fTimbre,         // 8 timbre coefficients (cepstrum of the 24 bands)
     kTimbre = 8,
     fBands = fTimbre + kTimbre,      // 24 bands 30 Hz - 16 kHz, dB relative to the loudest
@@ -202,6 +205,52 @@ inline bool fingerprint(const juce::AudioBuffer<float>& in, double sr, Feat& f)
     f[fPitch] = pitchOf(0.04, 0.25, cb); f[fPitchConf] = cb;
     const float ps = pitchOf(0.008, 0.04, cs);
     f[fGlide] = (cb > 0.5f && cs > 0.5f) ? juce::jlimit(-24.f, 24.f, (ps - f[fPitch]) * 12.f) : 0.f;
+    {   // TEXTURE: the highs (above 2 kHz) in 1 ms steps against their own 15 ms average: what is left is the flicker
+        juce::IIRFilter hp; hp.setCoefficients(juce::IIRCoefficients::makeHighPass(sr, 2000.0)); hp.reset();
+        const int H1 = std::max(1, (int) (0.001 * sr)), K1 = std::min(n, (int) (0.30 * sr)) / H1;
+        std::vector<float> he((size_t) std::max(1, K1));
+        for (int k = 0; k < K1; ++k)
+        {
+            double e2 = 0;
+            for (int i = k * H1; i < (k + 1) * H1; ++i) { const float v = hp.processSingleSampleRaw(m[(size_t) i]); e2 += (double) v * v; }
+            he[(size_t) k] = (float) std::sqrt(e2 / H1);
+        }
+        float hpk = 1e-9f; for (float v : he) hpk = std::max(hpk, v);
+        double sum = 0, sum2 = 0; int cnt = 0, flips = 0; float prevR = 0;
+        for (int k = 0; k < K1; ++k)
+        {
+            double tr = 0; int c = 0;
+            for (int j = std::max(0, k - 7); j <= std::min(K1 - 1, k + 7); ++j) { tr += he[(size_t) j]; ++c; }
+            tr /= std::max(1, c);
+            if (tr < hpk * 0.003) continue;                              // too quiet to have a texture
+            const float r = (float) (20.0 * std::log10((he[(size_t) k] + 1e-9) / (tr + 1e-9)));
+            sum += r; sum2 += (double) r * r; ++cnt;
+            if (cnt > 1 && (r >= 0) != (prevR >= 0)) ++flips;
+            prevR = r;
+        }
+        const double mu = cnt > 0 ? sum / cnt : 0;
+        f[fRough] = cnt > 4 ? (float) std::sqrt(std::max(0.0, sum2 / cnt - mu * mu)) : 0.f;
+        f[fGrain] = cnt > 4 ? (float) std::log2(1.0 + flips / (cnt * 0.001)) : 0.f;
+        // bursts: separate hits of the highs (a clap's layers are noise bursts; a snare's tone rings lower and
+        // its ripples must not count): 3 ms smoothed, peaks 40 % of the loudest, 5 ms apart, 6 dB dip between
+        int bursts = 0;
+        {
+            const int kEnd = std::min(K1, (int) (0.08 * sr) / H1);
+            std::vector<float> sm((size_t) std::max(1, kEnd));
+            for (int k = 0; k < kEnd; ++k) { double t = 0; int c = 0; for (int j = std::max(0, k - 1); j <= std::min(kEnd - 1, k + 1); ++j) { t += he[(size_t) j]; ++c; } sm[(size_t) k] = (float) (t / c); }
+            float top = 1e-9f; for (int k = 0; k < kEnd; ++k) top = std::max(top, sm[(size_t) k]);
+            float lastPk = 0, dip = 1e9f; int lastK = -100;
+            for (int k = 1; k + 1 < kEnd; ++k)
+            {
+                const float v = sm[(size_t) k];
+                dip = std::min(dip, v);
+                if (v < sm[(size_t) (k - 1)] || v < sm[(size_t) (k + 1)] || v < 0.4f * top) continue;
+                if (bursts == 0 || (k - lastK >= 5 && dip < 0.5f * std::min(v, lastPk))) { ++bursts; lastPk = v; lastK = k; dip = 1e9f; }
+                else if (v > lastPk) { lastPk = v; lastK = k; }
+            }
+        }
+        f[fBursts] = (float) std::max(1, bursts);
+    }
     return true;
 }
 
@@ -264,7 +313,7 @@ struct LibIndex
             else if (e.status == 1) ++longs; else if (e.status == 4) ++bad; else if (e.status == 3) { ++loops; ++byName; } else ++loops;
         }
         // typical spreads (also the floor: one odd archive must not make a feature count for everything)
-        static const float def[fTimbre] = { 1.5f, 5.f, 1.2f, 1.2f, 1.5f, 8.f, 6.f, 6.f, 8.f, 8.f, 1.2f, 1.f, 0.3f, 4.f, 0.8f, 0.8f };
+        static const float def[fTimbre] = { 1.5f, 5.f, 1.2f, 1.2f, 1.5f, 8.f, 6.f, 6.f, 8.f, 8.f, 1.2f, 1.f, 0.3f, 4.f, 0.8f, 0.8f, 1.5f, 1.0f, 1.0f };
         for (int i = 0; i < kFeat; ++i)
         {
             const double c = std::max(1, oneShots), mu = s[(size_t) i] / c, var = std::max(0.0, s2[(size_t) i] / c - mu * mu);
@@ -280,13 +329,31 @@ struct Match { const LibEntry* e = nullptr; float dist = 0, score = 0; juce::Str
 // how different two sounds are, weighted for the drum: what you hear first counts most
 inline float distance(const Feat& q, const Feat& c, const LibIndex& ix, Family fam, juce::StringArray* tags = nullptr)
 {
-    struct W { float len, tail, hard, bright, sub, noise, pitch, glide, timbre, shape; };
+    struct W { float len, tail, hard, bright, sub, noise, pitch, glide, timbre, shape, texture; };
     static const W w[] = {
-        /* kick  */ { 2.0f, 0.6f, 1.6f, 1.0f, 1.4f, 0.6f, 1.8f, 0.8f, 1.0f, 1.5f },
-        /* snare */ { 1.8f, 0.8f, 1.6f, 1.6f, 0.4f, 1.2f, 0.8f, 0.2f, 1.2f, 1.5f },
-        /* hat   */ { 2.0f, 1.0f, 1.0f, 1.8f, 0.2f, 1.0f, 0.2f, 0.0f, 1.2f, 1.5f },
-        /* tom   */ { 1.8f, 0.6f, 1.2f, 1.0f, 0.6f, 1.0f, 1.8f, 0.6f, 1.2f, 1.5f },
-        /* any   */ { 1.8f, 0.8f, 1.2f, 1.2f, 0.8f, 1.0f, 1.0f, 0.4f, 1.2f, 1.5f } };
+        /* kick  */ { 2.0f, 0.6f, 1.6f, 1.0f, 1.4f, 0.6f, 1.8f, 0.8f, 1.0f, 1.5f, 0.5f },
+        /* snare */ { 1.8f, 0.8f, 1.6f, 1.6f, 0.4f, 1.2f, 0.8f, 0.2f, 1.2f, 1.5f, 1.4f },
+        /* hat   */ { 2.0f, 1.0f, 1.0f, 1.8f, 0.2f, 1.0f, 0.2f, 0.0f, 1.2f, 1.5f, 1.2f },
+        /* tom   */ { 1.8f, 0.6f, 1.2f, 1.0f, 0.6f, 1.0f, 1.8f, 0.6f, 1.2f, 1.5f, 0.8f },
+        /* any   */ { 1.8f, 0.8f, 1.2f, 1.2f, 0.8f, 1.0f, 1.0f, 0.4f, 1.2f, 1.5f, 1.0f } };
+    // the ear is far more sensitive at 1 - 5 kHz than at 50 Hz: band differences count by half an A-weighting
+    // (a kick keeps more of its lows: they are what it is)
+    struct Ear { std::array<float, kBands> band {}; std::array<float, kShapeB> shape {}; };
+    static const std::array<Ear, 2> ear = [] {
+        auto aw = [](double f) { const double f2 = f * f;
+            const double ra = 12194.0 * 12194.0 * f2 * f2 / ((f2 + 20.6 * 20.6) * std::sqrt((f2 + 107.7 * 107.7) * (f2 + 737.9 * 737.9)) * (f2 + 12194.0 * 12194.0));
+            return 20.0 * std::log10(ra) + 2.0; };
+        std::array<Ear, 2> e2;
+        for (int v = 0; v < 2; ++v)
+        {
+            double s1 = 0, s2 = 0;
+            for (int k = 0; k < kBands; ++k) { const double f = 30.0 * std::pow(16000.0 / 30.0, (k + 0.5) / kBands); double x = std::pow(10.0, aw(f) / 40.0); if (v == 1) x = 0.5 * x + 0.5; e2[(size_t) v].band[(size_t) k] = (float) x; s1 += x; }
+            for (int k = 0; k < kShapeB; ++k) { const double f = 40.0 * std::pow(16000.0 / 40.0, (k + 0.5) / kShapeB); double x = std::pow(10.0, aw(f) / 40.0); if (v == 1) x = 0.5 * x + 0.5; e2[(size_t) v].shape[(size_t) k] = (float) x; s2 += x; }
+            for (auto& x : e2[(size_t) v].band) x = (float) (x * kBands / s1);
+            for (auto& x : e2[(size_t) v].shape) x = (float) (x * kShapeB / s2);
+        }
+        return e2; }();
+    const Ear& er = ear[fam == famKick ? 1 : 0];
     const W& k = w[fam];
     auto z = [&](int i) { const float d = (q[(size_t) i] - c[(size_t) i]) / ix.sd[(size_t) i]; return d * d; };
     float d = 0;
@@ -306,8 +373,13 @@ inline float distance(const Feat& q, const Feat& c, const LibIndex& ix, Family f
     else if ((q[fPitchConf] > 0.5f) != (c[fPitchConf] > 0.5f)) d += k.pitch * 0.6f;
     float td = 0; for (int i = fTimbre; i < fTimbre + kTimbre; ++i) td += z(i);
     d += k.timbre * td / kTimbre;
-    float sd2 = 0; for (int i = fShape; i < kFeat; ++i) { const float x = (q[(size_t) i] - c[(size_t) i]) / 10.f; sd2 += x * x; }
+    float bd = 0; for (int i = 0; i < kBands; ++i) { const float x = (q[(size_t) (fBands + i)] - c[(size_t) (fBands + i)]) / 10.f; bd += er.band[(size_t) i] * x * x; }
+    d += 0.6f * k.timbre * bd / kBands * 4.f;
+    float sd2 = 0;
+    for (int t = 0; t < kShapeT; ++t)
+        for (int b = 0; b < kShapeB; ++b) { const int i = fShape + t * kShapeB + b; const float x = (q[(size_t) i] - c[(size_t) i]) / 10.f; sd2 += er.shape[(size_t) b] * x * x; }
     d += k.shape * sd2 / (kShapeB * kShapeT) * 4.f;
+    d += k.texture * (0.45f * z(fRough) + 0.2f * z(fGrain) + 0.35f * z(fBursts));
     if (tags != nullptr)
     {   // how it differs from the pad, in the words you would use
         const float dl = c[fLen] - q[fLen];
@@ -326,6 +398,10 @@ inline float distance(const Feat& q, const Feat& c, const LibIndex& ix, Family f
         if (fam == famKick) { const float ds = c[fSub] - q[fSub]; if (ds > 4.f) tags->add("MORE SUB"); else if (ds < -4.f) tags->add("LESS SUB"); }
         const float dn = c[fNoise] - q[fNoise];
         if (dn > 1.2f) tags->add("NOISIER"); else if (dn < -1.2f) tags->add("CLEANER");
+        const float dbu = c[fBursts] - q[fBursts];
+        if (dbu >= 1.5f) tags->add("MORE LAYERS"); else if (dbu <= -1.5f) tags->add("FEWER LAYERS");
+        const float dro = c[fRough] - q[fRough];
+        if (dro > 1.5f) tags->add("ROUGHER"); else if (dro < -1.5f) tags->add("SMOOTHER");
     }
     return d;
 }
@@ -574,7 +650,7 @@ private:
         juce::MemoryBlock mb;
         if (!indexFile().loadFileAsData(mb) || mb.getSize() < 12) return;
         juce::MemoryInputStream in(mb, false);
-        if (in.readInt() != 0x524b4c42 /* RKLB */ || in.readInt() != 4) return;     // older index: read the folders again
+        if (in.readInt() != 0x524b4c42 /* RKLB */ || in.readInt() != 5) return;     // older index: read the folders again
         const int count = in.readInt();
         if (count < 0 || count > 2000000) return;
         auto ix = std::make_shared<LibIndex>();
@@ -594,7 +670,7 @@ private:
     static void save(const LibIndex& ix)
     {
         juce::MemoryOutputStream out;
-        out.writeInt(0x524b4c42); out.writeInt(4); out.writeInt((int) ix.items.size());
+        out.writeInt(0x524b4c42); out.writeInt(5); out.writeInt((int) ix.items.size());
         for (auto& e : ix.items)
         {
             out.writeString(e.path); out.writeInt64(e.size); out.writeInt64(e.mtime);

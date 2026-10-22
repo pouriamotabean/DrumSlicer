@@ -10,14 +10,14 @@
 // per-pad sound shaping (start / end trim, attack-hold-decay, punch / sustain), rendered off the audio thread
 // fades: curve -1..1 (0 = straight line, + = stays louder, - = drops / rises later), gain = t^(2^(-3 curve))
 struct ShapeParams { float start = 0, end = 2000, attack = 0, hold = 2000, decay = 2000, punch = 0, sustain = 0,
-                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0, tone = 0, matchAmount = 1; int matchVersion = 0; bool best = false, user = false;
+                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0, tone = 0, matchAmount = 1, gainDb = 0; int matchVersion = 0; bool best = false, user = false;
                      // field by field (comparing raw memory would also compare the padding bytes, which can differ every
                      // time and made every pad rebuild 20 times a second)
                      bool operator!=(const ShapeParams& o) const
                      {
                          return start != o.start || end != o.end || attack != o.attack || hold != o.hold || decay != o.decay || punch != o.punch
                              || sustain != o.sustain || attackCurve != o.attackCurve || fadeOut != o.fadeOut || fadeOutCurve != o.fadeOutCurve
-                             || tone != o.tone || matchAmount != o.matchAmount || matchVersion != o.matchVersion || best != o.best || user != o.user;
+                             || tone != o.tone || gainDb != o.gainDb || matchAmount != o.matchAmount || matchVersion != o.matchVersion || best != o.best || user != o.user;
                      } };
 struct Shaped
 {
@@ -120,8 +120,8 @@ public:
     void setPadSource(int pad, int src);             // 0 = A, 1 = B, 2 = C
     // every source of a pad (A, B, C) keeps its own shape + pitch + tone: the knobs and the sound editor show the
     // chosen one. Switching saves the shown values into its slot and brings the other one's back.
-    static constexpr int kShapeN = 12;
-    static const char* const* shapeIds();            // st en atk fic fo foc hold dcy punch sus pitch tone
+    static constexpr int kShapeN = 13;
+    static const char* const* shapeIds();            // st en atk fic fo foc hold dcy punch sus pitch tone gain
     void resetShape(int pad, int src);               // a new sound starts neutral (only that slot)
     // MATCH TO A: the shape (pitch, length, tone, punch, sustain, fade in) that brings your sample C nearest to
     // the pad's A as you hear it - found by trying, measured with the same ears as the SIMILAR search
@@ -133,6 +133,18 @@ public:
     void setMatchPart(int pad, int part, bool on);
     void removeMatch(int pad);
     juce::String matchMessage() const { std::lock_guard<std::mutex> g(matchLock); return matchMsg; }
+    // SIMILAR, ranked by how near each sound gets AFTER a match (its texture is what a match cannot change):
+    // every candidate is matched to the pad's sound in the background
+    struct RankState
+    {
+        std::vector<juce::String> paths;
+        std::vector<float> after;                    // -1 = not yet
+        std::atomic<int> done { 0 };
+        std::atomic<bool> cancel { false }, finished { false };
+        std::mutex lock;
+    };
+    std::shared_ptr<RankState> startRank(int pad, int src, const std::vector<juce::String>& paths);
+    std::mutex rankLock; std::vector<std::weak_ptr<RankState>> ranks;
     int padSource(int pad) const;
     void setPadType(int pad, const juce::String& type);
     bool addPad(int pad, const juce::String& type, const juce::File& f);   // an empty pad: a new sound of yours ("" = from its file name)

@@ -1,7 +1,8 @@
 #pragma once
 // MATCH TO A (v1.10): bring your sample C near the pad's own sound A.
 //   EQ    - 26 third-octave bands (the Suno Chain match EQ: iterative solving, so the cascade really hits the curve)
-//   SHAPE - the loudness over time in 3 bands (low / mid / high), 10 moments over the first 400 ms
+//   SHAPE - the loudness over time in 8 bands, 10 moments over the first 400 ms (a time-varying EQ: the crack of
+//           the attack and the colour of the body each get their own)
 //   ROOM  - a short room (8-line feedback delay network) when A has more room than C
 // All of it is measured from the two sounds and checked again after rendering (closed loop).
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -15,7 +16,7 @@
 namespace mt
 {
 constexpr double kPi = 3.14159265358979323846;
-constexpr int kBands = 26, kEnvB = 3, kEnvT = 10;
+constexpr int kBands = 26, kEnvB = 8, kEnvT = 10;
 inline const std::array<float, kBands>& centres()
 {
     static const std::array<float, kBands> c { 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630, 800,
@@ -146,12 +147,19 @@ inline std::array<float, kBands> bandLevels(const juce::AudioBuffer<float>& x, d
     return out;
 }
 
-// the 3-band split used for SHAPE (low < 200 Hz, high > 3 kHz, mid = the rest): sums back to the input
-struct Split3
+// the 8-band split used for SHAPE: low-passes at the 7 edges, each band = the difference of two of them,
+// so the bands always sum back to the input (gain 1 everywhere = untouched)
+struct SplitN
 {
-    Biquad lo, hi;
-    void prepare(double fs) { lo.setLPF(fs, 200); hi.setHPF(fs, 3000); lo.reset(); hi.reset(); }
-    inline void process(float x, int ch, float& l, float& m, float& h) { l = lo.process(x, ch); h = hi.process(x, ch); m = x - l - h; }
+    static constexpr float edges[kEnvB - 1] = { 100.f, 250.f, 600.f, 1200.f, 2500.f, 5000.f, 9000.f };
+    std::array<Biquad, kEnvB - 1> lp;
+    void prepare(double fs) { for (int i = 0; i < kEnvB - 1; ++i) { lp[(size_t) i].setLPF(fs, edges[i]); lp[(size_t) i].reset(); } }
+    inline void process(float x, int ch, float* band)
+    {
+        float prev = 0.f;
+        for (int i = 0; i < kEnvB - 1; ++i) { const float l = lp[(size_t) i].process(x, ch); band[i] = l - prev; prev = l; }
+        band[kEnvB - 1] = x - prev;
+    }
 };
 
 // level of each band in each moment (dB of the sound's own peak moment)
@@ -160,19 +168,20 @@ inline std::array<float, kEnvB * kEnvT> envelopes(const juce::AudioBuffer<float>
     std::array<float, kEnvB * kEnvT> out {}; out.fill(-90.f);
     const int n = x.getNumSamples(); if (n < 64) return out;
     const int on = onsetOf(x);
-    Split3 sp; sp.prepare(fs);
+    SplitN sp; sp.prepare(fs);
     std::array<double, kEnvB * kEnvT> e {}; std::array<int, kEnvT> cnt {};
     const float* L = x.getReadPointer(0); const float* R = x.getReadPointer(x.getNumChannels() > 1 ? 1 : 0);
     const double* edge = envEdges();
     int t = 0;
     for (int i = 0; i < n; ++i)
     {
-        float l, m, h; sp.process(0.5f * (L[i] + R[i]), 0, l, m, h);
+        float bnd[kEnvB]; sp.process(0.5f * (L[i] + R[i]), 0, bnd);
         if (i < on) continue;
         const double ts = (i - on) / fs;
         if (ts >= edge[kEnvT]) break;
         while (t < kEnvT - 1 && ts >= edge[t + 1]) ++t;
-        e[(size_t) (t * kEnvB + 0)] += l * l; e[(size_t) (t * kEnvB + 1)] += m * m; e[(size_t) (t * kEnvB + 2)] += h * h; ++cnt[(size_t) t];
+        for (int b = 0; b < kEnvB; ++b) e[(size_t) (t * kEnvB + b)] += (double) bnd[b] * bnd[b];
+        ++cnt[(size_t) t];
     }
     double mx = 1e-20;
     for (int k = 0; k < kEnvT; ++k) for (int b = 0; b < kEnvB; ++b) { auto& v = e[(size_t) (k * kEnvB + b)]; v /= std::max(1, cnt[(size_t) k]); mx = std::max(mx, v); }
@@ -197,18 +206,19 @@ inline void applyShape(juce::AudioBuffer<float>& x, double fs, const std::array<
         return (float) (gainDb[(size_t) (k * kEnvB + band)] * (1 - f) + gainDb[(size_t) ((k + 1) * kEnvB + band)] * f); };
     for (int c = 0; c < std::min(2, x.getNumChannels()); ++c)
     {
-        Split3 sp; sp.prepare(fs);
+        SplitN sp; sp.prepare(fs);
         auto* d = x.getWritePointer(c);
-        float gs[kEnvB] = { 1, 1, 1 };
+        float gs[kEnvB]; for (auto& g : gs) g = 1.f;
         for (int i = 0; i < n; ++i)
         {
-            float l, m, h; sp.process(d[i], 0, l, m, h);
+            float bnd[kEnvB]; sp.process(d[i], 0, bnd);
             if ((i & 31) == 0)
             {
                 const double ts = (i - on) / fs;
                 for (int b = 0; b < kEnvB; ++b) gs[b] = juce::Decibels::decibelsToGain(gainAt(b, ts) * amount);
             }
-            d[i] = l * gs[0] + m * gs[1] + h * gs[2];
+            float v = 0.f; for (int b = 0; b < kEnvB; ++b) v += bnd[b] * gs[b];
+            d[i] = v;
         }
     }
 }

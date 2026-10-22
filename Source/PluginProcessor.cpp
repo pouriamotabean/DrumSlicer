@@ -1,6 +1,11 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+// background workers (MATCH, the after-match ranking): counted, so the plugin never closes while one still runs
+static std::atomic<int> gWorkers { 0 };
+struct WorkerScope { WorkerScope() { ++gWorkers; } ~WorkerScope() { --gWorkers; } };
+
+
 juce::AudioProcessor::BusesProperties DrumSlicerProcessor::makeBuses()
 {
     auto b = BusesProperties().withOutput("Main", juce::AudioChannelSet::stereo(), true);
@@ -38,6 +43,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         p.push_back(std::make_unique<F>(juce::ParameterID{ "sus" + s, 1 },   n + " Sustain", NR(-12.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "pitch" + s, 1 }, n + " Pitch",   NR(-12.f, 12.f, 0.01f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "tone" + s, 1 },  n + " Tone",    NR(-12.f, 12.f, 0.1f), 0.f));
+        p.push_back(std::make_unique<F>(juce::ParameterID{ "gain" + s, 1 },  n + " Gain",    NR(-24.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "mamt" + s, 1 },  n + " Match Amount", NR(0.f, 100.f, 0.1f), 100.f));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "best" + juce::String(i), 1 }, n + " Best hit", false));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "usec" + juce::String(i), 1 }, n + " Your sample", false));
@@ -68,7 +74,7 @@ ShapeParams DrumSlicerProcessor::shapeParams(int i) const
     p.start = v("st"); p.end = v("en"); p.attack = v("atk"); p.hold = v("hold"); p.decay = v("dcy");
     p.punch = v("punch"); p.sustain = v("sus"); p.best = v("best") > 0.5f;
     p.attackCurve = v("fic"); p.fadeOut = v("fo"); p.fadeOutCurve = v("foc"); p.user = v("usec") > 0.5f;
-    p.tone = v("tone");
+    p.tone = v("tone"); p.gainDb = v("gain");
     p.matchAmount = v("mamt") * 0.01f;
     { std::lock_guard<std::mutex> g(matchLock); p.matchVersion = matchVer[(size_t) i] + (match[(size_t) i].on ? 100000 : 0); }
     return p;
@@ -77,7 +83,7 @@ ShapeParams DrumSlicerProcessor::shapeParams(int i) const
 // ---------------------------------------------------------------- a shape per source (A / B / C)
 const char* const* DrumSlicerProcessor::shapeIds()
 {
-    static const char* const ids[kShapeN] = { "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy", "punch", "sus", "pitch", "tone" };
+    static const char* const ids[kShapeN] = { "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy", "punch", "sus", "pitch", "tone", "gain" };
     return ids;
 }
 std::array<float, DrumSlicerProcessor::kShapeN> DrumSlicerProcessor::shownShape(int pad) const
@@ -150,7 +156,8 @@ void DrumSlicerProcessor::slotsFromTree(const juce::ValueTree& t)
             sl.valid = false;
             const auto str = t.isValid() ? t.getProperty("p" + juce::String(p) + "s" + juce::String(s)).toString() : juce::String();
             juce::StringArray a; a.addTokens(str, ",", "");
-            if (a.size() == kShapeN) { for (int k = 0; k < kShapeN; ++k) sl.v[(size_t) k] = a[k].getFloatValue(); sl.valid = true; }
+            if (a.size() == kShapeN || a.size() == kShapeN - 1)          // (1.10 had no gain: it is 0 dB)
+            { for (int k = 0; k < kShapeN; ++k) sl.v[(size_t) k] = k < a.size() ? a[k].getFloatValue() : 0.f; sl.valid = true; }
         }
     }
 }
@@ -217,6 +224,7 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& rawIn, double
         g *= (float) env;
         L[i] *= g; R[i] *= g;
     }
+    if (std::abs(p.gainDb) > 0.01f) o.applyGain(juce::Decibels::decibelsToGain(p.gainDb));   // GAIN of this source (A / B / C)
     const int fin = s0 > 0 ? std::min(n, (int) (0.001 * sr)) : 0, fout = e < len ? std::min(n, (int) (0.003 * sr)) : 0;
     for (int c = 0; c < 2; ++c)
     {
@@ -322,6 +330,11 @@ void DrumSlicerProcessor::reshape()
 DrumSlicerProcessor::~DrumSlicerProcessor()
 {
     *alive = false;
+    {   // stop the rankings, then wait (a few hundred ms at most) for every background worker of this plugin
+        std::lock_guard<std::mutex> g(rankLock);
+        for (auto& w : ranks) if (auto st = w.lock()) st->cancel = true;
+    }
+    for (int i = 0; i < 300 && gWorkers.load() > 0; ++i) juce::Thread::sleep(10);
     stopTimer();
     stopWorker();
 }
@@ -1238,6 +1251,7 @@ void DrumSlicerProcessor::startMatch(int pad)
     { std::lock_guard<std::mutex> g(matchLock); matchMsg = "MATCHING ..."; }
     std::thread([this, a = alive, A, C, vA, neutral, vCnow, prev, stats, sr, fam, pad]
     {
+        WorkerScope ws;
         auto m = computeMatch(*A, vA, *C, neutral, vCnow, prev, prev.on, sr, fam, *stats);
         juce::MessageManager::callAsync([this, a, m, pad, neutral]
         {
@@ -1258,6 +1272,50 @@ void DrumSlicerProcessor::startMatch(int pad)
             audition(pad);
         });
     }).detach();
+}
+
+std::shared_ptr<DrumSlicerProcessor::RankState> DrumSlicerProcessor::startRank(int pad, int src, const std::vector<juce::String>& paths)
+{
+    auto st = std::make_shared<RankState>();
+    st->paths = paths; st->after.assign(paths.size(), -1.f);
+    auto r = getResult();
+    if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid || paths.empty()) { st->finished = true; return st; }
+    const auto& pd = r->pads[(size_t) pad];
+    auto T = std::make_shared<juce::AudioBuffer<float>>(); T->makeCopyOf(pd.get(src == 1, src == 2));
+    if (T->getMagnitude(0, T->getNumSamples()) < 1.0e-6f) { st->finished = true; return st; }
+    std::array<float, kShapeN> vT = shownShape(pad), neutral {};
+    for (int k = 0; k < kShapeN; ++k)
+        if (auto* p = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(pad))) neutral[(size_t) k] = p->convertFrom0to1(p->getDefaultValue());
+    {
+        std::lock_guard<std::mutex> g(slotLock);
+        const int own = slotOwner[(size_t) pad];
+        if (own != src) vT = slots[(size_t) pad][(size_t) src].valid ? slots[(size_t) pad][(size_t) src].v : vT;
+    }
+    auto ref = std::make_shared<ds::Pad>(); ref->audio.makeCopyOf(pd.audio); ref->valid = true;   // the level a sample is brought to
+    auto ix = library->index();
+    auto stats = std::make_shared<ds::LibIndex>();
+    if (ix && ix->oneShots >= 50) { stats->mean = ix->mean; stats->sd = ix->sd; stats->oneShots = ix->oneShots; } else stats->stats();
+    const double sr = r->sr; const auto fam = ds::familyOf(pd.name);
+    {
+        std::lock_guard<std::mutex> g(rankLock);
+        ranks.erase(std::remove_if(ranks.begin(), ranks.end(), [](const std::weak_ptr<RankState>& w) { return w.expired(); }), ranks.end());
+        ranks.push_back(st);
+    }
+    std::thread([st, T, vT, neutral, ref, stats, sr, fam]
+    {
+        WorkerScope ws;
+        for (size_t i = 0; i < st->paths.size() && !st->cancel.load(); ++i)
+        {
+            juce::AudioBuffer<float> c;
+            float score = 0.f;
+            if (ds::loadUserShot(juce::File(st->paths[i]), *ref, sr, c))
+                score = computeMatch(*T, vT, c, neutral, neutral, MatchData(), false, sr, fam, *stats).after;
+            { std::lock_guard<std::mutex> g(st->lock); st->after[i] = score; }
+            ++st->done;
+        }
+        st->finished = true;
+    }).detach();
+    return st;
 }
 
 void DrumSlicerProcessor::setMatchPart(int pad, int part, bool on)

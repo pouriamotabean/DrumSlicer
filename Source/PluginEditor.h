@@ -198,7 +198,7 @@ public:
             g.setColour(ui::faint.withAlpha(0.55f));
             g.drawVerticalLine((int) x, mid - pk.second * hh, mid - pk.first * hh + 1.f);
             if (ms < sp.start || ms > endMs) continue;
-            const float e = level(sp, ms);
+            const float e = std::min(1.f / std::max(0.05f, std::max(std::abs(pk.first), std::abs(pk.second))), level(sp, ms) * gainLin(sp));   // GAIN shows on the wave
             g.setColour(col.withAlpha(0.95f));
             g.drawVerticalLine((int) x, mid - pk.second * hh * e, mid - pk.first * hh * e + 1.f);
         }
@@ -241,6 +241,23 @@ public:
         label(5, "END  " + ms(endMs), { 10.f + 3 * lw, ly, lw, 12.f }, juce::Justification::centredRight);
         g.setColour(ui::dim); g.setFont(ui::font(9.f, false, 0.1f));
         g.drawText(ms(endMs - sp.start), juce::Rectangle<float>(w.getCentreX() - 40, w.getY() + 1, 80, 12).toNearestInt(), juce::Justification::centred);
+        // GAIN fader (this source's own level), right edge
+        {
+            const auto fr = gainRect();
+            const bool on = hot == 7 || drag == 7;
+            g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(fr, 4.f);
+            g.setColour(ui::panelEdge.brighter(0.2f)); g.drawRoundedRectangle(fr, 4.f, 1.f);
+            const float y0 = gainToY(0.f);
+            g.setColour(ui::dim); g.drawHorizontalLine((int) y0, fr.getX() + 2.f, fr.getRight() - 2.f);
+            const float y = gainToY(sp.gainDb);
+            g.setColour((on ? ui::amber : col).withAlpha(0.35f));
+            g.fillRect(juce::Rectangle<float>(fr.getX() + 3.f, std::min(y, y0), fr.getWidth() - 6.f, std::abs(y0 - y)));
+            g.setColour(on ? ui::amber : ui::text); g.fillRoundedRectangle(juce::Rectangle<float>(fr.getWidth() + 4.f, 6.f).withCentre({ fr.getCentreX(), y }), 2.f);
+            g.setFont(ui::font(8.f, true, 0.1f)); g.setColour(on ? ui::amber : ui::dim);
+            g.drawText("GAIN", juce::Rectangle<float>(fr.getX() - 8.f, fr.getBottom() + 2.f, fr.getWidth() + 16.f, 10.f), juce::Justification::centred);
+            if (on || std::abs(sp.gainDb) > 0.05f)
+                g.drawText((sp.gainDb > 0 ? "+" : "") + juce::String(sp.gainDb, 1) + " dB", juce::Rectangle<float>(fr.getX() - 62.f, y - 6.f, 58.f, 12.f), juce::Justification::centredRight);
+        }
         // zoom
         const auto zb = zoomRect();
         g.setColour(zoomFit ? ui::amber : ui::dim); g.setFont(ui::font(8.5f, true, 0.25f));
@@ -283,6 +300,9 @@ public:
             case 6: set("fo", juce::jlimit(0.f, std::max(0.f, len - sp.attack), startSp.fadeOut - 2.f * (m - m0)));
                     if (std::abs(dy) > 1.f) set("foc", curveFrom(startSp.fadeOutCurve));
                     break;
+            case 7: { float gdb = yToGain(gainToY(startSp.gainDb) + dy * (e.mods.isShiftDown() ? 0.25f : 1.f));   // SHIFT: fine
+                      if (std::abs(gdb) < 0.25f) gdb = 0.f;                                   // 0 dB clicks in
+                      set("gain", std::round(gdb * 10.f) / 10.f); break; }
             default: break;
         }
         repaint();
@@ -315,6 +335,7 @@ private:
     {
         auto res = proc.getResult(); if (!res || !res->pads[(size_t) pad].valid) return 0;
         const auto sp = proc.shapeParams(pad); const auto w = wave();
+        if (gainRect().expanded(4.f, 4.f).contains(p)) return 7;
         if (p.getDistanceFrom(fadeInHandle(sp)) < 10.f) return 2;
         if (p.getDistanceFrom(fadeOutHandle(sp)) < 10.f) return 6;
         const float xs = msToX(sp.start), xe = msToX(std::min(sp.end, totalMs));
@@ -322,8 +343,13 @@ private:
         if (std::min(ds, de) < 7.f && p.y >= w.getY() - 4 && p.y <= w.getBottom() + 4) return ds <= de ? 1 : 5;
         return 0;
     }
-    juce::Rectangle<float> wave() const { return getLocalBounds().toFloat().reduced(10.f, 0).withTrimmedTop(8.f).withTrimmedBottom(20.f); }
-    juce::Rectangle<float> zoomRect() const { return { (float) getWidth() - 50.f, 4.f, 40.f, 14.f }; }
+    juce::Rectangle<float> wave() const { return getLocalBounds().toFloat().reduced(10.f, 0).withTrimmedTop(8.f).withTrimmedBottom(20.f).withTrimmedRight(26.f); }
+    // GAIN: -24 .. +12 dB, 0 dB at 2/3 of the way down... a dB scale so small moves near 0 are easy
+    juce::Rectangle<float> gainRect() const { const auto w = wave(); return { (float) getWidth() - 24.f, w.getY() + 10.f, 12.f, w.getHeight() - 14.f }; }
+    float gainToY(float db) const { const auto r = gainRect(); return r.getY() + (12.f - juce::jlimit(-24.f, 12.f, db)) / 36.f * r.getHeight(); }
+    float yToGain(float y) const { const auto r = gainRect(); return juce::jlimit(-24.f, 12.f, 12.f - (y - r.getY()) / r.getHeight() * 36.f); }
+    static float gainLin(const ShapeParams& sp) { return juce::Decibels::decibelsToGain(sp.gainDb); }
+    juce::Rectangle<float> zoomRect() const { return { (float) getWidth() - 76.f, 4.f, 40.f, 14.f }; }
     float viewMs() const
     {
         if (!zoomFit) return totalMs;
@@ -341,7 +367,7 @@ private:
     }
     static std::vector<const char*> idsOf(int d)
     {
-        switch (d) { case 1: return { "st" }; case 5: return { "en" }; case 2: return { "atk", "fic" }; case 6: return { "fo", "foc" }; default: return {}; }
+        switch (d) { case 1: return { "st" }; case 5: return { "en" }; case 2: return { "atk", "fic" }; case 6: return { "fo", "foc" }; case 7: return { "gain" }; default: return {}; }
     }
     void beginGesture() { for (auto* id : idsOf(drag)) if (auto* p = prm(id)) p->beginChangeGesture(); }
     void endGesture() { for (auto* id : idsOf(drag)) if (auto* p = prm(id)) p->endChangeGesture(); }
@@ -350,13 +376,14 @@ private:
     void resetMenu()
     {
         juce::PopupMenu m;
-        m.addItem(1, "RESET FADES"); m.addItem(2, "RESET START / END"); m.addItem(3, "RESET THE WHOLE SHAPE");
+        m.addItem(1, "RESET FADES"); m.addItem(2, "RESET START / END"); m.addItem(4, "RESET GAIN"); m.addItem(3, "RESET THE WHOLE SHAPE");
         m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this), [this, sp = juce::Component::SafePointer<ShapeView>(this)](int id)
         {
             if (sp == nullptr) return;
             if (id == 1) resetIds({ "atk", "fic", "fo", "foc", "hold", "dcy" });
             if (id == 2) resetIds({ "st", "en" });
-            if (id == 3) resetIds({ "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy" });
+            if (id == 3) resetIds({ "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy", "gain" });
+            if (id == 4) resetIds({ "gain" });
         });
     }
     void refreshPeaks(const ds::Result& r, bool best, bool user)
@@ -577,7 +604,7 @@ public:
             likeBtn[(size_t) k].setTooltip(k == 0 ? "Look for sounds like A: the loop's own sound" : k == 1 ? "Like B: the best real hit" : "Like C: the sample you put on the pad");
             likeBtn[(size_t) k].onClick = [this, k] { likeSrc = k; want = 5; findSimilar(true); };
         }
-        moreBtn.onClick = [this] { want += 5; findSimilar(true); };
+        moreBtn.onClick = [this] { want += 5; if (want > (int) matches.size()) findSimilar(true); else { list.updateContent(); list.repaint(); } };
         addBtn.setTooltip("Add a sample folder (remembered)"); remBtn.setTooltip("Remove this folder from the list (files stay)");
         revealBtn.setTooltip("Show the selected file in Explorer");
         addAndMakeVisible(roots);
@@ -600,7 +627,7 @@ public:
         loadSettings();
         updateLimit();
     }
-    ~SampleBrowser() override { saveSettings(); }
+    ~SampleBrowser() override { if (rank) rank->cancel = true; saveSettings(); }
 
     void showFor() { refreshRoots(); if (!dir.isDirectory() && !rootDirs.isEmpty()) open(rootDirs[0]); else rebuild(); setMode(mode); list.grabKeyboardFocus(); repaint(); }
     void showSimilar() { setMode(1); }
@@ -654,6 +681,11 @@ public:
         }
         g.setColour(ui::text.withAlpha(0.8f)); g.setFont(ui::font(9.5f, true, 0.15f));
         g.drawText(queryText, 14, 72, getWidth() - 180, 20, juce::Justification::centredLeft);
+        if (rank && !ranked && !matches.empty())
+        {
+            g.setColour(ui::amber.withAlpha(0.8f)); g.setFont(ui::font(8.f, true, 0.1f));
+            g.drawText("CHECKING AFTER MATCH  " + juce::String(rank->done.load()) + " / " + juce::String((int) matches.size()), 14, 86, getWidth() - 28, 10, juce::Justification::centredLeft);
+        }
         if (matches.empty())
         {
             g.setColour(ui::dim); g.setFont(ui::font(10.f, true, 0.2f));
@@ -704,6 +736,9 @@ private:
     // SIMILAR
     std::vector<ds::Match> matches;
     std::shared_ptr<const ds::LibIndex> holder;    // the matches point into it
+    std::shared_ptr<DrumSlicerProcessor::RankState> rank;   // each candidate matched in the background
+    std::vector<float> after;                      // score after a match (-1 = not known yet)
+    bool ranked = false;
     juce::String queryKey, queryText;
     bool havePad = false;
     int want = 5;
@@ -834,20 +869,24 @@ private:
         for (int k = 0; k < 3; ++k) { likeBtn[(size_t) k].setToggleState(k == src, juce::dontSendNotification); likeBtn[(size_t) k].setEnabled(havePad && (k < 2 || hasC)); }
         auto ix = proc.library->index();
         const juce::String key = havePad ? juce::String(proc.getResultVersion()) + "|" + juce::String(pad) + "|" + juce::String(src) + "|"
-                                           + juce::String((juce::pointer_sized_int) ix.get()) + "|" + juce::String(want) : juce::String();
+                                           + juce::String((juce::pointer_sized_int) ix.get()) : juce::String();
         if (!force && key == queryKey) return;
         // while the archive is still being read the list would jump every few seconds: at most every 3 s then
         const auto now = juce::Time::getMillisecondCounter();
-        const bool onlyIndexChanged = queryKey.upToLastOccurrenceOf("|", false, false).upToLastOccurrenceOf("|", false, false)
-                                      == key.upToLastOccurrenceOf("|", false, false).upToLastOccurrenceOf("|", false, false);
+        const bool onlyIndexChanged = queryKey.upToLastOccurrenceOf("|", false, false) == key.upToLastOccurrenceOf("|", false, false);
         if (!force && onlyIndexChanged && proc.library->scanning() && now - lastFind < 3000) return;
         lastFind = now;
         queryKey = key;
+        if (rank) rank->cancel = true;
+        rank.reset(); ranked = false; after.clear();
         matches.clear(); holder.reset();
         if (havePad)
         {
             const auto& pd = r->pads[(size_t) pad];
-            matches = proc.library->nearest(pd.get(src == 1, src == 2), r->sr, pd.name, want, holder, pd.userPath);
+            matches = proc.library->nearest(pd.get(src == 1, src == 2), r->sr, pd.name, std::max(30, want), holder, pd.userPath);
+            after.assign(matches.size(), -1.f);
+            std::vector<juce::String> paths; for (auto& m : matches) paths.push_back(m.e->path);
+            if (!paths.empty()) rank = proc.startRank(pad, src, paths);   // then: ranked by how near each gets after a match
             queryText = "LIKE  " + pd.name;
         }
         else queryText.clear();
@@ -880,7 +919,7 @@ public:
     void stopTrying() { if (tryMode) { tryMode = false; tryBtn.setToggleState(false, juce::dontSendNotification); } proc.endTry(false); }
 private:
 
-    int getNumRows() override { return mode == 1 ? (int) matches.size() : items.size(); }
+    int getNumRows() override { return mode == 1 ? std::min(want, (int) matches.size()) : items.size(); }
     void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool sel) override
     {
         const auto f = rowFile(row);
@@ -899,12 +938,16 @@ private:
             g.drawText(m.tags.isEmpty() ? juce::String(m.score >= 90.f ? "VERY CLOSE" : m.score >= 75.f ? "CLOSE" : "SIMILAR, NO BIG DIFFERENCE") : m.tags.joinIntoString("  "),
                        12, 20, w / 2 + 40, 14, juce::Justification::centredLeft);
             g.setColour(ui::dim); g.setFont(ui::font(8.5f, false, 0.05f));
-            g.drawText(f.getParentDirectory().getFileName(), w / 2, 20, w / 2 - 60, 14, juce::Justification::centredRight);
+            g.drawText(f.getParentDirectory().getFileName(), w / 2, 20, w / 2 - 100, 14, juce::Justification::centredRight);
+            const float aft = row < (int) after.size() ? after[(size_t) row] : -1.f;
             const auto bar = juce::Rectangle<float>((float) w - 52.f, 9.f, 40.f, 4.f);
             g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(bar, 2.f);
-            g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * juce::jlimit(0.f, 1.f, m.score / 100.f)), 2.f);
+            g.setColour(ui::amber.withAlpha(0.45f)); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * juce::jlimit(0.f, 1.f, m.score / 100.f)), 2.f);
+            if (aft >= 0) { g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * juce::jlimit(0.f, 1.f, aft / 100.f)), 2.f); }
             g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(8.5f, true, 0.05f));
-            g.drawText(juce::String(juce::roundToInt(m.score)) + "%", w - 56, 18, 46, 14, juce::Justification::centredRight);
+            // as it is -> after MATCH TO A
+            g.drawText(juce::String(juce::roundToInt(m.score)) + "%" + (aft >= 0 ? " > " + juce::String(juce::roundToInt(aft)) + "%" : juce::String()),
+                       w - 96, 18, 86, 14, juce::Justification::centredRight);
             return;
         }
         const auto ic = juce::Rectangle<float>(10.f, (float) h / 2.f - 6.f, 14.f, 12.f);
@@ -958,6 +1001,22 @@ private:
         const bool p = proc.isPreviewing(); if (p || p != wasPlaying) list.repaint(); wasPlaying = p;
         if (mode == 1)
         {
+            if (rank && !ranked)
+            {
+                if (rank->finished.load())
+                {   // all checked: the list is ranked by how near each one gets after a match
+                    { std::lock_guard<std::mutex> g(rank->lock); after = rank->after; }
+                    std::vector<size_t> order(matches.size());
+                    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+                    std::stable_sort(order.begin(), order.end(), [this](size_t a, size_t b) { return after[a] > after[b]; });
+                    std::vector<ds::Match> m2; std::vector<float> a2;
+                    for (auto i : order) { m2.push_back(matches[i]); a2.push_back(after[i]); }
+                    matches = std::move(m2); after = std::move(a2);
+                    ranked = true;
+                    list.updateContent(); list.deselectAllRows(); list.repaint();
+                }
+                repaint();
+            }
             findSimilar(false);                    // the pad, its A / B / C or the library changed
             if (proc.library->scanning() || scanWas) repaint();
             scanWas = proc.library->scanning();
@@ -1094,7 +1153,7 @@ public:
             if (f.existsAsFile()) juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, this);
         };
         addAndMakeVisible(shape);
-        shape.setTooltip("Click: listen.  Flags: START / END.  Squares: drag sideways = fade length, up / down = curve.  Double-click a handle = reset.  Right-click = reset menu.");
+        shape.setTooltip("Click: listen.  Flags: START / END.  Squares: drag sideways = fade length, up / down = curve.  GAIN (right): this sound's level (A, B, C each their own; SHIFT = fine).  Double-click a handle = reset.  Right-click = reset menu.");
         updateVisibility();
         startTimerHz(30);
     }
@@ -1270,7 +1329,7 @@ public:
         juce::PopupMenu menu;
         menu.addSectionHeader("MATCHED TO A:   " + juce::String(juce::roundToInt(m.before)) + "%   ->   " + juce::String(juce::roundToInt(m.after)) + "%");
         menu.addItem(1, "EQ  (26 BANDS)", true, m.useEq);
-        menu.addItem(2, "SHAPE  (ATTACK, BODY, DECAY IN 3 BANDS)", true, m.useShape);
+        menu.addItem(2, "SHAPE  (ATTACK, BODY, DECAY IN 8 BANDS)", true, m.useShape);
         menu.addItem(3, m.roomMix > 0 ? "ROOM  (A'S SPACE)" : "ROOM  (NOT NEEDED: C HAS AS MUCH)", m.roomMix > 0, m.useRoom && m.roomMix > 0);
         menu.addItem(4, "PITCH  " + juce::String(m.pitch > 0 ? "+" : "") + juce::String(m.pitch, 1) + " ST", true, m.usePitch);
         menu.addItem(5, m.en < 1999.f ? "LENGTH  END " + juce::String(juce::roundToInt(m.en)) + " MS" : juce::String("LENGTH  (AS IT IS)"), m.en < 1999.f, m.useLen && m.en < 1999.f);
@@ -1492,7 +1551,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.10.0";
+            const juce::String ver = "v1.11.0";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
