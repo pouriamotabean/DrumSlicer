@@ -1496,14 +1496,22 @@ private:
             for (size_t c = 0; c < n; ++c)
                 if (L[c] == "cymbal" && (int) snd[c].t.size() >= std::max(16, kickHits / 2)) L[c] = "ohat";
             const bool weakSnare = sn < 0 || (bestTom >= 0 && F[(size_t) sn].weight < 0.25 * F[(size_t) bestTom].weight);
+            // plays like a snare: through the whole loop (a tom fill sits in one place), and not rarely
+            auto spread = [&](size_t c) { if (snd[c].t.size() < 2) return 0.0;
+                const auto mm = std::minmax_element(snd[c].t.begin(), snd[c].t.end()); return (*mm.second - *mm.first) / std::max(1, N); };
             if (bestTom >= 0 && weakSnare && L[(size_t) bestTom] == "tom"
-                && (int) snd[(size_t) bestTom].t.size() >= std::max(8, kickHits / 4))
+                && (int) snd[(size_t) bestTom].t.size() >= std::max(4, kickHits / 4) && spread((size_t) bestTom) >= 0.5)
             {
                 L[(size_t) bestTom] = "snare";
                 // its twins (same pitch, sounding alike) go with it
                 for (size_t c = 0; c < n; ++c)
-                    if (L[c] == "tom" && std::abs(std::log2(std::max(1.0, F[c].f0) / std::max(1.0, F[(size_t) bestTom].f0))) <= 0.17
-                        && profDist(F[c], F[(size_t) bestTom]) <= 9.0) L[c] = "snare";
+                {   // the same test that makes a variant of a snare part of it (its pitch or an octave, sounding near)
+                    if (L[c] != "tom") continue;
+                    const double lr = std::log2(std::max(1.0, F[c].f0) / std::max(1.0, F[(size_t) bestTom].f0));
+                    const double pr = std::abs(lr - std::round(lr)) + (std::abs(std::round(lr)) > 1 ? 1.0 : 0.0);
+                    const double dd = profDist(F[c], F[(size_t) bestTom]);
+                    if ((pr <= 0.26 && dd <= 14.0) || dd <= 6.0) L[c] = "snare";
+                }
             }
         }
         // leftovers are no instrument of their own: they join the closest one. A leftover plays very few times
@@ -1716,6 +1724,76 @@ private:
 
     // the hat that rang on top of a kick lived inside the kick's sound; with the kick cleaned it must be
     // played by the hat pad: add a hat note where the loop has clearly more highs than the model explains
+    // a snare with a big low body can be split in two: part of each hit as the snare, part as a "kick" a few ms
+    // off (and the snare at half its real velocity). Where a kick sits next to a snare hit, the snare alone (at the
+    // gain that fits best) is tried: if it explains the loop there as well as both did, the kick was never played.
+    // A real kick under the snare leaves its sub unexplained and stays.
+    void unsplitSnare()
+    {
+        auto fullOf = [&](size_t c) { Buf b(Lw); for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < Lw; ++i) b.c[ch][(size_t) i] = snd[c].T.c[ch][(size_t) i] + snd[c].Tn.c[ch][(size_t) i]; return b; };
+        const int W = (int) (0.08 * sr);
+        int dropped = 0;
+        for (size_t sn = 0; sn < snd.size(); ++sn)
+        if (snd[sn].label == "snare")
+        {
+        const Buf S = fullOf(sn);
+        const Buf y = synthFull();                      // (again for each snare sound: the last one changed it)
+        auto& Sd = snd[sn];
+        std::vector<double> gpos; for (double g0 : Sd.g) if (g0 > 0) gpos.push_back(g0);
+        if (gpos.size() < 2) continue;
+        std::sort(gpos.begin(), gpos.end());
+        const double gTop = gpos[(size_t) (0.9 * (gpos.size() - 1))];      // a whole hit (half of them may be split)
+        for (size_t c = 0; c < snd.size(); ++c)
+        {
+            if (snd[c].label != "kick") continue;
+            const Buf K = fullOf(c);
+            auto& Kd = snd[c];
+            for (size_t i = 0; i < Kd.t.size(); ++i)
+            {
+                if (Kd.g[i] <= 0) continue;
+                // the snare pieces next to this kick (a split hit can leave a second, quiet one a few ms on)
+                std::vector<size_t> js;
+                for (size_t q = 0; q < Sd.t.size(); ++q) if (Sd.g[q] > 0 && std::abs(Sd.t[q] - Kd.t[i]) < 0.025 * sr) js.push_back(q);
+                if (js.empty()) continue;
+                const size_t j = *std::min_element(js.begin(), js.end(), [&](size_t p1, size_t p2) { return Sd.t[p1] < Sd.t[p2]; });
+                const int ts = rnd(Sd.t[j]), tk = rnd(Kd.t[i]), a0 = std::min(ts, tk);
+                if (a0 < 0 || a0 + W >= N) continue;
+                // what the kick and these snare pieces explain now, against one snare hit at the gain that fits best
+                double eNow = 0, sx = 0, ss = 0;
+                std::vector<double> rest((size_t) (2 * W)), sh((size_t) (2 * W));
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int k = 0; k < W; ++k)
+                    {
+                        const int t = a0 + k;
+                        double part = (t - tk >= 0 && t - tk < K.n) ? Kd.g[i] * K.c[ch][(size_t) (t - tk)] : 0.0;
+                        for (size_t q : js) { const int tq = rnd(Sd.t[q]); if (t - tq >= 0 && t - tq < S.n) part += Sd.g[q] * S.c[ch][(size_t) (t - tq)]; }
+                        const double sv1 = (t - ts >= 0 && t - ts < S.n) ? S.c[ch][(size_t) (t - ts)] : 0.0;
+                        const double r = x.c[ch][(size_t) t] - (y.c[ch][(size_t) t] - part);
+                        const double dNow = x.c[ch][(size_t) t] - y.c[ch][(size_t) t];
+                        eNow += dNow * dNow;
+                        rest[(size_t) (ch * W + k)] = r; sh[(size_t) (ch * W + k)] = sv1;
+                        sx += sv1 * r; ss += sv1 * sv1;
+                    }
+                if (ss <= 0) continue;
+                const double g = std::max(0.0, sx / ss);
+                // only a real snare hit split in two: its piece is a hit of its own (not the bleed of a snare on a
+                // kick); taken whole it gets the kick's share back (it grows clearly) but is no louder than the
+                // snare's whole hits (not a snare blown up to be a kick)
+                double gPiece = 0; for (size_t q : js) gPiece = std::max(gPiece, Sd.g[q]);
+                if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "  unsplit gains: kick %.3g piece %.3g whole %.3g snare top %.3g\n", Kd.g[i], gPiece, g, gTop);
+                if (gPiece < 0.25 * gTop || g < 1.3 * gPiece || g > 1.4 * gTop) continue;
+                double eAlone = 0; for (size_t k = 0; k < rest.size(); ++k) { const double d = rest[k] - g * sh[k]; eAlone += d * d; }
+                if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "  unsplit? kick s%zu @%.3f snare s%zu @%.3f (%zu pieces): alone %.3g now %.3g\n", c, Kd.t[i] / sr, sn, Sd.t[j] / sr, js.size(), eAlone, eNow);
+                if (eAlone <= 1.3 * eNow + 1e-12)
+                {
+                    Kd.g[i] = 0; for (size_t q : js) Sd.g[q] = 0; Sd.g[j] = g; ++dropped;
+                }
+            }
+        }
+        }
+        if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "unsplit snare: %d kick hits were the snare's body\n", dropped);
+    }
+
     void moveHatsOffKicks()
     {
         int hat = -1, kick = -1;
@@ -1897,7 +1975,7 @@ private:
             // the same drum again right after a much stronger hit of it: the rest of that hit (a snare's rattle found
             // as a hit of its own), not a new one. (A grace note comes BEFORE the stroke and stays.)
             if (!junk)
-                for (const auto& m : out.notes) if (m.pad == n.pad && n.time > m.time && n.time - m.time < 0.045 * sr && n.velocity < 0.2 * m.velocity) { junk = true; break; }
+                for (const auto& m : out.notes) if (m.pad == n.pad && n.time > m.time && n.time - m.time < 0.045 * sr && n.velocity < 0.3 * m.velocity) { junk = true; break; }
             if (!junk) keep.push_back(n);
         }
         std::vector<int> cnt(out.pads.size(), 0); for (auto& n : keep) cnt[(size_t) n.pad]++;
@@ -1917,6 +1995,8 @@ private:
         dbgHear("start");
         moveHatsOffKicks();
         dbgHear("movehats");
+        if (!std::getenv("DP_NO_UNSPLIT")) unsplitSnare();
+        dbgHear("unsplit");
         if (!std::getenv("DP_NO_RESCUE")) rescueOrphans();
         dbgHear("rescue");
         if (!std::getenv("DP_NO_EDGE")) edgeRefit();
@@ -2044,6 +2124,29 @@ private:
         if (!std::getenv("DP_NO_JUNK")) dropJunkNotes(out, sr);
         std::vector<double> times; for (auto& n : out.notes) times.push_back(n.time);
         out.bpm = estimateBpm(times, N, sr);
+        {   // 60 or 120? both fit the 1/16 grid (a slower one always fits a little better): kick and snare
+            // land on the quarter notes of the right one (a small bias for the first guess)
+            std::vector<double> strong;
+            for (auto& nt : out.notes) if (nt.velocity >= 50 && nt.pad >= 0 && nt.pad < (int) out.pads.size())
+            { const auto& nm = out.pads[(size_t) nt.pad].name; if (nm.rfind("KICK", 0) == 0 || nm.rfind("SNARE", 0) == 0) strong.push_back(nt.time); }
+            auto cost = [&](double bpm) { const double g = 60.0 / bpm / 4 * sr; double c = 0;
+                for (double v : times) { const double ph = std::fmod(v / g, 1.0); const double d = std::min(ph, 1 - ph); c += d * d; } return c / std::max<size_t>(1, times.size()); };
+            auto qcost = [&](double bpm) { const double g = 60.0 / bpm * sr; double c = 0;
+                for (double v : strong) { const double ph = std::fmod(v / g, 1.0); const double d = std::min(ph, 1 - ph); c += d * d; } return c / std::max<size_t>(1, strong.size()); };
+            if (strong.size() >= 4)
+            {
+                double best = out.bpm, bq = 1e300;
+                for (double m : { 1.0, 2.0, 0.5, 1.5, 2.0 / 3.0 })
+                {
+                    const double cand = out.bpm * m;
+                    if (cand < 55 || cand > 200 || cost(cand) > 1.3 * cost(out.bpm) + 1e-4) continue;
+                    const double q = qcost(cand) * (m == 1.0 ? 0.9 : 1.0);
+                    if (q < bq) { bq = q; best = cand; }
+                }
+                if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "tempo (loop): grid %.2f -> %.2f\n", out.bpm, best);
+                out.bpm = best;
+            }
+        }
         Buf y; render(out.pads, out.notes, y, N);
         out.nullMatch = nullMatch(y); hearingMatch(y, out.hearing);
     }
