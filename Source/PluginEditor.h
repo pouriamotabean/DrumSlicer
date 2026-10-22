@@ -6,15 +6,7 @@
 #if HAS_ASSETS
  #include <BinaryData.h>
 #endif
-#if JUCE_WINDOWS
- #ifndef NOMINMAX
-  #define NOMINMAX
- #endif
- #ifndef WIN32_LEAN_AND_MEAN
-  #define WIN32_LEAN_AND_MEAN
- #endif
- #include <windows.h>
-#endif
+void rekitRaiseFrame(void* nativeHandle);   // WinRaise.cpp (does nothing outside Windows)
 
 // =====================================================================================================
 //  REKIT UI  -  dark graphite, one amber accent.   by Pouria Motabean
@@ -1975,16 +1967,7 @@ public:
     }
     void raiseFrame()
     {
-       #if JUCE_WINDOWS
-        if (auto* peer = getPeer())
-            if (auto h = (HWND) peer->getNativeHandle())
-                if (auto root = GetAncestor(h, GA_ROOT))
-                    if (GetForegroundWindow() != root && IsWindowVisible(root))
-                    {
-                        SetWindowPos(root, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-                        SetForegroundWindow(root);
-                    }
-       #endif
+        if (auto* peer = getPeer()) rekitRaiseFrame(peer->getNativeHandle());
     }
     bool raised = false;
     void resized() override

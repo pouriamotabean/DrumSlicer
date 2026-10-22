@@ -22,7 +22,7 @@ juce_add_plugin(DrumSlicer
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     COPY_PLUGIN_AFTER_BUILD FALSE)
 
-target_sources(DrumSlicer PRIVATE Source/PluginProcessor.cpp)
+target_sources(DrumSlicer PRIVATE Source/PluginProcessor.cpp Source/WinRaise.cpp)
 
 # Optional skin images: put PNGs in /Assets (faceplate.png, wood_left.png, ...)
 file(GLOB ASSET_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Assets/*.png)
