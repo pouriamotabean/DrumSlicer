@@ -1,0 +1,46 @@
+name: Build ReKit VST3 + installer (Windows)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -A x64          # default generator = the Visual Studio installed on the runner (2026 now)
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Collect VST3
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Recurse -Force "build/DrumSlicer_artefacts/Release/VST3/ReKit.vst3" "dist/"
+          Get-ChildItem -Recurse dist | Select-Object -First 20 FullName
+
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc installer\ReKit.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem setup\*.exe
+
+      - name: Upload VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReKit-VST3-Windows
+          path: dist/
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReKit-Setup-Windows
+          path: setup/*.exe
