@@ -244,9 +244,10 @@ struct LibEntry
     juce::String path;
     juce::int64 size = 0, mtime = 0;
     juce::uint8 status = 0;          // 0 = one-shot, 1 = longer than the limit, 2 = loop (several hits), 3 = name says loop, 4 = unreadable
-    Feat feat {};
+    std::shared_ptr<const Feat> feat;   // one-shots only (shared: copying the index stays cheap)
     float seconds = 0;
     juce::uint8 hint = (juce::uint8) famAny;
+    const Feat& f() const { static const Feat none {}; return feat ? *feat : none; }
 };
 struct LibIndex
 {
@@ -259,7 +260,7 @@ struct LibIndex
         std::array<double, kFeat> s {}, s2 {};
         for (auto& e : items)
         {
-            if (e.status == 0) { ++oneShots; for (int i = 0; i < kFeat; ++i) { s[(size_t) i] += e.feat[(size_t) i]; s2[(size_t) i] += (double) e.feat[(size_t) i] * e.feat[(size_t) i]; } }
+            if (e.status == 0) { ++oneShots; const auto& F = e.f(); for (int i = 0; i < kFeat; ++i) { s[(size_t) i] += F[(size_t) i]; s2[(size_t) i] += (double) F[(size_t) i] * F[(size_t) i]; } }
             else if (e.status == 1) ++longs; else if (e.status == 4) ++bad; else if (e.status == 3) { ++loops; ++byName; } else ++loops;
         }
         // typical spreads (also the floor: one odd archive must not make a feature count for everything)
@@ -333,7 +334,8 @@ inline float scoreOf(float dist) { return 100.f / (1.f + 0.12f * dist); }
 class Library : private juce::Thread
 {
 public:
-    Library() : juce::Thread("ReKit library") { load(); }
+    // the index is read from disk in the background: opening the plugin never waits for it
+    Library() : juce::Thread("ReKit library") { request(false, false); }
     ~Library() override { stopThread(4000); }
 
     static juce::File folder() { return root().getChildFile("Index"); }
@@ -353,23 +355,25 @@ public:
     }
 
     std::shared_ptr<const LibIndex> index() const { std::lock_guard<std::mutex> g(lock); return current; }
-    bool scanning() const { return isThreadRunning(); }
+    bool scanning() const { return busyScanning.load(); }
     float progress() const { return prog.load(); }
     juce::String status() const { std::lock_guard<std::mutex> g(lock); return statusText; }
     float maxSeconds() const { return limit.load(); }
     void setMaxSeconds(float s) { limit = s; }
 
+    // the quiet check when the SIMILAR list opens: once per session (new / changed files only)
+    void scanOnce() { if (!checked.exchange(true)) scan(false); }
     void scan(bool full = false)
     {
-        if (isThreadRunning()) { if (!full) return; stopThread(4000); }
-        fullScan = full;
-        startThread(juce::Thread::Priority::low);
+        checked = true;
+        if (full && isThreadRunning() && busyScanning.load()) { stopThread(8000); }   // RESCAN ALL: start over
+        request(true, full);
     }
 
     // nearest one-shots to a sound
     // (the matches point into "ix": keep it while using them)
     std::vector<Match> nearest(const juce::AudioBuffer<float>& sound, double sr, const juce::String& padName, int count,
-                               std::shared_ptr<const LibIndex>& ix) const
+                               std::shared_ptr<const LibIndex>& ix, const juce::String& skipPath = {}) const
     {
         std::vector<Match> out;
         ix = index();
@@ -381,8 +385,9 @@ public:
         for (auto& e : ix->items)
         {
             if (e.status != 0) continue;
+            if (skipPath.isNotEmpty() && e.path == skipPath) continue;      // the sample already on the pad
             Match mt; mt.e = &e;
-            mt.dist = distance(q, e.feat, *ix, fam);
+            mt.dist = distance(q, e.f(), *ix, fam);
             const Family hf = (Family) e.hint;
             if (fam != famAny && hf != famAny && hf != fam) mt.dist = mt.dist * 1.6f + 6.f;   // the name says it is another drum
             all.push_back(mt);
@@ -396,11 +401,11 @@ public:
             for (auto& o : out)
                 if (o.e->size == mt.e->size)
                 {
-                    float dmax = 0; for (int i = 0; i < kFeat; ++i) dmax = std::max(dmax, std::abs(o.e->feat[(size_t) i] - mt.e->feat[(size_t) i]));
+                    float dmax = 0; for (int i = 0; i < kFeat; ++i) dmax = std::max(dmax, std::abs(o.e->f()[(size_t) i] - mt.e->f()[(size_t) i]));
                     if (dmax < 0.01f) { dup = true; break; }
                 }
             if (dup) continue;
-            distance(q, mt.e->feat, *ix, fam, &mt.tags);
+            distance(q, mt.e->f(), *ix, fam, &mt.tags);
             while (mt.tags.size() > 3) mt.tags.remove(mt.tags.size() - 1);
             mt.score = scoreOf(mt.dist);
             out.push_back(mt);
@@ -438,11 +443,36 @@ private:
     juce::String statusText;
     std::atomic<float> prog { 0.f }, limit { 8.f };
     bool fullScan = false;
+    std::atomic<bool> checked { false };
 
     void setStatus(const juce::String& s) { std::lock_guard<std::mutex> g(lock); statusText = s; }
     void publish(std::shared_ptr<LibIndex> ix) { ix->stats(); std::lock_guard<std::mutex> g(lock); current = std::move(ix); }
 
+    // one worker: first the index from disk, then every scan asked for (none is lost while it runs)
+    std::mutex reqLock; bool wantScan = false, wantFull = false, running = false, loaded = false;
+    std::atomic<bool> busyScanning { false };
+    void request(bool scanToo, bool full)
+    {
+        std::lock_guard<std::mutex> g(reqLock);
+        if (scanToo) { wantScan = true; wantFull = wantFull || full; }
+        if (!running) { running = true; stopThread(100); startThread(juce::Thread::Priority::low); }
+    }
     void run() override
+    {
+        if (!loaded) { load(); loaded = true; }
+        for (;;)
+        {
+            {
+                std::lock_guard<std::mutex> g(reqLock);
+                if (!wantScan || threadShouldExit()) { running = false; return; }
+                wantScan = false; fullScan = wantFull; wantFull = false;
+            }
+            busyScanning = true;
+            scanNow();
+            busyScanning = false;
+        }
+    }
+    void scanNow()
     {
         const auto dirs = roots();
         prog = 0.f;
@@ -463,7 +493,8 @@ private:
         ix->items.reserve((size_t) files.size());
         juce::AudioFormatManager fm; fm.registerBasicFormats();
         const float lim = limit.load();
-        int fresh = 0;
+        int fresh = 0, lastFresh = 0, savedFresh = 0;
+        juce::uint32 lastPublish = juce::Time::getMillisecondCounter(), lastSave = lastPublish;
         for (int i = 0; i < files.size(); ++i)
         {
             if (threadShouldExit()) break;
@@ -483,10 +514,20 @@ private:
                 ++fresh;
             }
             prog = (float) (i + 1) / (float) files.size();
-            if ((i % 200) == 199)
+            if ((i % 100) == 99) setStatus("SCANNING  " + juce::String(i + 1) + " / " + juce::String(files.size()));
+            const auto now = juce::Time::getMillisecondCounter();
+            if (fresh > lastFresh && now - lastPublish > 4000)       // results so far, every few seconds (not every few files)
             {
-                setStatus("SCANNING  " + juce::String(i + 1) + " / " + juce::String(files.size()));
-                if (fresh > 0) { auto copy = std::make_shared<LibIndex>(*ix); publish(copy); }
+                lastPublish = now; lastFresh = fresh;
+                publish(std::make_shared<LibIndex>(*ix));
+            }
+            if (fresh > savedFresh && now - lastSave > 60000)        // and on disk every minute: closing Cubase loses nothing
+            {
+                lastSave = now; savedFresh = fresh;
+                LibIndex part(*ix);
+                std::set<juce::String> done; for (auto& x : part.items) done.insert(x.path);
+                for (auto& [p, en] : known) if (done.count(p) == 0) part.items.push_back(*en);
+                save(part);
             }
         }
         if (threadShouldExit() && ix->items.size() < (size_t) files.size())
@@ -523,7 +564,9 @@ private:
         if (!rd->read(&a, 0, n, 0, true, true)) { e.status = 4; return; }
         if (rd->numChannels < 2) a.copyFrom(1, 0, a, 0, 0, n);
         if (soundsLikeLoop(a, rd->sampleRate)) { e.status = 2; return; }
-        e.status = fingerprint(a, rd->sampleRate, e.feat) ? 0 : 4;
+        auto ft = std::make_shared<Feat>();
+        e.status = fingerprint(a, rd->sampleRate, *ft) ? 0 : 4;
+        if (e.status == 0) e.feat = std::move(ft);
     }
 
     void load()
@@ -541,7 +584,7 @@ private:
             LibEntry e;
             e.path = in.readString(); e.size = in.readInt64(); e.mtime = in.readInt64();
             e.status = (juce::uint8) in.readByte(); e.hint = (juce::uint8) in.readByte(); e.seconds = in.readFloat();
-            if (e.status == 0) for (auto& v : e.feat) v = in.readFloat();
+            if (e.status == 0) { auto ft = std::make_shared<Feat>(); for (auto& v : *ft) v = in.readFloat(); e.feat = std::move(ft); }
             ix->items.push_back(std::move(e));
         }
         publish(ix);
@@ -556,7 +599,7 @@ private:
         {
             out.writeString(e.path); out.writeInt64(e.size); out.writeInt64(e.mtime);
             out.writeByte((char) e.status); out.writeByte((char) e.hint); out.writeFloat(e.seconds);
-            if (e.status == 0) for (auto v : e.feat) out.writeFloat(v);
+            if (e.status == 0) for (auto v : e.f()) out.writeFloat(v);
         }
         writeData(indexFile(), out.getData(), out.getDataSize());
     }

@@ -22,7 +22,7 @@ struct Pad
     juce::AudioBuffer<float> audio;          // "learned": the sound averaged over all its hits (velocity 100 = this level)
     juce::AudioBuffer<float> best;           // "best hit": the cleanest real hit, others subtracted, learned tail
     juce::AudioBuffer<float> user;           // "C": a sample of yours dropped on the pad (level-matched to A)
-    juce::String userName;
+    juce::String userName, userPath;       // (path: so a search never offers you the sample you already chose)
     bool valid = false;
     const juce::AudioBuffer<float>& get(bool useBest, bool useUser = false) const
     {
@@ -493,7 +493,7 @@ inline juce::ValueTree embedResult(const Result& r)
         t.setProperty("i", p, nullptr); t.setProperty("name", pd.name, nullptr); t.setProperty("note", pd.note, nullptr); t.setProperty("hits", pd.hits, nullptr);
         t.setProperty("a", enc(pd.audio), nullptr);
         t.setProperty("b", pd.best.getNumSamples() > 0 ? enc(pd.best) : juce::String(), nullptr);
-        if (pd.user.getNumSamples() > 0) { t.setProperty("c", enc(pd.user), nullptr); t.setProperty("cname", pd.userName, nullptr); }
+        if (pd.user.getNumSamples() > 0) { t.setProperty("c", enc(pd.user), nullptr); t.setProperty("cname", pd.userName, nullptr); t.setProperty("cpath", pd.userPath, nullptr); }
         e.appendChild(t, nullptr);
     }
     juce::String hits; for (const auto& h : r.hits) hits << (juce::int64) h.time << ":" << h.pad << ":" << h.velocity << " ";
@@ -523,7 +523,7 @@ inline std::shared_ptr<Result> unembedResult(const juce::ValueTree& e)
         pd.name = t.getProperty("name").toString(); pd.note = juce::jlimit(0, 127, (int) t.getProperty("note", 36)); pd.hits = t.getProperty("hits", 0);
         if (!dec(t.getProperty("a").toString(), pd.audio)) return nullptr;
         if (!dec(t.getProperty("b").toString(), pd.best)) pd.best.makeCopyOf(pd.audio);
-        if (t.hasProperty("c") && dec(t.getProperty("c").toString(), pd.user)) pd.userName = t.getProperty("cname").toString();
+        if (t.hasProperty("c") && dec(t.getProperty("c").toString(), pd.user)) { pd.userName = t.getProperty("cname").toString(); pd.userPath = t.getProperty("cpath").toString(); }
         else pd.user.setSize(0, 0);
         pd.valid = true;
     }

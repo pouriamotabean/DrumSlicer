@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Extractor.h"
 #include "Library.h"
+#include "MatchDSP.h"
 #include <thread>
 #include <cstring>
 #include <mutex>
@@ -9,14 +10,30 @@
 // per-pad sound shaping (start / end trim, attack-hold-decay, punch / sustain), rendered off the audio thread
 // fades: curve -1..1 (0 = straight line, + = stays louder, - = drops / rises later), gain = t^(2^(-3 curve))
 struct ShapeParams { float start = 0, end = 2000, attack = 0, hold = 2000, decay = 2000, punch = 0, sustain = 0,
-                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0, tone = 0; bool best = false, user = false;
-                     bool operator!=(const ShapeParams& o) const { return std::memcmp(this, &o, sizeof(*this)) != 0; } };
+                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0, tone = 0, matchAmount = 1; int matchVersion = 0; bool best = false, user = false;
+                     // field by field (comparing raw memory would also compare the padding bytes, which can differ every
+                     // time and made every pad rebuild 20 times a second)
+                     bool operator!=(const ShapeParams& o) const
+                     {
+                         return start != o.start || end != o.end || attack != o.attack || hold != o.hold || decay != o.decay || punch != o.punch
+                             || sustain != o.sustain || attackCurve != o.attackCurve || fadeOut != o.fadeOut || fadeOutCurve != o.fadeOutCurve
+                             || tone != o.tone || matchAmount != o.matchAmount || matchVersion != o.matchVersion || best != o.best || user != o.user;
+                     } };
 struct Shaped
 {
     std::array<juce::AudioBuffer<float>, ds::kPads> buf;
     std::array<int, ds::kPads> offset {};            // samples cut at the start: the hit keeps its time
 };
-juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double sr, const ShapeParams& p, int& offset);
+// MATCH TO A, as measured: EQ, room, shape over time (+ the pitch / length it set on the knobs)
+struct MatchData
+{
+    bool on = false, useEq = true, useShape = true, useRoom = true, usePitch = true, useLen = true;
+    std::array<float, mt::kBands> eq {};
+    std::array<float, mt::kEnvB * mt::kEnvT> shape {};
+    float roomRt = 0, roomMix = 0, roomPre = 0, pitch = 0, en = 2000, fo = 0, before = 0, after = 0;
+};
+void applyMatchChain(juce::AudioBuffer<float>& x, double sr, const MatchData& m, float amount);
+juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double sr, const ShapeParams& p, int& offset, const MatchData* match = nullptr);
 
 class DrumSlicerProcessor : public juce::AudioProcessor, private juce::Timer
 {
@@ -108,16 +125,30 @@ public:
     void resetShape(int pad, int src);               // a new sound starts neutral (only that slot)
     // MATCH TO A: the shape (pitch, length, tone, punch, sustain, fade in) that brings your sample C nearest to
     // the pad's A as you hear it - found by trying, measured with the same ears as the SIMILAR search
-    struct MatchSuggestion { bool ok = false; std::array<float, kShapeN> v {}; float before = 0, after = 0; juce::StringArray lines; juce::String why; };
-    MatchSuggestion suggestMatch(int pad);
-    void applyMatch(int pad, const MatchSuggestion& m, float amount);   // amount 1 = all of it, 0.5 = half way
-    bool canUndoMatch(int pad) const { return pad >= 0 && pad < ds::kPads && undoValid[(size_t) pad]; }
-    void undoMatch(int pad);
+    // runs in the background (a second or two); the knobs and the sound change when it is done
+    void startMatch(int pad);
+    bool isMatching() const { return matching.load(); }
+    MatchData getMatch(int pad) const { std::lock_guard<std::mutex> g(matchLock); return pad >= 0 && pad < ds::kPads ? match[(size_t) pad] : MatchData(); }
+    enum MatchPart { partEq = 0, partShape, partRoom, partPitch, partLen };
+    void setMatchPart(int pad, int part, bool on);
+    void removeMatch(int pad);
+    juce::String matchMessage() const { std::lock_guard<std::mutex> g(matchLock); return matchMsg; }
     int padSource(int pad) const;
     void setPadType(int pad, const juce::String& type);
     bool addPad(int pad, const juce::String& type, const juce::File& f);   // an empty pad: a new sound of yours ("" = from its file name)
     static juce::String guessType(const juce::File& f);
     void mergePad(int from, int into);
+    // CLEAR SOUND: the pad keeps its name, MIDI note and hits (the pattern stays), but has no sound until you
+    // give it one (drop / choose a sample = its C). DELETE PAD: the pad and its hits go.
+    void clearPadSound(int pad);
+    void deletePad(int pad);
+    bool padIsSilent(int pad) const;
+    // TRY IN KIT: a file from the SAMPLES list sits on the pad for now (as its C) and plays in the pattern;
+    // keep it (USE ON PAD) or go back to what the pad had
+    bool tryOnPad(int pad, const juce::File& f);
+    void endTry(bool keep);
+    bool isTrying() const { return trying.on; }
+    juce::File triedFile() const { return trying.file; }
     void kitRemoved(const juce::File& kit) { if (getKitDir() == kit) setFiles({}, {}, kit.getFileName()); }   // sounds stay, files gone
     // listening to a saved kit (its pattern) before loading it
     bool previewKit(const juce::File& kit);
@@ -163,8 +194,16 @@ private:
     void publish(std::shared_ptr<ds::Result> r, const juce::File& kit, const juce::File& loop, const juce::String& orphanName = {});
     void setSource(std::shared_ptr<ds::Source> s, juce::int64 a, juce::int64 b);
     struct Slot { bool valid = false; std::array<float, kShapeN> v {}; };
-    std::array<std::array<float, kShapeN>, ds::kPads> undoShape {};
-    std::array<bool, ds::kPads> undoValid {};
+    struct TryState { bool on = false; int pad = -1; juce::AudioBuffer<float> user; juce::String name, path; int src = 0; Slot cslot; juce::File file; bool wasPlaying = false; MatchData match; };
+    TryState trying;
+    mutable std::mutex matchLock;
+    std::array<MatchData, ds::kPads> match {};
+    std::array<int, ds::kPads> matchVer {};
+    std::atomic<bool> matching { false };
+    juce::String matchMsg;
+    void matchOff(int pad);                          // the sample C changed: its match is gone
+    juce::ValueTree matchTree() const;
+    void matchFromTree(const juce::ValueTree& t);
     std::array<std::array<Slot, 3>, ds::kPads> slots {};
     std::array<int, ds::kPads> slotOwner { -1, -1, -1, -1, -1, -1, -1, -1 };
     std::mutex slotLock;

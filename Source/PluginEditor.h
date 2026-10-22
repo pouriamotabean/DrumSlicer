@@ -540,6 +540,7 @@ class SampleBrowser : public juce::Component, private juce::ListBoxModel, privat
 public:
     std::function<void()> onClose;
     std::function<void(const juce::File&)> onUse;         // set as "C" on the selected pad
+    std::function<void(const juce::File&)> onKept;        // a tried one was kept
     std::function<int()> targetPad;
     std::function<juce::String()> targetName;
 
@@ -565,6 +566,17 @@ public:
         limitBtn.onClick = [this] { const float l = proc.library->maxSeconds(); const float n = l < 6 ? 8.f : l < 9 ? 10.f : l < 11 ? 15.f : 5.f;
                                     proc.library->setMaxSeconds(n); saveSettings(); updateLimit(); proc.library->scan(false); };
         moreBtn.setButtonText("MORE"); moreBtn.setTooltip("5 more");
+        addAndMakeVisible(tryBtn);
+        tryBtn.setButtonText("TRY IN KIT");
+        tryBtn.setTooltip("On: every file you pick (click / arrow keys) sits on the pad for now and plays in the pattern. USE ON PAD keeps it, off goes back.");
+        tryBtn.onClick = [this] { tryMode = !tryMode; tryBtn.setToggleState(tryMode, juce::dontSendNotification); if (!tryMode) proc.endTry(false); };
+        for (int k = 0; k < 3; ++k)
+        {   // what to look like: A (the loop's own sound, the default), B, or your C
+            addAndMakeVisible(likeBtn[(size_t) k]);
+            likeBtn[(size_t) k].setButtonText(juce::String::charToString((juce::juce_wchar) ('A' + k)));
+            likeBtn[(size_t) k].setTooltip(k == 0 ? "Look for sounds like A: the loop's own sound" : k == 1 ? "Like B: the best real hit" : "Like C: the sample you put on the pad");
+            likeBtn[(size_t) k].onClick = [this, k] { likeSrc = k; want = 5; findSimilar(true); };
+        }
         moreBtn.onClick = [this] { want += 5; findSimilar(true); };
         addBtn.setTooltip("Add a sample folder (remembered)"); remBtn.setTooltip("Remove this folder from the list (files stay)");
         revealBtn.setTooltip("Show the selected file in Explorer");
@@ -579,7 +591,10 @@ public:
         addBtn.onClick = [this] { addFolder(); };
         remBtn.onClick = [this] { removeFolder(); };
         upBtn.onClick = [this] { if (dir.getParentDirectory() != dir && isInsideRoot(dir.getParentDirectory())) open(dir.getParentDirectory()); };
-        useBtn.onClick = [this] { if (auto f = selectedFile(); f.existsAsFile() && onUse) onUse(f); };
+        useBtn.onClick = [this] {
+            auto f = selectedFile();
+            if (proc.isTrying() && proc.triedFile() == f) { proc.endTry(true); if (onKept) onKept(f); return; }   // already on the pad: keep it
+            if (f.existsAsFile() && onUse) onUse(f); };
         revealBtn.onClick = [this] { if (auto f = selectedFile(); f.existsAsFile()) f.revealToUser(); else if (dir.isDirectory()) dir.revealToUser(); };
         closeBtn.onClick = [this] { if (onClose) onClose(); };
         loadSettings();
@@ -589,7 +604,7 @@ public:
 
     void showFor() { refreshRoots(); if (!dir.isDirectory() && !rootDirs.isEmpty()) open(rootDirs[0]); else rebuild(); setMode(mode); list.grabKeyboardFocus(); repaint(); }
     void showSimilar() { setMode(1); }
-    void visibilityChanged() override { if (isVisible()) startTimerHz(10); else { stopTimer(); proc.stopPreview(); saveSettings(); } }
+    void visibilityChanged() override { if (isVisible()) startTimerHz(10); else { stopTimer(); proc.stopPreview(); stopTrying(); saveSettings(); } }
 
     void paint(juce::Graphics& g) override
     {
@@ -638,7 +653,7 @@ public:
             g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * lib.progress()), 2.f);
         }
         g.setColour(ui::text.withAlpha(0.8f)); g.setFont(ui::font(9.5f, true, 0.15f));
-        g.drawText(queryText, 14, 72, getWidth() - 90, 20, juce::Justification::centredLeft);
+        g.drawText(queryText, 14, 72, getWidth() - 180, 20, juce::Justification::centredLeft);
         if (matches.empty())
         {
             g.setColour(ui::dim); g.setFont(ui::font(10.f, true, 0.2f));
@@ -654,16 +669,20 @@ public:
         const int w = getWidth(), h = getHeight();
         tabFolders.setBounds(12, 10, 76, 22); tabSimilar.setBounds(92, 10, 76, 22);
         closeBtn.setBounds(w - 36, 10, 24, 22);
+
         roots.setBounds(12, 38, w - 24 - 64, 24);
         addBtn.setBounds(w - 72, 38, 28, 24); remBtn.setBounds(w - 40, 38, 28, 24);
         upBtn.setBounds(12, 66, 44, 24);
         filter.setBounds(62, 66, w - 74, 24);
         scanBtn.setBounds(w - 132, 38, 64, 22); limitBtn.setBounds(w - 64, 38, 52, 22);
         moreBtn.setBounds(w - 72, 70, 60, 22);
+        for (int k = 0; k < 3; ++k) likeBtn[(size_t) k].setBounds(w - 162 + k * 28, 70, 26, 22);
         list.setBounds(8, mode == 0 ? 110 : 96, w - 16, h - (mode == 0 ? 110 : 96) - 46);
         firstBtn.setBounds(30, 210, w - 60, 40);
-        useBtn.setBounds(12, h - 40, (w - 32) / 2 + 20, 30);
-        revealBtn.setBounds(useBtn.getRight() + 8, h - 40, w - 12 - useBtn.getRight() - 8, 30);
+        const int bw = (w - 24 - 12) / 3;
+        useBtn.setBounds(12, h - 40, bw + 16, 30);
+        tryBtn.setBounds(useBtn.getRight() + 6, h - 40, bw - 8, 30);
+        revealBtn.setBounds(tryBtn.getRight() + 6, h - 40, w - 12 - tryBtn.getRight() - 6, 30);
     }
 
 private:
@@ -672,6 +691,11 @@ private:
     juce::ComboBox roots;
     juce::TextEditor filter;
     juce::TextButton addBtn, remBtn, upBtn, useBtn, revealBtn, closeBtn, firstBtn, tabFolders, tabSimilar, scanBtn, limitBtn, moreBtn;
+    std::array<juce::TextButton, 3> likeBtn;
+    juce::TextButton tryBtn;
+    bool tryMode = false;
+    int likeSrc = 0;
+    juce::uint32 lastFind = 0;
     juce::Array<juce::File> rootDirs, items;       // items: folders first, then audio files
     juce::File dir;
     std::unique_ptr<juce::FileChooser> chooser;
@@ -724,7 +748,7 @@ private:
         resized();
         if (mode == 1)
         {
-            if (!proc.library->scanning()) proc.library->scan(false);   // new / changed files only: quick
+            proc.library->scanOnce();                  // new / changed files: checked once per session, quietly
             want = 5; findSimilar(true);
         }
         else rebuild();
@@ -743,8 +767,8 @@ private:
     {   // no folder yet: only the explanation and one big button
         const bool any = !rootDirs.isEmpty(), f = any && mode == 0, sm = any && mode == 1;
         for (juce::Component* c : std::initializer_list<juce::Component*> { &roots, &remBtn, &upBtn, &filter, &addBtn }) c->setVisible(f);
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &scanBtn, &limitBtn, &moreBtn }) c->setVisible(sm);
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &list, &useBtn, &revealBtn, &tabFolders, &tabSimilar }) c->setVisible(any);
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &scanBtn, &limitBtn, &moreBtn, &likeBtn[0], &likeBtn[1], &likeBtn[2] }) c->setVisible(sm);
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &list, &useBtn, &revealBtn, &tabFolders, &tabSimilar, &tryBtn }) c->setVisible(any);
         firstBtn.setVisible(!any);
     }
     void addFolder()
@@ -804,18 +828,27 @@ private:
         auto r = proc.getResult();
         const int pad = targetPad ? targetPad() : -1;
         havePad = r && pad >= 0 && pad < ds::kPads && r->pads[(size_t) pad].valid;
-        const int src = havePad ? proc.padSource(pad) : 0;
+        const bool hasC = havePad && r->pads[(size_t) pad].user.getNumSamples() > 0;
+        if (likeSrc == 2 && !hasC) likeSrc = 0;
+        const int src = likeSrc;
+        for (int k = 0; k < 3; ++k) { likeBtn[(size_t) k].setToggleState(k == src, juce::dontSendNotification); likeBtn[(size_t) k].setEnabled(havePad && (k < 2 || hasC)); }
         auto ix = proc.library->index();
         const juce::String key = havePad ? juce::String(proc.getResultVersion()) + "|" + juce::String(pad) + "|" + juce::String(src) + "|"
                                            + juce::String((juce::pointer_sized_int) ix.get()) + "|" + juce::String(want) : juce::String();
         if (!force && key == queryKey) return;
+        // while the archive is still being read the list would jump every few seconds: at most every 3 s then
+        const auto now = juce::Time::getMillisecondCounter();
+        const bool onlyIndexChanged = queryKey.upToLastOccurrenceOf("|", false, false).upToLastOccurrenceOf("|", false, false)
+                                      == key.upToLastOccurrenceOf("|", false, false).upToLastOccurrenceOf("|", false, false);
+        if (!force && onlyIndexChanged && proc.library->scanning() && now - lastFind < 3000) return;
+        lastFind = now;
         queryKey = key;
         matches.clear(); holder.reset();
         if (havePad)
         {
             const auto& pd = r->pads[(size_t) pad];
-            matches = proc.library->nearest(pd.get(src == 1, src == 2), r->sr, pd.name, want, holder);
-            queryText = "LIKE  " + pd.name + "  (" + juce::String::charToString((juce::juce_wchar) ('A' + src)) + ")";
+            matches = proc.library->nearest(pd.get(src == 1, src == 2), r->sr, pd.name, want, holder, pd.userPath);
+            queryText = "LIKE  " + pd.name;
         }
         else queryText.clear();
         moreBtn.setEnabled(!matches.empty());
@@ -832,7 +865,20 @@ private:
         if (mode == 1) return row >= 0 && row < (int) matches.size() ? juce::File(matches[(size_t) row].e->path) : juce::File();
         return row >= 0 && row < items.size() ? items[row] : juce::File();
     }
-    void play(const juce::File& f) { if (f.existsAsFile()) { proc.previewSample(f, targetPad ? targetPad() : -1); list.repaint(); } }
+    void play(const juce::File& f)
+    {
+        if (!f.existsAsFile()) return;
+        const int pad = targetPad ? targetPad() : -1;
+        auto r = proc.getResult();
+        if (tryMode && r && pad >= 0 && r->pads[(size_t) pad].valid) { proc.tryOnPad(pad, f); if (onTried) onTried(); }   // on the pad, in the pattern
+        else proc.previewSample(f, pad);
+        list.repaint();
+    }
+public:
+    std::function<void()> onTried;
+    bool isTrying() const { return proc.isTrying(); }
+    void stopTrying() { if (tryMode) { tryMode = false; tryBtn.setToggleState(false, juce::dontSendNotification); } proc.endTry(false); }
+private:
 
     int getNumRows() override { return mode == 1 ? (int) matches.size() : items.size(); }
     void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool sel) override
@@ -850,7 +896,8 @@ private:
             g.setColour(playing ? ui::amber : ui::text); g.setFont(ui::font(10.5f, true, 0.03f));
             g.drawText(f.getFileNameWithoutExtension(), 12, 3, w - 70, 16, juce::Justification::centredLeft);
             g.setColour(ui::amber.withAlpha(0.85f)); g.setFont(ui::font(8.5f, true, 0.15f));
-            g.drawText(m.tags.isEmpty() ? juce::String("VERY CLOSE") : m.tags.joinIntoString("  "), 12, 20, w / 2, 14, juce::Justification::centredLeft);
+            g.drawText(m.tags.isEmpty() ? juce::String(m.score >= 90.f ? "VERY CLOSE" : m.score >= 75.f ? "CLOSE" : "SIMILAR, NO BIG DIFFERENCE") : m.tags.joinIntoString("  "),
+                       12, 20, w / 2 + 40, 14, juce::Justification::centredLeft);
             g.setColour(ui::dim); g.setFont(ui::font(8.5f, false, 0.05f));
             g.drawText(f.getParentDirectory().getFileName(), w / 2, 20, w / 2 - 60, 14, juce::Justification::centredRight);
             const auto bar = juce::Rectangle<float>((float) w - 52.f, 9.f, 40.f, 4.f);
@@ -888,6 +935,7 @@ private:
     {
         const auto f = rowFile(row);
         if (mode == 0 && f.isDirectory()) open(f);
+        else if (proc.isTrying() && proc.triedFile() == f) { proc.endTry(true); if (onKept) onKept(f); }
         else if (f.existsAsFile() && onUse) onUse(f);
     }
     void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override { activate(row); }
@@ -951,6 +999,7 @@ public:
             knob(punch[(size_t) i], "punch" + s, sdB);
             knob(sus[(size_t) i], "sus" + s, sdB);
             knob(pitch[(size_t) i], "pitch" + s, [](double v) { return juce::String(v > 0 ? "+" : "") + juce::String(v, std::abs(v - std::round(v)) < 0.005 ? 0 : 2) + " st"; });
+            knob(mamt[(size_t) i], "mamt" + s, [](double v) { return juce::String(juce::roundToInt(v)) + " %"; });
             knob(tone[(size_t) i], "tone" + s, [](double v) { return std::abs(v) < 0.05 ? juce::String("0") : juce::String(v > 0 ? "BRIGHT +" : "DARK ") + juce::String(std::abs(v), 1); });
         }
         knob(master, "master", dB);
@@ -1031,6 +1080,8 @@ public:
         samples.onClose = [this] { samples.setVisible(false); };
         samples.onUse = [this](const juce::File& f) { useSample(selected, f); };
         samples.targetPad = [this] { return selected; };
+        samples.onTried = [this] { updateVisibility(); repaint(); };
+        samples.onKept = [this](const juce::File& f) { toast("C  " + f.getFileNameWithoutExtension()); updateVisibility(); repaint(); };
         samples.targetName = [this] { auto r = proc.getResult(); if (!r) return juce::String();
                                       return r->pads[(size_t) selected].valid ? r->pads[(size_t) selected].name
                                                                               : "NEW " + (pendingType.isNotEmpty() ? pendingType : juce::String("SOUND")); };
@@ -1151,8 +1202,8 @@ public:
         for (int i = 0; i < ds::kPads; ++i)
         {
             vol[(size_t) i].setBounds(712, 266, 64, 64); pan[(size_t) i].setBounds(858, 266, 64, 64);
-            punch[(size_t) i].setBounds(676, 503, 42, 42); sus[(size_t) i].setBounds(752, 503, 42, 42);
-            pitch[(size_t) i].setBounds(828, 503, 42, 42); tone[(size_t) i].setBounds(904, 503, 42, 42);
+            punch[(size_t) i].setBounds(670, 503, 42, 42); sus[(size_t) i].setBounds(730, 503, 42, 42);
+            pitch[(size_t) i].setBounds(790, 503, 42, 42); tone[(size_t) i].setBounds(850, 503, 42, 42); mamt[(size_t) i].setBounds(910, 503, 42, 42);
         }
         master.setBounds(669, 362, 42, 42); sens.setBounds(749, 362, 42, 42); grid.setBounds(829, 362, 42, 42); bpm.setBounds(909, 362, 42, 42);
         playMidi.setBounds(666, 440, 34, 36);
@@ -1184,7 +1235,10 @@ public:
         m.addSeparator();
         m.addItem(300, "CHOOSE YOUR SAMPLE (C) ...  (LISTEN FIRST)");
         m.addItem(302, "FIND SIMILAR IN YOUR SAMPLES ...");
-        m.addItem(301, "REMOVE YOUR SAMPLE", res->pads[(size_t) pad].user.getNumSamples() > 0);
+        m.addItem(301, "REMOVE YOUR SAMPLE (C)", res->pads[(size_t) pad].user.getNumSamples() > 0);
+        m.addSeparator();
+        m.addItem(310, "CLEAR SOUND  (KEEP ITS HITS: THE PATTERN STAYS)");
+        m.addItem(311, "DELETE PAD AND ITS HITS ...");
         m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(localAreaToGlobal(padRect(pad))),
             [this, pad, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
             {
@@ -1193,32 +1247,47 @@ public:
                 else if (id == 300) { selected = pad; openSamples(); }
                 else if (id == 302) { selected = pad; openSamples(); samples.showSimilar(); }   // the SAMPLES panel: listen at the pad's level, then use
                 else if (id == 301) { proc.clearPadSample(pad); toast("BACK TO A"); }
+                else if (id == 310) { proc.clearPadSound(pad); toast("NO SOUND - DROP OR CHOOSE ONE, THE HITS WAIT"); }
+                else if (id == 311)
+                {
+                    const auto nm = proc.getResult()->pads[(size_t) pad].name;
+                    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon, "DELETE PAD",
+                        "Delete " + nm + " and its " + juce::String(proc.getResult()->pads[(size_t) pad].hits) + " hits from the MIDI?", "DELETE", "CANCEL", this,
+                        juce::ModalCallbackFunction::create([this, pad, nm, sp](int ok) { if (sp != nullptr && ok) { proc.deletePad(pad); toast("DELETED  " + nm); updateVisibility(); repaint(); } }));
+                }
                 else if (id >= 200) { const int q = id - 200; proc.mergePad(pad, q); selected = q; toast("HITS MOVED TO  " + proc.getResult()->pads[(size_t) q].name); }
                 updateVisibility(); repaint();
             });
     }
 
-    // MATCH TO A: what would change, how much nearer it gets; apply / half way / undo
+    // MATCH TO A: measure + apply (in the background), then each part on / off, the AMOUNT knob, again / remove
     void matchMenu(int pad)
     {
-        auto m = std::make_shared<DrumSlicerProcessor::MatchSuggestion>(proc.suggestMatch(pad));
+        auto r = proc.getResult();
+        if (!r || !r->pads[(size_t) pad].valid || r->pads[(size_t) pad].user.getNumSamples() == 0) return;
+        const auto m = proc.getMatch(pad);
+        if (!m.on) { proc.startMatch(pad); toast("MATCHING C TO A ..."); return; }
         juce::PopupMenu menu;
-        if (!m->ok) { menu.addSectionHeader(m->why); menu.addItem(3, "UNDO LAST MATCH", proc.canUndoMatch(pad)); }
-        else
-        {
-            menu.addSectionHeader("MATCH C TO A:   " + juce::String(juce::roundToInt(m->before)) + "%   ->   " + juce::String(juce::roundToInt(m->after)) + "%");
-            for (auto& l : m->lines) menu.addItem(100, "   " + l, false);
-            menu.addSeparator();
-            menu.addItem(1, "APPLY");
-            menu.addItem(2, "APPLY HALF WAY  (KEEP MORE OF YOUR SAMPLE)");
-            menu.addItem(3, "UNDO LAST MATCH", proc.canUndoMatch(pad));
-        }
+        menu.addSectionHeader("MATCHED TO A:   " + juce::String(juce::roundToInt(m.before)) + "%   ->   " + juce::String(juce::roundToInt(m.after)) + "%");
+        menu.addItem(1, "EQ  (26 BANDS)", true, m.useEq);
+        menu.addItem(2, "SHAPE  (ATTACK, BODY, DECAY IN 3 BANDS)", true, m.useShape);
+        menu.addItem(3, m.roomMix > 0 ? "ROOM  (A'S SPACE)" : "ROOM  (NOT NEEDED: C HAS AS MUCH)", m.roomMix > 0, m.useRoom && m.roomMix > 0);
+        menu.addItem(4, "PITCH  " + juce::String(m.pitch > 0 ? "+" : "") + juce::String(m.pitch, 1) + " ST", true, m.usePitch);
+        menu.addItem(5, m.en < 1999.f ? "LENGTH  END " + juce::String(juce::roundToInt(m.en)) + " MS" : juce::String("LENGTH  (AS IT IS)"), m.en < 1999.f, m.useLen && m.en < 1999.f);
+        menu.addSeparator();
+        menu.addItem(10, "MATCH AGAIN");
+        menu.addItem(11, "REMOVE MATCH");
         menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&matchBtn),
             [this, pad, m, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
             {
                 if (sp == nullptr || id == 0) return;
-                if (id == 1 || id == 2) { proc.applyMatch(pad, *m, id == 1 ? 1.f : 0.5f); toast(juce::String("MATCHED  ") + (id == 2 ? "HALF WAY" : juce::String(juce::roundToInt(m->after)) + "%")); }
-                else if (id == 3) { proc.undoMatch(pad); toast("MATCH UNDONE"); }
+                if (id >= 1 && id <= 5)
+                {
+                    const bool cur = id == 1 ? m.useEq : id == 2 ? m.useShape : id == 3 ? m.useRoom : id == 4 ? m.usePitch : m.useLen;
+                    proc.setMatchPart(pad, id - 1, !cur);
+                }
+                else if (id == 10) { proc.startMatch(pad); toast("MATCHING C TO A ..."); }
+                else if (id == 11) { proc.removeMatch(pad); toast("MATCH REMOVED"); }
                 shape.invalidate(); repaint();
             });
     }
@@ -1261,6 +1330,7 @@ public:
         for (int i = 0; i < ds::kPads; ++i)
         {
             if (!padRect(i).contains(e.getPosition())) continue;
+            if (proc.isTrying() && i != selected) proc.endTry(false);     // trying on another pad: that one goes back
             selected = i;
             if (e.mods.isPopupMenu())
             {
@@ -1273,6 +1343,11 @@ public:
             {
                 const auto ab = abRect(i); const int n = padHasC(i) ? 3 : 2;
                 setSource(i, juce::jlimit(0, n - 1, (e.getPosition().x - ab.getX()) * n / ab.getWidth()));
+            }
+            else if (!res || !res->pads[(size_t) i].valid || proc.padIsSilent(i))
+            {   // nothing to hear: give it a sound
+                if (samples.isTrying()) samples.stopTrying();
+                if (res) { pendingType.clear(); openSamples(); }
             }
             else proc.audition(i);
             updateVisibility(); repaint();
@@ -1347,7 +1422,17 @@ public:
             wasPlaying = proc.isSourcePlaying();
         }
         browseBtn.setToggleState(samples.isVisible(), juce::dontSendNotification);
-        matchBtn.setEnabled(hasPad && res->pads[(size_t) selected].user.getNumSamples() > 0 && proc.padSource(selected) == 2);
+        {
+            const bool canMatch = hasPad && res->pads[(size_t) selected].user.getNumSamples() > 0 && proc.padSource(selected) == 2
+                               && res->pads[(size_t) selected].audio.getMagnitude(0, res->pads[(size_t) selected].audio.getNumSamples()) > 1.0e-6f;   // a cleared pad has no A
+            const auto md = proc.getMatch(selected);
+            matchBtn.setEnabled(canMatch && !proc.isMatching());
+            matchBtn.setButtonText(proc.isMatching() ? "MATCHING..." : (canMatch && md.on) ? "MATCH " + juce::String(juce::roundToInt(md.after)) + "%" : juce::String("MATCH TO A"));
+            matchBtn.setToggleState(canMatch && md.on, juce::dontSendNotification);
+            for (int i = 0; i < ds::kPads; ++i) mamt[(size_t) i].setEnabled(i == selected && canMatch && md.on);
+            const auto msg = proc.matchMessage();
+            if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED")) toast(msg); }
+        }
         playMidi.setToggleState(proc.isMidiPlaying(), juce::dontSendNotification);
         playMidi.setEnabled(res != nullptr);
         if (!res && proc.isMidiPlaying()) proc.playMidi(false);
@@ -1407,7 +1492,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.9.0";
+            const juce::String ver = "v1.10.0";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -1686,6 +1771,11 @@ private:
             g.setColour(has ? ui::text : ui::faint); g.setFont(ui::font(13.f, true, 0.2f));
             g.drawText(has ? res->pads[(size_t) i].name : juce::String("-"), juce::Rectangle<float>(r.getX() + 14, r.getBottom() - 42, 90, 16).toNearestInt(), juce::Justification::centredLeft);
             if (!has) continue;
+            if (proc.padIsSilent(i))
+            {
+                g.setColour(c.withAlpha(0.8f)); g.setFont(ui::font(8.5f, true, 0.15f));
+                g.drawText("NO SOUND - CLICK TO ADD", juce::Rectangle<float>(r.getX() + 14, r.getY() + 22, r.getWidth() - 20, 12).toNearestInt(), juce::Justification::centredLeft);
+            }
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.1f));
             g.drawText(juce::MidiMessage::getMidiNoteName(res->pads[(size_t) i].note, true, true, 3), juce::Rectangle<float>(r.getX() + 14, r.getBottom() - 24, 60, 12).toNearestInt(), juce::Justification::centredLeft);
             const auto ab = abRect(i).toFloat();
@@ -1740,12 +1830,13 @@ private:
         knobLabel(g, master, "MASTER", 1); knobLabel(g, sens, "SENS", 1); knobLabel(g, grid, "GRID", 1); knobLabel(g, bpm, "BPM", 1);
         knobLabel(g, punch[(size_t) selected], "PUNCH", 1); knobLabel(g, sus[(size_t) selected], "SUSTAIN", 1); knobLabel(g, pitch[(size_t) selected], "PITCH", 1);
         knobLabel(g, tone[(size_t) selected], "TONE", 1);
+        knobLabel(g, mamt[(size_t) selected], "MATCH", 1);
     }
 
     void updateVisibility()
     {
         for (int i = 0; i < ds::kPads; ++i)
-            for (auto* k : { &vol[(size_t) i], &pan[(size_t) i], &punch[(size_t) i], &sus[(size_t) i], &pitch[(size_t) i], &tone[(size_t) i] }) k->setVisible(i == selected);
+            for (auto* k : { &vol[(size_t) i], &pan[(size_t) i], &punch[(size_t) i], &sus[(size_t) i], &pitch[(size_t) i], &tone[(size_t) i], &mamt[(size_t) i] }) k->setVisible(i == selected);
         shape.pad = selected; shape.invalidate();
     }
 
@@ -1763,12 +1854,13 @@ private:
     int dragWhat = 0;                                // 1 = START, 2 = END
     bool wasPlaying = false;
 
-    std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch, tone;
+    std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch, tone, mamt;
     juce::Slider master, sens, grid, bpm;
     std::vector<std::unique_ptr<juce::SliderParameterAttachment>> atts;
     juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn, browseBtn, matchBtn;
     KitBrowser kitBrowser { proc };
     SampleBrowser samples { proc };
+    juce::String lastMatchMsg;
     int browsedPad = -1;
     juce::String toastText; juce::uint32 toastUntil = 0; bool wasToasting = false;
     std::array<juce::TextButton, 3> modeBtn;

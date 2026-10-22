@@ -38,6 +38,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         p.push_back(std::make_unique<F>(juce::ParameterID{ "sus" + s, 1 },   n + " Sustain", NR(-12.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "pitch" + s, 1 }, n + " Pitch",   NR(-12.f, 12.f, 0.01f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "tone" + s, 1 },  n + " Tone",    NR(-12.f, 12.f, 0.1f), 0.f));
+        p.push_back(std::make_unique<F>(juce::ParameterID{ "mamt" + s, 1 },  n + " Match Amount", NR(0.f, 100.f, 0.1f), 100.f));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "best" + juce::String(i), 1 }, n + " Best hit", false));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "usec" + juce::String(i), 1 }, n + " Your sample", false));
     }
@@ -68,6 +69,8 @@ ShapeParams DrumSlicerProcessor::shapeParams(int i) const
     p.punch = v("punch"); p.sustain = v("sus"); p.best = v("best") > 0.5f;
     p.attackCurve = v("fic"); p.fadeOut = v("fo"); p.fadeOutCurve = v("foc"); p.user = v("usec") > 0.5f;
     p.tone = v("tone");
+    p.matchAmount = v("mamt") * 0.01f;
+    { std::lock_guard<std::mutex> g(matchLock); p.matchVersion = matchVer[(size_t) i] + (match[(size_t) i].on ? 100000 : 0); }
     return p;
 }
 
@@ -153,8 +156,23 @@ void DrumSlicerProcessor::slotsFromTree(const juce::ValueTree& t)
 }
 
 // trim -> transient shaper (punch on the attack, sustain on the rest) -> attack / hold / decay envelope
-juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& raw, double sr, const ShapeParams& p, int& offset)
+void applyMatchChain(juce::AudioBuffer<float>& x, double sr, const MatchData& m, float amount)
+{   // the same order it was measured in: EQ -> room -> shape
+    if (m.useEq) mt::applyEq(x, sr, m.eq, amount);
+    if (m.useRoom && m.roomMix > 0) mt::addRoom(x, sr, m.roomRt, m.roomMix * amount, m.roomPre);
+    if (m.useShape) mt::applyShape(x, sr, m.shape, amount);
+}
+
+juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& rawIn, double sr, const ShapeParams& p, int& offset, const MatchData* match)
 {
+    juce::AudioBuffer<float> matched;
+    if (match != nullptr && match->on && p.matchAmount > 0.001f)
+    {
+        matched.makeCopyOf(rawIn);
+        if (matched.getNumChannels() < 2) { matched.setSize(2, matched.getNumSamples(), true); matched.copyFrom(1, 0, matched, 0, 0, matched.getNumSamples()); }
+        applyMatchChain(matched, sr, *match, p.matchAmount);
+    }
+    const juce::AudioBuffer<float>& raw = matched.getNumSamples() > 0 ? matched : rawIn;
     const int len = raw.getNumSamples();
     const int s0 = juce::jlimit(0, std::max(0, len - 1), (int) (p.start * 0.001 * sr));
     const int e = juce::jlimit(s0 + 1, len, (int) (p.end * 0.001 * sr));
@@ -286,9 +304,15 @@ void DrumSlicerProcessor::reshape()
     for (int i = 0; i < ds::kPads; ++i) { now[(size_t) i] = shapeParams(i); if (now[(size_t) i] != lastShape[(size_t) i]) changed = true; }
     if (!changed) return;
     auto sh = std::make_shared<Shaped>();
+    std::array<MatchData, ds::kPads> md;
+    { std::lock_guard<std::mutex> g(matchLock); md = match; }
     for (int i = 0; i < ds::kPads; ++i)
         if (r->pads[(size_t) i].valid)
-            sh->buf[(size_t) i] = shapeShot(r->pads[(size_t) i].get(now[(size_t) i].best, now[(size_t) i].user), r->sr, now[(size_t) i], sh->offset[(size_t) i]);
+        {
+            const bool c = now[(size_t) i].user && r->pads[(size_t) i].user.getNumSamples() > 0;
+            sh->buf[(size_t) i] = shapeShot(r->pads[(size_t) i].get(now[(size_t) i].best, now[(size_t) i].user), r->sr, now[(size_t) i], sh->offset[(size_t) i],
+                                            c ? &md[(size_t) i] : nullptr);
+        }
     std::shared_ptr<Shaped> old;
     { juce::SpinLock::ScopedLockType l(lock); old = shaped; shaped = sh; }
     retire(std::move(old));
@@ -724,6 +748,7 @@ void DrumSlicerProcessor::getStateInformation(juce::MemoryBlock& d)
     st.setProperty("kitPath", getKitDir().getFullPathName(), nullptr);
     st.setProperty("snap", snap.load(), nullptr);
     st.appendChild(slotsTree(), nullptr);
+    st.appendChild(matchTree(), nullptr);
     if (auto r = getResult())
     {
         std::lock_guard<std::mutex> g(embedLock);
@@ -744,6 +769,7 @@ void DrumSlicerProcessor::setStateInformation(const void* data, int size)
     const juce::String kp = st.getProperty("kitPath").toString(), lp = st.getProperty("loopPath").toString();
     snap = (bool) st.getProperty("snap", true);
     { auto sl = st.getChildWithName("SLOTS"); slotsFromTree(sl.createCopy()); if (sl.isValid()) st.removeChild(sl, nullptr); }
+    { auto mm = st.getChildWithName("MATCH"); matchFromTree(mm.createCopy()); if (mm.isValid()) st.removeChild(mm, nullptr); }
     apvts.replaceState(st);
     restoreAsync(emb, kp.isNotEmpty() ? juce::File(kp) : juce::File(), lp.isNotEmpty() ? juce::File(lp) : juce::File());
 }
@@ -842,9 +868,21 @@ static bool assignType(ds::Result& r, int pad, const juce::String& type)
         if (!used) break;
         ++k;
     }
-    if (k >= (int) it->second.size()) k = 0;
-    r.pads[(size_t) pad].note = it->second[(size_t) k];
-    r.pads[(size_t) pad].name = k == 0 ? type : type + " " + juce::String(k + 1);
+    int note = -1;
+    if (k < (int) it->second.size()) note = it->second[(size_t) k];
+    else
+    {   // all notes of this kind taken: the first free one from 65 up (never a note another pad plays)
+        for (int nn = 65; nn < 128 && note < 0; ++nn)
+        {
+            bool used = false;
+            for (int q = 0; q < ds::kPads; ++q) if (q != pad && r.pads[(size_t) q].valid && r.pads[(size_t) q].note == nn) used = true;
+            if (!used) note = nn;
+        }
+        if (note < 0) note = it->second[0];
+    }
+    int same = 0; for (int q = 0; q < ds::kPads; ++q) if (q != pad && r.pads[(size_t) q].valid && r.pads[(size_t) q].name.upToFirstOccurrenceOf(" ", false, false) == type) ++same;
+    r.pads[(size_t) pad].note = note;
+    r.pads[(size_t) pad].name = same == 0 ? type : type + " " + juce::String(same + 1);
     return true;
 }
 
@@ -910,7 +948,7 @@ bool DrumSlicerProcessor::addPad(int pad, const juce::String& type, const juce::
     auto r = std::make_shared<ds::Result>(*cur);
     auto& pd = r->pads[(size_t) pad];
     pd = ds::Pad();
-    pd.audio.makeCopyOf(shot); pd.user = std::move(shot); pd.userName = f.getFileNameWithoutExtension();
+    pd.audio.makeCopyOf(shot); pd.user = std::move(shot); pd.userName = f.getFileNameWithoutExtension(); pd.userPath = f.getFullPathName();
     pd.hits = 0; pd.valid = true;
     if (!assignType(*r, pad, type.isNotEmpty() ? type : guessType(f))) assignType(*r, pad, "PERC");
     r->buildNoteMap();
@@ -918,9 +956,108 @@ bool DrumSlicerProcessor::addPad(int pad, const juce::String& type, const juce::
     publish(r, kit, loop, orphan());
     if (kit == juce::File() && loop.existsAsFile()) ds::saveCache(loop, *r);
     for (int s = 0; s < 3; ++s) resetShape(pad, s);  // a new pad: nothing of the old one
+    matchOff(pad);
     setPadSource(pad, 2);
     audition(pad);
     return true;
+}
+
+// ---------------------------------------------------------------- clear / delete a pad
+bool DrumSlicerProcessor::padIsSilent(int pad) const
+{
+    auto r = getResult();
+    if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid) return false;
+    const auto& pd = r->pads[(size_t) pad];
+    return pd.user.getNumSamples() == 0 && pd.audio.getMagnitude(0, pd.audio.getNumSamples()) < 1.0e-7f;
+}
+
+void DrumSlicerProcessor::clearPadSound(int pad)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    auto& pd = r->pads[(size_t) pad];
+    pd.audio.setSize(2, 64); pd.audio.clear();       // silent: the hits stay in the MIDI and wait for a new sound
+    pd.best.setSize(2, 64); pd.best.clear();
+    pd.user.setSize(0, 0); pd.userName.clear(); pd.userPath.clear();
+    matchOff(pad);
+    publish(r, getKitDir(), getLoopFile(), orphan());
+    for (int s = 0; s < 3; ++s) resetShape(pad, s);
+    setPadSource(pad, 0);
+    const auto loop = getLoopFile();
+    if (getKitDir() == juce::File() && loop.existsAsFile()) ds::saveCache(loop, *r);
+}
+
+void DrumSlicerProcessor::deletePad(int pad)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    r->hits.erase(std::remove_if(r->hits.begin(), r->hits.end(), [pad](const ds::Hit& h) { return h.pad == pad; }), r->hits.end());
+    r->pads[(size_t) pad] = ds::Pad();
+    r->buildNoteMap();
+    matchOff(pad);
+    publish(r, getKitDir(), getLoopFile(), orphan());
+    for (int s = 0; s < 3; ++s) resetShape(pad, s);
+    setPadSource(pad, 0);
+    const auto loop = getLoopFile();
+    if (getKitDir() == juce::File() && loop.existsAsFile()) ds::saveCache(loop, *r);
+}
+
+// ---------------------------------------------------------------- TRY IN KIT
+bool DrumSlicerProcessor::tryOnPad(int pad, const juce::File& f)
+{
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid) return false;
+    if (trying.on && trying.pad != pad) endTry(false);
+    if (!trying.on)
+    {   // what the pad had, to go back to
+        const auto& pd = cur->pads[(size_t) pad];
+        trying.on = true; trying.pad = pad; trying.user.makeCopyOf(pd.user); trying.name = pd.userName; trying.path = pd.userPath;
+        trying.src = padSource(pad);
+        trying.wasPlaying = midiPlay.load();
+        trying.match = getMatch(pad);
+        {
+            std::lock_guard<std::mutex> g(slotLock);
+            trying.cslot = slots[(size_t) pad][2];
+            if (slotOwner[(size_t) pad] == 2) { trying.cslot.valid = true; trying.cslot.v = shownShape(pad); }
+        }
+    }
+    juce::AudioBuffer<float> shot;
+    if (!ds::loadUserShot(f, cur->pads[(size_t) pad], cur->sr, shot)) return false;
+    auto r = std::make_shared<ds::Result>(*cur);
+    r->pads[(size_t) pad].user = std::move(shot);
+    r->pads[(size_t) pad].userName = f.getFileNameWithoutExtension();
+    r->pads[(size_t) pad].userPath = f.getFullPathName();
+    publish(r, getKitDir(), getLoopFile(), orphan());
+    resetShape(pad, 2);
+    matchOff(pad);
+    setPadSource(pad, 2);
+    trying.file = f;
+    if (!midiPlay.load()) playMidi(true);            // heard in the pattern, at the project tempo
+    return true;
+}
+
+void DrumSlicerProcessor::endTry(bool keep)
+{
+    if (!trying.on) return;
+    const int pad = trying.pad;
+    trying.on = false;
+    if (!trying.wasPlaying) playMidi(false);
+    if (keep) return;
+    auto cur = getResult();
+    if (!cur || pad < 0 || pad >= ds::kPads || !cur->pads[(size_t) pad].valid) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    auto& pd = r->pads[(size_t) pad];
+    pd.user = std::move(trying.user); pd.userName = trying.name; pd.userPath = trying.path;
+    publish(r, getKitDir(), getLoopFile(), orphan());
+    {
+        std::lock_guard<std::mutex> g(slotLock);
+        slots[(size_t) pad][2] = trying.cslot;
+    }
+    { std::lock_guard<std::mutex> g(matchLock); match[(size_t) pad] = trying.match; ++matchVer[(size_t) pad]; }
+    if (slotOwner[(size_t) pad] == 2 && trying.cslot.valid) showShape(pad, trying.cslot.v);
+    setPadSource(pad, pd.user.getNumSamples() > 0 ? trying.src : std::min(trying.src, 1));
 }
 
 // ---------------------------------------------------------------- MATCH TO A
@@ -931,119 +1068,278 @@ static ShapeParams shapeFrom(const std::array<float, DrumSlicerProcessor::kShape
     p.hold = v[6]; p.decay = v[7]; p.punch = v[8]; p.sustain = v[9]; p.tone = v[11];
     return p;
 }
-// the sound as it plays: shaped, then at its pitch (the voice plays it faster / slower)
-static juce::AudioBuffer<float> asHeard(const juce::AudioBuffer<float>& raw, double sr, const std::array<float, DrumSlicerProcessor::kShapeN>& v)
+// resample: the sound played at "rate" times its speed (rate 2 = an octave up, half as long)
+static juce::AudioBuffer<float> atRate(const juce::AudioBuffer<float>& sh, double rate)
 {
-    int off = 0;
-    auto sh = shapeShot(raw, sr, shapeFrom(v), off);
-    const double ratio = std::pow(2.0, v[10] / 12.0);
-    if (std::abs(ratio - 1.0) < 1e-4) return sh;
-    const int n = std::max(1, (int) (sh.getNumSamples() / ratio));
+    if (std::abs(rate - 1.0) < 1e-4) { juce::AudioBuffer<float> c; c.makeCopyOf(sh); return c; }
+    const int n = std::max(1, (int) (sh.getNumSamples() / rate));
     juce::AudioBuffer<float> o(2, n);
     for (int c = 0; c < 2; ++c)
     {
         const float* s = sh.getReadPointer(std::min(c, sh.getNumChannels() - 1)); float* d = o.getWritePointer(c);
-        for (int i = 0; i < n; ++i) { const double p = i * ratio; const int i0 = (int) p; const float fr = (float) (p - i0);
+        for (int i = 0; i < n; ++i) { const double p = i * rate; const int i0 = (int) p; const float fr = (float) (p - i0);
             d[i] = i0 + 1 < sh.getNumSamples() ? s[i0] + (s[i0 + 1] - s[i0]) * fr : (i0 < sh.getNumSamples() ? s[i0] : 0.f); }
     }
     return o;
 }
 
-DrumSlicerProcessor::MatchSuggestion DrumSlicerProcessor::suggestMatch(int pad)
+// everything MATCH TO A needs, measured off the message thread
+static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::array<float, DrumSlicerProcessor::kShapeN>& vA,
+                              const juce::AudioBuffer<float>& C, const std::array<float, DrumSlicerProcessor::kShapeN>& neutral,
+                              const std::array<float, DrumSlicerProcessor::kShapeN>& vCnow, const MatchData& before, bool hadMatch,
+                              double sr, ds::Family fam, const ds::LibIndex& stats)
 {
-    MatchSuggestion m;
-    auto r = getResult();
-    if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid) { m.why = "NO SOUND ON THIS PAD"; return m; }
-    const auto& pd = r->pads[(size_t) pad];
-    if (pd.user.getNumSamples() == 0) { m.why = "LOAD YOUR SAMPLE (C) FIRST"; return m; }
-    // A as you hear it: its own shape (shown now if A is chosen, else its slot)
-    std::array<float, kShapeN> vA = shownShape(pad), vC = shownShape(pad), neutral {};
-    for (int k = 0; k < kShapeN; ++k)
-        if (auto* p = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(pad))) neutral[(size_t) k] = p->convertFrom0to1(p->getDefaultValue());
-    {
-        std::lock_guard<std::mutex> g(slotLock);
-        const int own = slotOwner[(size_t) pad];
-        if (own != 0 && slots[(size_t) pad][0].valid) vA = slots[(size_t) pad][0].v;
-        if (own != 2) vC = slots[(size_t) pad][2].valid ? slots[(size_t) pad][2].v : neutral;
-    }
+    MatchData m; m.on = true;
+    if (hadMatch) { m.useEq = before.useEq; m.useShape = before.useShape; m.useRoom = before.useRoom; m.usePitch = before.usePitch; m.useLen = before.useLen; }
+    auto heard = [&](const juce::AudioBuffer<float>& raw, const std::array<float, DrumSlicerProcessor::kShapeN>& v, const MatchData* md) {
+        int off = 0; return atRate(shapeShot(raw, sr, shapeFrom(v), off, md), std::pow(2.0, v[10] / 12.0)); };
+    const auto T = heard(A, vA, nullptr);
     ds::Feat fT, fC;
-    if (!ds::fingerprint(asHeard(pd.audio, r->sr, vA), r->sr, fT) || !ds::fingerprint(pd.user, r->sr, fC)) { m.why = "COULD NOT MEASURE"; return m; }
-    auto ix = library->index();
-    ds::LibIndex def; def.stats();
-    const ds::LibIndex& stats = (ix && ix->oneShots >= 50) ? *ix : def;
-    const auto fam = ds::familyOf(pd.name);
-    auto eval = [&](const std::array<float, kShapeN>& v) {
-        ds::Feat f; if (!ds::fingerprint(asHeard(pd.user, r->sr, v), r->sr, f)) return 1.0e9f;
-        return ds::distance(fT, f, stats, fam); };
-    m.before = ds::scoreOf(eval(vC));
-    // start from your sample untouched; its pitch to A's (an octave off counts as near)
-    auto v = neutral;
+    ds::fingerprint(T, sr, fT); ds::fingerprint(C, sr, fC);
+    {
+        ds::Feat f; MatchData cur = before; cur.on = hadMatch;
+        m.before = ds::fingerprint(heard(C, vCnow, hadMatch ? &cur : nullptr), sr, f) ? ds::scoreOf(ds::distance(fT, f, stats, fam)) : 0.f;
+    }
+    // pitch: to A's note (an octave off counts as near)
     if (fT[ds::fPitchConf] > 0.5f && fC[ds::fPitchConf] > 0.5f)
     {
         float st = (fT[ds::fPitch] - fC[ds::fPitch]) * 12.f;
         while (st > 6.f) st -= 12.f; while (st < -6.f) st += 12.f;
-        v[10] = std::round(st * 10.f) / 10.f;
+        m.pitch = std::round(st * 10.f) / 10.f;
     }
-    float best = eval(v);
-    auto tryList = [&](std::initializer_list<int> idx, const std::vector<std::vector<float>>& options) {
-        for (const auto& opt : options)
+    const double rate = std::pow(2.0, (m.usePitch ? m.pitch : 0.f) / 12.0);
+    // A in C's own time: C will be played at "rate", so A is compared slowed down by it
+    const auto Tc = atRate(T, 1.0 / rate);
+    int off = 0;
+    const auto Cb = shapeShot(C, sr, shapeFrom(neutral), off);
+    // EQ: third-octave levels, A minus C, the overall level difference taken out; then checked and corrected
+    const auto LT = mt::bandLevels(Tc, sr);
+    auto LC = mt::bandLevels(Cb, sr);
+    float topC = -200, topT = -200; for (int k = 0; k < mt::kBands; ++k) { topC = std::max(topC, LC[(size_t) k]); topT = std::max(topT, LT[(size_t) k]); }
+    auto diffCurve = [&](const std::array<float, mt::kBands>& lc) {
+        std::array<float, mt::kBands> d {}; double sum = 0, w = 0;
+        for (int k = 0; k < mt::kBands; ++k) { d[(size_t) k] = LT[(size_t) k] - lc[(size_t) k]; if (k >= 3 && k <= 23) { const double wk = std::pow(10.0, (LT[(size_t) k] - topT) / 20.0); sum += d[(size_t) k] * wk; w += wk; } }
+        const float mean = w > 0 ? (float) (sum / w) : 0.f;
+        for (auto& v : d) v -= mean;
+        return d; };
+    auto limit = [&](std::array<float, mt::kBands>& c) {
+        std::array<float, mt::kBands> sm = c;
+        for (int k = 0; k < mt::kBands; ++k) { float s2 = c[(size_t) k] * 2, ww = 2; if (k > 0) { s2 += c[(size_t) k - 1]; ww += 1; } if (k + 1 < mt::kBands) { s2 += c[(size_t) k + 1]; ww += 1; } sm[(size_t) k] = s2 / ww; }
+        for (int k = 0; k < mt::kBands; ++k)
         {
-            auto t = v; int j = 0; for (int k : idx) t[(size_t) k] = opt[(size_t) j++];
-            const float d = eval(t); if (d < best - 1e-4f) { best = d; v = t; }
+            float v = sm[(size_t) k];
+            const bool emptyC = LC[(size_t) k] < topC - 55.f, emptyT = LT[(size_t) k] < topT - 55.f;
+            if (v > 0 && (emptyC || emptyT)) v = 0;                  // nothing there to bring up (only noise would grow)
+            const float fc = mt::centres()[(size_t) k];
+            c[(size_t) k] = std::clamp(v, -18.f, fc < 80.f ? 4.f : 12.f);
         } };
-    const double lenT = std::exp2(fT[ds::fLen]) - 1.0;           // A's heard length, ms
-    for (int pass = 0; pass < 2; ++pass)
+    m.eq = diffCurve(LC); limit(m.eq);
+    for (int it = 0; it < 3; ++it)
     {
-        { std::vector<std::vector<float>> o; for (float d : { -1.f, -0.5f, 0.5f, 1.f, 12.f, -12.f }) o.push_back({ juce::jlimit(-12.f, 12.f, v[10] + d) }); tryList({ 10 }, o); }
-        {   // length: an end and a fade out (in C's own time: its pitch changes its speed)
-            const double ratio = std::pow(2.0, v[10] / 12.0);
-            std::vector<std::vector<float>> o;
-            o.push_back({ 2000.f, 0.f });
-            for (double f : { 1.0, 1.3, 1.7, 2.3, 3.2, 4.5, 6.5 })
-                for (double fo : { 0.0, 0.3, 0.5, 0.7, 0.9 })
-                {
-                    const double en = juce::jlimit(5.0, 2000.0, lenT * f * ratio);
-                    o.push_back({ (float) en, (float) (en * fo) });
-                }
-            tryList({ 1, 4 }, o);
-        }
-        { std::vector<std::vector<float>> o; for (float t = -12.f; t <= 12.01f; t += 1.5f) o.push_back({ t }); tryList({ 11 }, o); }
-        { std::vector<std::vector<float>> o; for (float t = -9.f; t <= 9.01f; t += 1.5f) o.push_back({ t }); tryList({ 8 }, o); }
-        { std::vector<std::vector<float>> o; for (float t = -9.f; t <= 9.01f; t += 1.5f) o.push_back({ t }); tryList({ 9 }, o); }
-        { std::vector<std::vector<float>> o; for (float t : { 0.f, 0.5f, 1.f, 2.f, 4.f, 8.f }) o.push_back({ t }); tryList({ 2 }, o); }
+        juce::AudioBuffer<float> t; t.makeCopyOf(Cb); mt::applyEq(t, sr, m.eq, 1.f);
+        const auto res = diffCurve(mt::bandLevels(t, sr));
+        for (int k = 0; k < mt::kBands; ++k) m.eq[(size_t) k] += 0.75f * res[(size_t) k];
+        limit(m.eq);
     }
-    m.after = ds::scoreOf(best);
-    m.v = v; m.ok = true;
-    auto num = [](float x, int dec) { return juce::String(x > 0 ? "+" : "") + juce::String(x, dec); };
-    if (std::abs(v[10]) > 0.05f) m.lines.add("PITCH  " + num(v[10], 1) + " ST");
-    if (v[1] < 1999.f) m.lines.add("LENGTH  END " + juce::String(juce::roundToInt(v[1])) + " MS" + (v[4] > 0.5f ? ",  FADE OUT " + juce::String(juce::roundToInt(v[4])) + " MS" : juce::String()));
-    if (std::abs(v[11]) > 0.05f) m.lines.add("TONE  " + juce::String(v[11] < 0 ? "DARKER " : "BRIGHTER ") + juce::String(std::abs(v[11]), 1) + " DB");
-    if (std::abs(v[8]) > 0.05f) m.lines.add("PUNCH  " + num(v[8], 1) + " DB");
-    if (std::abs(v[9]) > 0.05f) m.lines.add("SUSTAIN  " + num(v[9], 1) + " DB");
-    if (v[2] > 0.05f) m.lines.add("FADE IN  " + juce::String(v[2], 1) + " MS  (SOFTER ATTACK)");
-    if (m.lines.isEmpty()) m.lines.add("NOTHING TO CHANGE: IT IS AS NEAR AS IT GETS");
+    // ROOM: only when A has clearly more room than C; the decay from A's tail, the amount by trying
+    juce::AudioBuffer<float> Ce; Ce.makeCopyOf(Cb); if (m.useEq) mt::applyEq(Ce, sr, m.eq, 1.f);
+    float roomT, slopeT, roomC, slopeC;
+    mt::tailOf(Tc, sr, roomT, slopeT); mt::tailOf(Ce, sr, roomC, slopeC);
+    m.roomMix = 0;
+    if (roomT > roomC + 3.f)
+    {
+        m.roomRt = juce::jlimit(0.12f, 2.0f, slopeT < -5.f ? -60.f / slopeT : 0.6f);
+        float bestErr = std::abs(roomT - roomC);
+        for (float mix : { 0.02f, 0.035f, 0.05f, 0.075f, 0.1f, 0.14f, 0.2f, 0.28f, 0.4f })
+        {
+            juce::AudioBuffer<float> t; t.makeCopyOf(Ce); mt::addRoom(t, sr, m.roomRt, mix, 2.f);
+            float rr, ss; mt::tailOf(t, sr, rr, ss);
+            if (std::abs(rr - roomT) < bestErr) { bestErr = std::abs(rr - roomT); m.roomMix = mix; m.roomPre = 2.f; }
+        }
+    }
+    juce::AudioBuffer<float> Cr; Cr.makeCopyOf(Ce); if (m.useRoom && m.roomMix > 0) mt::addRoom(Cr, sr, m.roomRt, m.roomMix, m.roomPre);
+    // SHAPE: the loudness over time in 3 bands, A minus C, twice checked
+    const auto ET = mt::envelopes(Tc, sr);
+    auto shapeLimit = [&](std::array<float, mt::kEnvB * mt::kEnvT>& g, const std::array<float, mt::kEnvB * mt::kEnvT>& ec) {
+        for (int t = 0; t < mt::kEnvT; ++t)
+            for (int b = 0; b < mt::kEnvB; ++b)
+            {
+                auto& v = g[(size_t) (t * mt::kEnvB + b)];
+                if (ET[(size_t) (t * mt::kEnvB + b)] < -60.f && ec[(size_t) (t * mt::kEnvB + b)] < -60.f) v = 0;
+                v = std::clamp(v, -15.f, t >= 6 ? 6.f : 9.f);       // late on: a tail is not pumped up out of noise
+            }
+        auto sm = g;
+        for (int t = 0; t < mt::kEnvT; ++t)
+            for (int b = 0; b < mt::kEnvB; ++b)
+            {
+                float s2 = g[(size_t) (t * mt::kEnvB + b)] * 2, ww = 2;
+                if (t > 0) { s2 += g[(size_t) ((t - 1) * mt::kEnvB + b)]; ww += 1; }
+                if (t + 1 < mt::kEnvT) { s2 += g[(size_t) ((t + 1) * mt::kEnvB + b)]; ww += 1; }
+                sm[(size_t) (t * mt::kEnvB + b)] = s2 / ww;
+            }
+        g = sm; };
+    auto EC = mt::envelopes(Cr, sr);
+    for (int k = 0; k < mt::kEnvB * mt::kEnvT; ++k) m.shape[(size_t) k] = ET[(size_t) k] - EC[(size_t) k];
+    shapeLimit(m.shape, EC);
+    for (int it = 0; it < 2; ++it)
+    {
+        juce::AudioBuffer<float> t; t.makeCopyOf(Cr); mt::applyShape(t, sr, m.shape, 1.f);
+        const auto e2 = mt::envelopes(t, sr);
+        for (int k = 0; k < mt::kEnvB * mt::kEnvT; ++k) m.shape[(size_t) k] += 0.7f * (ET[(size_t) k] - e2[(size_t) k]);
+        shapeLimit(m.shape, e2);
+    }
+    // LENGTH: after 400 ms the shape stops; a longer tail than A's is ended with a fade
+    {
+        juce::AudioBuffer<float> t; t.makeCopyOf(Cr); if (m.useShape) mt::applyShape(t, sr, m.shape, 1.f);
+        auto endOf = [&](const juce::AudioBuffer<float>& x) {   // ms after the onset where it stays 45 dB down
+            const int n = x.getNumSamples(), on = mt::onsetOf(x), H = std::max(1, (int) (0.002 * sr));
+            float pk = 1e-9f; for (int c = 0; c < x.getNumChannels(); ++c) pk = std::max(pk, x.getMagnitude(c, 0, n));
+            const float thr = pk * 0.0056f; int last = on;
+            for (int i = on; i < n; i += H) if (x.getMagnitude(0, i, std::min(H, n - i)) > thr) last = i;
+            return std::make_pair((last - on) / sr * 1000.0, on / sr * 1000.0); };
+        const auto [endT, onT] = endOf(Tc);
+        const auto [endC, onC] = endOf(t);
+        juce::ignoreUnused(onT);
+        if (endC > endT * 1.15 && endT > 20)
+        {
+            m.en = (float) juce::jlimit(5.0, 2000.0, onC + endT * 1.1);
+            m.fo = (float) juce::jlimit(0.0, (double) m.en, endT * 0.5);
+        }
+    }
+    // how near it got (as heard: at its pitch, with its length)
+    {
+        auto v = neutral; if (m.usePitch) v[10] = m.pitch; if (m.useLen) { v[1] = m.en; v[4] = m.fo; }
+        ds::Feat f;
+        m.after = ds::fingerprint(heard(C, v, &m), sr, f) ? ds::scoreOf(ds::distance(fT, f, stats, fam)) : 0.f;
+    }
     return m;
 }
 
-void DrumSlicerProcessor::applyMatch(int pad, const MatchSuggestion& m, float amount)
+void DrumSlicerProcessor::startMatch(int pad)
 {
-    if (!m.ok || pad < 0 || pad >= ds::kPads) return;
+    auto r = getResult();
+    if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid || r->pads[(size_t) pad].user.getNumSamples() == 0 || matching.load()) return;
+    const auto& pd = r->pads[(size_t) pad];
+    if (pd.audio.getMagnitude(0, pd.audio.getNumSamples()) < 1.0e-6f) return;   // A has no sound (cleared): nothing to match to
     setPadSource(pad, 2);                            // C is the one shown (and shaped)
-    const auto cur = shownShape(pad);
-    undoShape[(size_t) pad] = cur; undoValid[(size_t) pad] = true;
-    auto v = m.v;
-    if (amount < 0.999f) for (int k = 0; k < kShapeN; ++k) v[(size_t) k] = cur[(size_t) k] + amount * (m.v[(size_t) k] - cur[(size_t) k]);
-    showShape(pad, v);
+    std::array<float, kShapeN> vA = shownShape(pad), neutral {};
+    for (int k = 0; k < kShapeN; ++k)
+        if (auto* p = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(pad))) neutral[(size_t) k] = p->convertFrom0to1(p->getDefaultValue());
+    { std::lock_guard<std::mutex> g(slotLock); if (slots[(size_t) pad][0].valid) vA = slots[(size_t) pad][0].v; }
+    const auto vCnow = shownShape(pad);
+    const auto prev = getMatch(pad);
+    auto ix = library->index();
+    auto stats = std::make_shared<ds::LibIndex>();
+    if (ix && ix->oneShots >= 50) { stats->mean = ix->mean; stats->sd = ix->sd; stats->oneShots = ix->oneShots; } else stats->stats();
+    auto A = std::make_shared<juce::AudioBuffer<float>>(); A->makeCopyOf(pd.audio);
+    auto C = std::make_shared<juce::AudioBuffer<float>>(); C->makeCopyOf(pd.user);
+    const double sr = r->sr; const auto fam = ds::familyOf(pd.name);
+    matching = true;
+    { std::lock_guard<std::mutex> g(matchLock); matchMsg = "MATCHING ..."; }
+    std::thread([this, a = alive, A, C, vA, neutral, vCnow, prev, stats, sr, fam, pad]
+    {
+        auto m = computeMatch(*A, vA, *C, neutral, vCnow, prev, prev.on, sr, fam, *stats);
+        juce::MessageManager::callAsync([this, a, m, pad, neutral]
+        {
+            if (!a->load()) return;
+            matching = false;
+            auto r2 = getResult();
+            if (!r2 || !r2->pads[(size_t) pad].valid || r2->pads[(size_t) pad].user.getNumSamples() == 0) return;
+            setPadSource(pad, 2);
+            { std::lock_guard<std::mutex> g(matchLock); match[(size_t) pad] = m; ++matchVer[(size_t) pad];
+              matchMsg = "MATCHED  " + juce::String(juce::roundToInt(m.before)) + "% -> " + juce::String(juce::roundToInt(m.after)) + "%"; }
+            // the knobs it sets (you can still turn them): pitch, length; the amount back to 100 %
+            auto v = shownShape(pad);
+            v[10] = m.usePitch ? m.pitch : neutral[10];
+            v[1] = m.useLen ? m.en : neutral[1]; v[4] = m.useLen ? m.fo : neutral[4];
+            v[11] = neutral[11]; v[8] = neutral[8]; v[9] = neutral[9];   // tone / punch / sustain: the match does that now
+            showShape(pad, v);
+            if (auto* p = apvts.getParameter("mamt" + juce::String(pad))) p->setValueNotifyingHost(1.f);
+            audition(pad);
+        });
+    }).detach();
+}
+
+void DrumSlicerProcessor::setMatchPart(int pad, int part, bool on)
+{
+    if (pad < 0 || pad >= ds::kPads) return;
+    MatchData m;
+    {
+        std::lock_guard<std::mutex> g(matchLock);
+        auto& md = match[(size_t) pad];
+        if (!md.on) return;
+        if (part == partEq) md.useEq = on; else if (part == partShape) md.useShape = on; else if (part == partRoom) md.useRoom = on;
+        else if (part == partPitch) md.usePitch = on; else if (part == partLen) md.useLen = on;
+        ++matchVer[(size_t) pad]; m = md;
+    }
+    if (part == partPitch || part == partLen)
+    {   // these live on the knobs
+        auto v = shownShape(pad);
+        if (part == partPitch) v[10] = on ? m.pitch : 0.f;
+        else { v[1] = on ? m.en : 2000.f; v[4] = on ? m.fo : 0.f; }
+        showShape(pad, v);
+    }
     audition(pad);
 }
 
-void DrumSlicerProcessor::undoMatch(int pad)
+void DrumSlicerProcessor::removeMatch(int pad)
 {
-    if (!canUndoMatch(pad)) return;
-    setPadSource(pad, 2);
-    showShape(pad, undoShape[(size_t) pad]);
-    undoValid[(size_t) pad] = false;
+    if (pad < 0 || pad >= ds::kPads) return;
+    MatchData m;
+    { std::lock_guard<std::mutex> g(matchLock); m = match[(size_t) pad]; match[(size_t) pad].on = false; ++matchVer[(size_t) pad]; matchMsg.clear(); }
+    if (m.on)
+    {
+        auto v = shownShape(pad);
+        if (m.usePitch) v[10] = 0.f;
+        if (m.useLen) { v[1] = 2000.f; v[4] = 0.f; }
+        showShape(pad, v);
+    }
     audition(pad);
+}
+
+void DrumSlicerProcessor::matchOff(int pad)
+{
+    if (pad < 0 || pad >= ds::kPads) return;
+    std::lock_guard<std::mutex> g(matchLock);
+    if (match[(size_t) pad].on) { match[(size_t) pad].on = false; ++matchVer[(size_t) pad]; }
+}
+
+juce::ValueTree DrumSlicerProcessor::matchTree() const
+{
+    juce::ValueTree t("MATCH");
+    std::lock_guard<std::mutex> g(matchLock);
+    for (int p = 0; p < ds::kPads; ++p)
+    {
+        const auto& m = match[(size_t) p];
+        if (!m.on) continue;
+        juce::StringArray a;
+        a.add(juce::String((m.useEq ? 1 : 0) | (m.useShape ? 2 : 0) | (m.useRoom ? 4 : 0) | (m.usePitch ? 8 : 0) | (m.useLen ? 16 : 0)));
+        for (float v : m.eq) a.add(juce::String(v, 3));
+        for (float v : m.shape) a.add(juce::String(v, 3));
+        for (float v : { m.roomRt, m.roomMix, m.roomPre, m.pitch, m.en, m.fo, m.before, m.after }) a.add(juce::String(v, 4));
+        t.setProperty("p" + juce::String(p), a.joinIntoString(","), nullptr);
+    }
+    return t;
+}
+
+void DrumSlicerProcessor::matchFromTree(const juce::ValueTree& t)
+{
+    std::lock_guard<std::mutex> g(matchLock);
+    for (int p = 0; p < ds::kPads; ++p)
+    {
+        auto& m = match[(size_t) p];
+        m = MatchData(); ++matchVer[(size_t) p];
+        if (!t.isValid()) continue;
+        juce::StringArray a; a.addTokens(t.getProperty("p" + juce::String(p)).toString(), ",", "");
+        if (a.size() != 1 + mt::kBands + mt::kEnvB * mt::kEnvT + 8) continue;
+        int i = 0;
+        const int fl = a[i++].getIntValue();
+        m.useEq = fl & 1; m.useShape = fl & 2; m.useRoom = fl & 4; m.usePitch = fl & 8; m.useLen = fl & 16;
+        for (auto& v : m.eq) v = a[i++].getFloatValue();
+        for (auto& v : m.shape) v = a[i++].getFloatValue();
+        for (float* v : { &m.roomRt, &m.roomMix, &m.roomPre, &m.pitch, &m.en, &m.fo, &m.before, &m.after }) *v = a[i++].getFloatValue();
+        m.on = true;
+    }
 }
 
 // ---------------------------------------------------------------- your samples ("C")
@@ -1056,8 +1352,10 @@ bool DrumSlicerProcessor::setPadSample(int pad, const juce::File& f)
     auto r = std::make_shared<ds::Result>(*cur);
     r->pads[(size_t) pad].user = std::move(shot);
     r->pads[(size_t) pad].userName = f.getFileNameWithoutExtension();
+    r->pads[(size_t) pad].userPath = f.getFullPathName();
     publish(r, getKitDir(), getLoopFile(), orphan());
     resetShape(pad, 2);                              // a new sample of yours starts unshaped
+    matchOff(pad);
     setPadSource(pad, 2);
     audition(pad);
     return true;
@@ -1068,7 +1366,8 @@ void DrumSlicerProcessor::clearPadSample(int pad)
     auto cur = getResult();
     if (!cur || pad < 0 || pad >= ds::kPads) return;
     auto r = std::make_shared<ds::Result>(*cur);
-    r->pads[(size_t) pad].user.setSize(0, 0); r->pads[(size_t) pad].userName.clear();
+    r->pads[(size_t) pad].user.setSize(0, 0); r->pads[(size_t) pad].userName.clear(); r->pads[(size_t) pad].userPath.clear();
+    matchOff(pad);
     publish(r, getKitDir(), getLoopFile(), orphan());
     setPadSource(pad, 0);
 }
@@ -1134,6 +1433,7 @@ juce::File DrumSlicerProcessor::saveKit(const juce::String& rawName)
     auto st = apvts.copyState();
     for (auto id : { "loopPath", "kitPath", "uiWidth" }) st.removeProperty(id, nullptr);
     st.appendChild(slotsTree(), nullptr);
+    st.appendChild(matchTree(), nullptr);
     if (auto xml = st.createXml()) ok = ok && ds::writeText(ds::kitData(tmp).getChildFile("settings.xml"), xml->toString());
     // ready-to-use files next to it: the sounds as you hear them + both MIDI versions
     auto sh = getShaped();
@@ -1193,6 +1493,7 @@ void DrumSlicerProcessor::loadKit(const juce::File& kit, bool applySettings)
                 if (auto* p = apvts.getParameter(id)) p->setValueNotifyingHost(p->convertTo0to1((float) c.getProperty("value")));
             }
             slotsFromTree(vt->getChildWithName("SLOTS"));          // the kit's other A / B / C shapes
+            matchFromTree(vt->getChildWithName("MATCH"));
             publish(r, kit, ds::kitLoop(kit));
             setStatus("KIT LOADED");
             busy = false;
