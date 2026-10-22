@@ -6,7 +6,7 @@
 #if HAS_ASSETS
  #include <BinaryData.h>
 #endif
-bool rekitHoldFront(void* nativeHandle, bool on, bool wasHeld);   // WinRaise.cpp (does nothing outside Windows)
+void rekitRaiseFrame(void* nativeHandle);   // WinRaise.cpp (does nothing outside Windows)
 
 // =====================================================================================================
 //  REKIT UI  -  dark graphite, one amber accent.   by Pouria Motabean
@@ -1567,7 +1567,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.12.4";
+            const juce::String ver = "v1.13.0";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -1962,21 +1962,20 @@ public:
         const int w = juce::jlimit(700, 2000, (int) proc.apvts.state.getProperty("uiWidth", 1000));
         setSize(w, juce::roundToInt(w * 0.6));
     }
-    // Cubase sometimes puts a just-inserted instrument's window behind its own right after opening it: the frame is
-    // held in front for the first second (so it never goes), then let go as a normal window
+    // Cubase sometimes puts a just-inserted instrument's window behind its own (until the instrument button is
+    // pressed): when the window first shows, its frame is brought to the front - once, and only if it is not there
     void parentHierarchyChanged() override
     {
         if (raised || getPeer() == nullptr) return;
         raised = true;
-        held = rekitHoldFront(getPeer()->getNativeHandle(), true, false);
-        juce::Timer::callAfterDelay(1000, [sp = juce::Component::SafePointer<DrumSlicerEditor>(this)]
-        {
-            if (sp != nullptr && sp->getPeer() != nullptr) rekitHoldFront(sp->getPeer()->getNativeHandle(), false, sp->held);
-            if (sp != nullptr) sp->held = false;
-        });
+        for (int ms : { 120, 600 })
+            juce::Timer::callAfterDelay(ms, [sp = juce::Component::SafePointer<DrumSlicerEditor>(this)] { if (sp != nullptr) sp->raiseFrame(); });
     }
-    ~DrumSlicerEditor() override { if (held && getPeer() != nullptr) rekitHoldFront(getPeer()->getNativeHandle(), false, true); }
-    bool raised = false, held = false;
+    void raiseFrame()
+    {
+        if (auto* peer = getPeer()) rekitRaiseFrame(peer->getNativeHandle());
+    }
+    bool raised = false;
     void resized() override
     {
         panel.setBounds(0, 0, 1000, 600);
