@@ -243,8 +243,10 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& rawIn, double
     if (rk > 1.001f)
     {   // ROOM above "loop": more room on any sound (raw, matched, the loop's own), as a send after the shape:
         // a longer, deeper tail (it rings out after END), up to about the dry level at 200
-        const float rt = std::max(1.2f, match != nullptr && match->on ? match->roomRt * 1.5f : 0.f);
-        mt::addRoom(o, sr, std::min(2.5f, rt), (rk - 1.f) * 0.55f, 12.f);
+        // 2.3.2: much more at the top - longer (1 s -> 3 s) and wetter (at 200 a little above the dry level)
+        const float x = rk - 1.f;
+        const float rt = std::max(1.0f + 2.0f * x, match != nullptr && match->on ? match->roomRt * 1.5f : 0.f);
+        mt::addRoom(o, sr, std::min(3.0f, rt), x * (0.6f + 0.6f * x), 14.f);
     }
     return o;
 }
