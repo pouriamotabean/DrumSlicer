@@ -565,7 +565,7 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
 
     if (midiPlay.load() && audioSeq && audioSeq->loopTicks > 0)
     {   // the MIDI preview: notes started like host notes, sample-exact inside the block
-        if (midiRestart.exchange(false)) seqPos = 0;
+        if (midiRestart.exchange(false)) seqPos = juce::jlimit(0.0, audioSeq->loopTicks - 1.0, (double) midiStartFrac.load() * audioSeq->loopTicks);
         const auto& sq = *audioSeq;
         const double spt = 60.0 / midiBpm() / 480.0 * hostSR;
         double remaining = numSamples, offset = 0;
@@ -1635,7 +1635,8 @@ void DrumSlicerProcessor::buildKit()
         // Locked (keep the loop's own sound) and pads you added (no hits in the loop) are kept too.
         const int src = padSource(p);
         const bool yours = src == 2 && pd.user.getNumSamples() > 0;
-        if (padLocked(p) || pd.hits == 0 || yours) { if (pd.userPath.isNotEmpty()) taken.push_back(pd.userPath); continue; }
+        juce::ignoreUnused(yours);   // 2.2: the magic key builds every pad again - only locked pads (your own choices) stay
+        if (padLocked(p) || pd.hits == 0) { if (pd.userPath.isNotEmpty()) taken.push_back(pd.userPath); continue; }
         const bool useB = src == 1 && pd.best.getNumSamples() > 0;
         const auto& target = useB ? pd.best : pd.audio;
         if (target.getMagnitude(0, target.getNumSamples()) < 1.0e-6f) continue;   // a cleared pad: nothing to look like
@@ -1654,7 +1655,7 @@ void DrumSlicerProcessor::buildKit()
         for (auto& m : library->nearest(target, r->sr, pd.name, 30, holder)) if (m.e != nullptr) j.paths.push_back(m.e->path);
         if (!j.paths.empty()) jobs->push_back(std::move(j));
     }
-    if (jobs->empty()) { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILD MY KIT: NOTHING TO BUILD (EVERY PAD PLAYS YOUR SAMPLE OR IS LOCKED - SWITCH TO LOOP TO BUILD ALL AGAIN)"; return; }
+    if (jobs->empty()) { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILD MY KIT: NOTHING TO BUILD (EVERY PAD IS LOCKED)"; return; }
     const double sr = r->sr;
     building = true; matching = true;
     { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILDING KIT ..."; }

@@ -114,3 +114,9 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 - Pad page: loop | raw | matched (loop only listens, the pad keeps what it plays). Sound editor: fixed view.
 - Samples: path back (< Kick  Samples), one "like my sample" switch (else: like the pad's card), keep on pad,
   "trying on ..." notice. Trim flags grab at their dot. Bigger display, smaller knobs / pads.
+
+## v2.2.0
+- Display full width; bottom: keys | 8 pads (128x84) | 8 knobs in 2 rows (no banks) + loop / your kit.
+- BUILD MY KIT = the magic key again: every pad from scratch except locked ones (manual choices lock).
+- Pattern: orange cursor (drag on the strip above the rows), play / stop and zoom - + on the page, play starts at the cursor.
+- Pad page: "loop" lights while it sounds. Kit page: only real sounds + "add a sound".

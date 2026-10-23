@@ -224,7 +224,6 @@ public:
         {
             const auto& pd = r->pads[(size_t) p];
             if (!pd.valid || pd.hits == 0 || padLocked(p)) continue;
-            if (padSource(p) == 2 && pd.user.getNumSamples() > 0) continue;
             ++n;
         }
         return n;
@@ -290,6 +289,9 @@ private:
     std::atomic<bool> midiPlay { false }, midiRestart { false };
     double seqPos = 0;                               // ticks (audio thread)
     std::atomic<float> seqFrac { 0.f };
+public:
+    std::atomic<float> midiStartFrac { 0.f };       // the pattern's cursor: play starts here (0..1 of the turn)
+private:
     std::shared_ptr<const ds::Source> source, audioSource;
     std::atomic<juce::int64> selS { 0 }, selE { 0 }, srcSeek { -1 };
     std::atomic<bool> srcPlay { false };
