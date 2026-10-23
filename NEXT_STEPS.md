@@ -130,3 +130,6 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 - LOOPS page: your loop folders inside ReKit, click = listen as it is, load this loop / other file.
 - ROOM above "loop" is a send after the shape: works on raw / unmatched sounds too, deeper (up to ~dry level), its tail rings past END.
 - Next (2.4, engine): closed hats were labelled O-HAT (OLIVER_100 808 loop) -> label by decay; clap+snare layered (burst pattern) -> CLAP / snare+clap, bursts = one hit; kick doubles 12-34 ms; loudness per instrument band.
+
+## v2.3.3
+- FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.

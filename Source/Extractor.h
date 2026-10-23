@@ -569,7 +569,7 @@ inline std::shared_ptr<Result> unembedResult(const juce::ValueTree& e)
         if (t.hasProperty("c") && dec(t.getProperty("c").toString(), pd.user)) { pd.userName = t.getProperty("cname").toString(); pd.userPath = t.getProperty("cpath").toString(); }
         if (pd.user.getNumSamples() > 0 && t.hasProperty("cbase") && dec(t.getProperty("cbase").toString(), pd.userBase))
         { pd.layerName = t.getProperty("lname").toString(); pd.layerPath = t.getProperty("lpath").toString(); }
-        else pd.user.setSize(0, 0);
+        else pd.clearLayer();          // (2.3.3: this cleared YOUR SAMPLE itself when it had no layer - lost on reopen)
         pd.valid = true;
     }
     juce::StringArray hl; hl.addTokens(e.getProperty("hitlist").toString(), " ", "");
