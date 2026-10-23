@@ -140,7 +140,19 @@ public:
     // among the sounds most like A; kept only when it gets nearer than your sample alone. REMOVE LAYER: back to yours.
     void startLayer(int pad);
     void removeLayer(int pad);
-    void applyMatch(int pad, const MatchData& m, const std::array<float, kShapeN>& neutral, const juce::String& msg);
+    void applyMatch(int pad, const MatchData& m, const std::array<float, kShapeN>& neutral, const juce::String& msg, bool listen = true);
+    // BUILD MY KIT: every pad that is not locked gets the sample of your folders that comes nearest to A after a
+    // match (each file on one pad only), matched, and layered where a layer clearly helps. The 30 ranked
+    // candidates of each pad stay: step through them (< >), each one already matched. Choosing a sound yourself
+    // (a file, a suggestion) locks the pad: a new BUILD keeps it.
+    struct Suggest { std::vector<juce::String> paths; std::vector<float> after; std::vector<MatchData> md; int chosen = -1; bool locked = false; };
+    void buildKit();
+    bool isBuilding() const { return building.load(); }
+    int suggestionCount(int pad) const { std::lock_guard<std::mutex> g(suggLock); return pad >= 0 && pad < ds::kPads ? (int) sugg[(size_t) pad].paths.size() : 0; }
+    int suggestionIndex(int pad) const { std::lock_guard<std::mutex> g(suggLock); return pad >= 0 && pad < ds::kPads ? sugg[(size_t) pad].chosen : -1; }
+    bool padLocked(int pad) const { std::lock_guard<std::mutex> g(suggLock); return pad >= 0 && pad < ds::kPads && sugg[(size_t) pad].locked; }
+    void setPadLocked(int pad, bool on) { std::lock_guard<std::mutex> g(suggLock); if (pad >= 0 && pad < ds::kPads) sugg[(size_t) pad].locked = on; }
+    void stepSuggestion(int pad, int dir);
     juce::String matchMessage() const { std::lock_guard<std::mutex> g(matchLock); return matchMsg; }
     // SIMILAR, ranked by how near each sound gets AFTER a match (its texture is what a match cannot change):
     // every candidate is matched to the pad's sound in the background
@@ -224,6 +236,12 @@ private:
     juce::String matchMsg;
     void matchOff(int pad);                          // the sample C changed: its match is gone
     juce::ValueTree matchTree() const;
+    juce::ValueTree suggTree() const;
+    void suggFromTree(const juce::ValueTree& t);
+    mutable std::mutex suggLock;
+    std::array<Suggest, ds::kPads> sugg;
+    std::atomic<bool> building { false };
+    void useSuggestion(int pad, int idx, const MatchData& m);
     void matchFromTree(const juce::ValueTree& t);
     std::array<std::array<Slot, 3>, ds::kPads> slots {};
     std::array<int, ds::kPads> slotOwner { -1, -1, -1, -1, -1, -1, -1, -1 };

@@ -1128,6 +1128,14 @@ public:
                                                    : "A sample of yours: drop a file on the pad (or right-click the pad > LOAD YOUR SAMPLE)");
             srcBtn[(size_t) b].onClick = [this, b] { setSource(selected, b); };
         }
+        addAndMakeVisible(buildBtn);
+        buildBtn.setButtonText("BUILD MY KIT"); buildBtn.getProperties().set("primary", true);
+        buildBtn.setTooltip("Every pad that is not locked gets the nearest sample of your folders, matched (layered where it helps). Then < > on a pad steps through its 30 suggestions.");
+        buildBtn.onClick = [this]
+        {
+            if (proc.getResult() == nullptr) { toast("ANALYSE A LOOP FIRST"); return; }
+            proc.buildKit(); toast("BUILDING YOUR KIT ...");
+        };
         addAndMakeVisible(matchBtn);
         matchBtn.setButtonText("MATCH TO A");
         matchBtn.setTooltip("Shape your sample C (pitch, length, tone, punch, sustain, fade in) to come nearest to A - shown first, you decide");
@@ -1252,11 +1260,15 @@ public:
     juce::Rectangle<int> padRect(int i) const { return { 30 + (i % 4) * 152, 236 + (i / 4) * 100, 146, 92 }; }
     bool padHasSound(int i) const { auto r = proc.getResult(); return r && i >= 0 && i < ds::kPads && r->pads[(size_t) i].valid; }
     bool padHasC(int i) const { auto r = proc.getResult(); return r && r->pads[(size_t) i].user.getNumSamples() > 0; }
+    juce::Rectangle<int> suggRect(int i) const { auto r = padRect(i); return { r.getRight() - 82, r.getY() + 20, 72, 18 }; }
+    juce::Rectangle<int> lockRect(int i) const { auto r = padRect(i); return { r.getRight() - 104, r.getY() + 20, 18, 18 }; }
+    bool padHasSugg(int i) const { return proc.suggestionCount(i) > 0; }
     juce::Rectangle<int> abRect(int i) const { auto r = padRect(i); const int w = padHasC(i) ? 60 : 40; return { r.getRight() - 10 - w, r.getBottom() - 30, w, 20 }; }
 
     void resized() override
     {
         kitsBtn.setBounds(display.getRight() - 238, display.getY() + 10, 60, 22);
+        buildBtn.setBounds(690, 27, 140, 26);
         loadBtn.setBounds(display.getRight() - 172, display.getY() + 10, 60, 22);
         reBtn.setBounds(display.getRight() - 106, display.getY() + 10, 94, 22);
         for (int i = 0; i < ds::kPads; ++i)
@@ -1410,6 +1422,19 @@ public:
                 else toast("ANALYSE A LOOP FIRST");
                 updateVisibility(); repaint(); return;
             }
+            if (res && res->pads[(size_t) i].valid && padHasSugg(i) && suggRect(i).contains(e.getPosition()))
+            {   // < > : the pad's suggestions, each already matched
+                const auto sr = suggRect(i);
+                const int x = e.getPosition().x - sr.getX();
+                if (x < 20) proc.stepSuggestion(i, -1); else if (x > sr.getWidth() - 20) proc.stepSuggestion(i, 1);
+                updateVisibility(); repaint(); return;
+            }
+            if (res && res->pads[(size_t) i].valid && (padHasSugg(i) || proc.padLocked(i)) && lockRect(i).contains(e.getPosition()))
+            {
+                proc.setPadLocked(i, !proc.padLocked(i));
+                toast(proc.padLocked(i) ? "LOCKED: BUILD MY KIT KEEPS THIS PAD" : "UNLOCKED: BUILD MY KIT MAY CHANGE THIS PAD");
+                repaint(); return;
+            }
             if (res && res->pads[(size_t) i].valid && abRect(i).contains(e.getPosition()))
             {
                 const auto ab = abRect(i); const int n = padHasC(i) ? 3 : 2;
@@ -1502,12 +1527,15 @@ public:
             matchBtn.setToggleState(canMatch && md.on, juce::dontSendNotification);
             for (int i = 0; i < ds::kPads; ++i) mamt[(size_t) i].setEnabled(i == selected && canMatch && md.on);
             const auto msg = proc.matchMessage();
-            if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY") || msg.startsWith("LAYERED") || msg.startsWith("NO LAYER") || msg.startsWith("LAYER REMOVED")) toast(msg); }
+            if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY") || msg.startsWith("LAYERED") || msg.startsWith("NO LAYER") || msg.startsWith("LAYER REMOVED")
+                                                                     || msg.startsWith("KIT BUILT") || msg.startsWith("BUILD MY KIT") || msg.startsWith("SUGGESTION")) toast(msg); }
         }
         {   // a file that could not be read keeps the loop you had: said out loud, not only in the status line
             const auto st = proc.getStatus();
             if (st != lastStatus) { lastStatus = st; if (st.startsWith("COULD NOT")) toast(st + "  -  THE LOOP YOU HAD STAYS"); }
         }
+        buildBtn.setEnabled(res != nullptr && !proc.isMatching());
+        buildBtn.setButtonText(proc.isBuilding() ? proc.matchMessage().replace("BUILDING KIT  ", "BUILDING ").replace("BUILDING KIT ...", "BUILDING ...") : juce::String("BUILD MY KIT"));
         playMidi.setToggleState(proc.isMidiPlaying(), juce::dontSendNotification);
         playMidi.setEnabled(res != nullptr);
         if (!res && proc.isMidiPlaying()) proc.playMidi(false);
@@ -1567,7 +1595,7 @@ private:
            #ifdef JucePlugin_VersionString
             const juce::String ver = "v" JucePlugin_VersionString;
            #else
-            const juce::String ver = "v1.13.0";
+            const juce::String ver = "v1.14.0";
            #endif
             const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
@@ -1581,7 +1609,7 @@ private:
         const auto c = !has ? ui::faint : (m >= 0.9 ? ui::amber : juce::Colour(0xffff7a59));
         g.setColour(c.withAlpha(0.9f)); g.drawRoundedRectangle(pill, 13.f, 1.2f);
         g.setFont(ui::font(9.5f, true, 0.4f)); g.setColour(c.withAlpha(0.75f));
-        g.drawText("MATCH", pill.withTrimmedLeft(18).toNearestInt(), juce::Justification::centredLeft);
+        g.drawText("REPLAYS", pill.withTrimmedLeft(16).toNearestInt(), juce::Justification::centredLeft);
         g.setFont(ui::font(14.f, true, 0.05f)); g.setColour(c);
         g.drawText(has ? juce::String(juce::roundToInt(100.0 * m)) + "%" : juce::String("--"), pill.withTrimmedRight(16).toNearestInt(), juce::Justification::centredRight);
     }
@@ -1853,6 +1881,34 @@ private:
             }
             g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.1f));
             g.drawText(juce::MidiMessage::getMidiNoteName(res->pads[(size_t) i].note, true, true, 3), juce::Rectangle<float>(r.getX() + 14, r.getBottom() - 24, 60, 12).toNearestInt(), juce::Justification::centredLeft);
+            if (padHasSugg(i))
+            {   // < 2/30 >
+                const auto sr = suggRect(i).toFloat();
+                const int n = proc.suggestionCount(i), k = proc.suggestionIndex(i);
+                g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(sr, 5.f);
+                g.setColour(ui::panelEdge.brighter(0.2f)); g.drawRoundedRectangle(sr.reduced(0.5f), 5.f, 1.f);
+                g.setFont(ui::font(11.f, true)); g.setColour(k > 0 ? ui::text : ui::faint);
+                g.drawText("<", sr.withWidth(20.f).toNearestInt(), juce::Justification::centred);
+                g.setColour(k + 1 < n ? ui::text : ui::faint);
+                g.drawText(">", sr.withTrimmedLeft(sr.getWidth() - 20.f).toNearestInt(), juce::Justification::centred);
+                g.setFont(ui::font(9.f, true)); g.setColour(ui::dim);
+                g.drawText(k >= 0 ? juce::String(k + 1) + "/" + juce::String(n) : "-/" + juce::String(n), sr.reduced(18.f, 0.f).toNearestInt(), juce::Justification::centred);
+            }
+            if (padHasSugg(i) || proc.padLocked(i))
+            {   // the lock: shut = BUILD MY KIT keeps this pad
+                const auto lr = lockRect(i).toFloat();
+                const bool on = proc.padLocked(i);
+                g.setColour(on ? ui::amber : juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(lr, 4.f);
+                g.setColour(on ? ui::amber : ui::panelEdge.brighter(0.2f)); g.drawRoundedRectangle(lr.reduced(0.5f), 4.f, 1.f);
+                const auto body = juce::Rectangle<float>(lr.getCentreX() - 4.5f, lr.getCentreY() - 1.f, 9.f, 6.5f);
+                const auto ink = on ? juce::Colour(0xff1a1205) : ui::dim;
+                g.setColour(ink); g.fillRoundedRectangle(body, 1.2f);
+                juce::Path sh; const float cx = lr.getCentreX(), top = lr.getCentreY() - 5.5f;
+                sh.startNewSubPath(cx - 3.f, body.getY());
+                sh.lineTo(cx - 3.f, top + 2.5f); sh.quadraticTo(cx - 3.f, top, cx, top); sh.quadraticTo(cx + 3.f, top, cx + 3.f, top + 2.5f);
+                sh.lineTo(cx + 3.f, on ? body.getY() : top + 3.5f);
+                g.strokePath(sh, juce::PathStrokeType(1.4f));
+            }
             const auto ab = abRect(i).toFloat();
             const int src = proc.padSource(i), nsrc = padHasC(i) ? 3 : 2;
             g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(ab, 5.f);
@@ -1932,7 +1988,7 @@ private:
     std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch, tone, mamt;
     juce::Slider master, sens, grid, bpm;
     std::vector<std::unique_ptr<juce::SliderParameterAttachment>> atts;
-    juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn, browseBtn, matchBtn;
+    juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn, browseBtn, matchBtn, buildBtn;
     KitBrowser kitBrowser { proc };
     SampleBrowser samples { proc };
     juce::String lastMatchMsg, lastStatus;
