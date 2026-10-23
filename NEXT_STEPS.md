@@ -120,3 +120,8 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 - BUILD MY KIT = the magic key again: every pad from scratch except locked ones (manual choices lock).
 - Pattern: orange cursor (drag on the strip above the rows), play / stop and zoom - + on the page, play starts at the cursor.
 - Pad page: "loop" lights while it sounds. Kit page: only real sounds + "add a sound".
+
+## v2.3.0
+- Scrollbar under zoomed views (pattern, source).
+- ROOM knob (instead of attack): 0 = dry, loop = the measured room, 200 = twice as wet; the room is now the Suno Chain FDN reverb, sized for drums.
+- Undo key also undoes BUILD MY KIT (after the knob / pattern steps that came after it).

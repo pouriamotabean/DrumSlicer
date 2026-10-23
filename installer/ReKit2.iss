@@ -1,7 +1,7 @@
 ; Windows installer for ReKit 2 (Inno Setup 6). Built by GitHub Actions: iscc installer\ReKit2.iss
 ; ReKit 2 is its own plugin: it installs NEXT TO ReKit 1.x (ReKit.vst3 stays, so both can be compared)
 #define AppName "ReKit 2"
-#define AppVersion "2.2.0"
+#define AppVersion "2.3.0"
 #define Publisher "Pouria Motabean"
 
 [Setup]

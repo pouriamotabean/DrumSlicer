@@ -10,14 +10,14 @@
 // per-pad sound shaping (start / end trim, attack-hold-decay, punch / sustain), rendered off the audio thread
 // fades: curve -1..1 (0 = straight line, + = stays louder, - = drops / rises later), gain = t^(2^(-3 curve))
 struct ShapeParams { float start = 0, end = 2000, attack = 0, hold = 2000, decay = 2000, punch = 0, sustain = 0,
-                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0, tone = 0, matchAmount = 1, gainDb = 0; int matchVersion = 0; bool best = false, user = false;
+                     attackCurve = 0, fadeOut = 0, fadeOutCurve = 0, tone = 0, matchAmount = 1, gainDb = 0, room = 100; int matchVersion = 0; bool best = false, user = false;
                      // field by field (comparing raw memory would also compare the padding bytes, which can differ every
                      // time and made every pad rebuild 20 times a second)
                      bool operator!=(const ShapeParams& o) const
                      {
                          return start != o.start || end != o.end || attack != o.attack || hold != o.hold || decay != o.decay || punch != o.punch
                              || sustain != o.sustain || attackCurve != o.attackCurve || fadeOut != o.fadeOut || fadeOutCurve != o.fadeOutCurve
-                             || tone != o.tone || gainDb != o.gainDb || matchAmount != o.matchAmount || matchVersion != o.matchVersion || best != o.best || user != o.user;
+                             || tone != o.tone || gainDb != o.gainDb || room != o.room || matchAmount != o.matchAmount || matchVersion != o.matchVersion || best != o.best || user != o.user;
                      } };
 struct Shaped
 {
@@ -215,6 +215,8 @@ public:
     juce::AudioBuffer<float> heardShot(int pad) const;   // the pad as you hear it (+ volume, pan, pitch): files, drags, kits
     bool previewLoopSound(int pad);                     // the loop's own sound of a pad, without changing what it plays
     void editHits(std::vector<ds::Hit> h);              // PATTERN page: new hits (undoable)
+    bool canUndoBuild() const { return buildSnap != nullptr; }
+    bool undoBuild();                                    // the kit as it was before the last BUILD MY KIT
     void setHits(std::vector<ds::Hit> h);
     // BUILD MY KIT would build these pads now (the others are kept): what you hear decides
     int padsToBuild() const
@@ -271,6 +273,13 @@ private:
     mutable std::mutex suggLock;
     std::array<Suggest, ds::kPads> sugg;
     std::atomic<bool> building { false };
+    struct BuildSnap
+    {
+        std::shared_ptr<ds::Result> res; std::array<MatchData, ds::kPads> match {}; std::array<int, ds::kPads> matchVer {};
+        std::array<Suggest, ds::kPads> sugg; std::array<std::array<Slot, 3>, ds::kPads> slots {}; std::array<int, ds::kPads> slotOwner {};
+        std::vector<std::pair<juce::String, float>> params;
+    };
+    std::shared_ptr<BuildSnap> buildSnap;
     void useSuggestion(int pad, int idx, const MatchData& m);
     void matchFromTree(const juce::ValueTree& t);
     std::array<std::array<Slot, 3>, ds::kPads> slots {};

@@ -223,48 +223,87 @@ inline void applyShape(juce::AudioBuffer<float>& x, double fs, const std::array<
     }
 }
 
-// a short room: 8 delay lines, Hadamard feedback, darker as it decays
+// ROOM (ReKit 2.3): the reverb of Suno Chain - an 8-line FDN with Hadamard feedback, two-band decay (the highs die
+// sooner), diffused input (no slap), early reflections and a slow line drift - sized down for drums.
+// Wet power ~ dry power at mix 1 (the same calibration as Suno Chain), so the measured mix keeps its meaning.
+struct RoomLine
+{
+    std::vector<float> buf; int w = 0, mask = 0;
+    void allocate(int maxSamples) { int n = 1; while (n < maxSamples + 4) n <<= 1; buf.assign((size_t) n, 0.f); mask = n - 1; w = 0; }
+    inline void push(float x) { buf[(size_t) w] = x; w = (w + 1) & mask; }
+    inline float read(int d) const { return buf[(size_t) ((w - 1 - d) & mask)]; }
+    inline float readFrac(float d) const { const int i = (int) d; const float f = d - (float) i; return read(i) * (1 - f) + read(i + 1) * f; }
+};
 inline void addRoom(juce::AudioBuffer<float>& x, double fs, float rt60, float mix, float preMs)
 {
     if (mix <= 0.001f || rt60 <= 0.02f) return;
-    // room for the tail: the sound is made longer
     const int tail = (int) (std::min(2.0f, rt60 * 1.2f) * fs);
     const int n0 = x.getNumSamples(), n = n0 + tail;
     x.setSize(2, n, true, true, false);
-    static const float base[8] = { 7.1f, 9.3f, 11.7f, 13.9f, 16.3f, 19.1f, 21.7f, 23.9f };       // ms: a small, dense room
-    std::array<std::vector<float>, 8> line; std::array<int, 8> len {}, pos {}; std::array<float, 8> g {}, lp {};
-    for (int i = 0; i < 8; ++i)
+    constexpr int N = 8, kAp = 6;
+    static const float base[N] = { 29.7f, 37.1f, 41.1f, 43.7f, 53.0f, 59.9f, 67.7f, 73.1f };
+    static const float apMs[kAp] = { 4.7f, 7.3f, 11.1f, 16.9f, 23.3f, 31.7f };
+    static const float erT[8] = { 0.35f, 0.5f, 0.62f, 0.75f, 0.88f, 1.0f, 1.15f, 1.3f };
+    const float size = juce::jlimit(0.28f, 1.0f, 0.22f + rt60 * 0.38f);          // a drum room: small and dense
+    const float rtL = std::max(0.1f, rt60), rtH = std::max(0.1f, rt60 * 0.55f);
+    std::array<RoomLine, N> lines; std::array<RoomLine, kAp> ap; RoomLine pre;
+    std::array<float, N> len {}, gLow {}, gHigh {}, lpState {}, modPhase {}, modRate {};
+    std::array<int, kAp> apLen {};
+    double gMidSum = 0;
+    for (int i = 0; i < N; ++i)
     {
-        len[(size_t) i] = std::max(8, (int) (base[i] * 0.001 * fs)); line[(size_t) i].assign((size_t) len[(size_t) i], 0.f);
-        g[(size_t) i] = (float) std::pow(10.0, -3.0 * len[(size_t) i] / (rt60 * fs));
+        len[(size_t) i] = (float) (base[i] * size * 0.001 * fs);
+        lines[(size_t) i].allocate((int) (0.25 * fs));
+        gLow[(size_t) i]  = (float) std::pow(10.0, -3.0 * len[(size_t) i] / (rtL * fs));
+        gHigh[(size_t) i] = (float) std::pow(10.0, -3.0 * len[(size_t) i] / (rtH * fs));
+        const double gm = std::pow(10.0, -3.0 * len[(size_t) i] / (rt60 * fs)); gMidSum += gm * gm;
+        modPhase[(size_t) i] = (float) i * 0.7f; modRate[(size_t) i] = 0.37f + 0.11f * (float) i;
     }
-    const int pre = std::max(0, (int) (preMs * 0.001 * fs));
-    std::vector<float> wetL((size_t) n, 0.f), wetR((size_t) n, 0.f);
+    for (int i = 0; i < kAp; ++i) { ap[(size_t) i].allocate((int) (0.06 * fs)); apLen[(size_t) i] = std::max(1, (int) (apMs[i] * size * 0.001 * fs)); }
+    pre.allocate((int) (0.6 * fs));
+    const float lpA = (float) (1.0 - std::exp(-2 * kPi * 4000.0 / fs));
+    const float modDepth = (float) (0.3 * 0.0006 * fs);
+    const float outScale = (float) (std::sqrt(1.0 - gMidSum / N) * 2.72);
+    std::array<float, 8> erTime {}, erGain {};
+    for (int i = 0; i < 8; ++i) { erTime[(size_t) i] = (float) (erT[i] * 8.0 * size * 0.001 * fs); erGain[(size_t) i] = std::pow(0.85f, (float) i) * 0.5f; }
+    const float erLevel = 0.4f, apG = 0.6f;
+    const float preS = std::max(0.f, (float) (preMs * 0.001 * fs));
     const float* L = x.getReadPointer(0); const float* R = x.getReadPointer(1);
-    const float damp = (float) (1.0 - std::exp(-2 * kPi * 6000.0 / fs));
-    for (int i = 0; i < n; ++i)
+    std::vector<float> wetL((size_t) n, 0.f), wetR((size_t) n, 0.f);
+    for (int t = 0; t < n; ++t)
     {
-        const int j = i - pre;
-        const float in = j >= 0 && j < n ? 0.5f * (L[j] + R[j]) : 0.f;
-        float o[8];
-        for (int k = 0; k < 8; ++k) o[k] = line[(size_t) k][(size_t) pos[(size_t) k]];
-        // Hadamard 8 (normalised)
-        float h[8];
-        for (int k = 0; k < 8; ++k) h[k] = o[k];
-        for (int s = 1; s < 8; s <<= 1)
-            for (int k = 0; k < 8; k += 2 * s)
-                for (int q = k; q < k + s; ++q) { const float a = h[q], b = h[q + s]; h[q] = a + b; h[q + s] = a - b; }
-        for (int k = 0; k < 8; ++k)
+        pre.push(t < n0 ? 0.5f * (L[t] + R[t]) : 0.f);
+        float v0 = pre.readFrac(preS);
+        for (int i = 0; i < kAp; ++i)
         {
-            float v = in + h[k] * 0.35355339f * g[(size_t) k];
-            lp[(size_t) k] += damp * (v - lp[(size_t) k]); v = lp[(size_t) k];
-            line[(size_t) k][(size_t) pos[(size_t) k]] = v;
-            if (++pos[(size_t) k] >= len[(size_t) k]) pos[(size_t) k] = 0;
+            const float d = ap[(size_t) i].read(apLen[(size_t) i] - 1);
+            const float v = v0 + apG * d; ap[(size_t) i].push(v); v0 = d - apG * v;
         }
-        wetL[(size_t) i] = 0.5f * (o[0] - o[2] + o[4] - o[6]);
-        wetR[(size_t) i] = 0.5f * (o[1] - o[3] + o[5] - o[7]);
+        float eL = 0, eR = 0;
+        for (int i = 0; i < 8; ++i) { const float v = pre.readFrac(preS + erTime[(size_t) i]) * erGain[(size_t) i]; if (i & 1) eR += v; else eL += v; }
+        float y[N];
+        for (int i = 0; i < N; ++i)
+        {
+            float d = len[(size_t) i];
+            if (i < 4)
+            {
+                modPhase[(size_t) i] += (float) (2 * kPi * modRate[(size_t) i] / fs);
+                if (modPhase[(size_t) i] > 2 * kPi) modPhase[(size_t) i] -= (float) (2 * kPi);
+                d += modDepth * (1.0f + std::sin(modPhase[(size_t) i]));
+            }
+            const float v = lines[(size_t) i].readFrac(d);
+            lpState[(size_t) i] += lpA * (v - lpState[(size_t) i]);
+            y[i] = gLow[(size_t) i] * lpState[(size_t) i] + gHigh[(size_t) i] * (v - lpState[(size_t) i]);
+        }
+        wetL[(size_t) t] = (y[0] - y[2] + y[4] - y[6] + y[1] * 0.5f - y[5] * 0.5f) * outScale * 0.9f + eL * erLevel;
+        wetR[(size_t) t] = (y[1] - y[3] + y[5] - y[7] + y[2] * 0.5f - y[6] * 0.5f) * outScale * 0.9f + eR * erLevel;
+        for (int h = 1; h < N; h <<= 1)
+            for (int i = 0; i < N; i += h << 1)
+                for (int j = i; j < i + h; ++j) { const float a2 = y[j], b2 = y[j + h]; y[j] = a2 + b2; y[j + h] = a2 - b2; }
+        static const float inSign[N] = { 1, -1, 1, 1, -1, 1, -1, -1 };
+        for (int i = 0; i < N; ++i) lines[(size_t) i].push(y[i] * 0.35355339f + v0 * inSign[i] * 0.35355339f);
     }
-    for (int i = 0; i < n; ++i) { x.addSample(0, i, mix * wetL[(size_t) i]); x.addSample(1, i, mix * wetR[(size_t) i]); }
+    for (int t = 0; t < n; ++t) { x.addSample(0, t, mix * wetL[(size_t) t]); x.addSample(1, t, mix * wetR[(size_t) t]); }
 }
 
 // how much tail: energy 120 - 500 ms vs the first 60 ms (dB), and how fast it falls (dB / s, from 80 to 400 ms)

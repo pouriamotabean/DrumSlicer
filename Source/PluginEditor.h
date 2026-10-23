@@ -1223,8 +1223,57 @@ public:
         setMouseCursor(h != 0 ? juce::MouseCursor::LeftRightResizeCursor : hz >= 0 && zones[(size_t) hz].click ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
     void mouseExit(const juce::MouseEvent&) override { if (hoverPad >= 0 || !hotRect.isEmpty()) { hoverPad = -1; hotRect = {}; repaint(); } }
+    // a scrollbar under a zoomed view: drag the handle (or click beside it) to move along
+    int scrolling = 0; double scrollGrab = 0;     // 1 = pattern, 2 = source
+    juce::Rectangle<float> patScrollRect() const { const auto L = patLanes(); return { L.getX(), L.getBottom() + 4.f, L.getWidth(), 6.f }; }
+    juce::Rectangle<float> srcScrollRect() const { return { content.getX(), content.getY() + 308.f, content.getWidth(), 6.f }; }
+    static juce::Rectangle<float> thumbOf(juce::Rectangle<float> r, double a, double b, double total)
+    { return { r.getX() + (float) (a / total) * r.getWidth(), r.getY(), std::max(18.f, (float) ((b - a) / total) * r.getWidth()), r.getHeight() }; }
+    void drawScroll(juce::Graphics& g, juce::Rectangle<float> r, double a, double b, double total)
+    {
+        if (total <= 0 || b - a >= total - 0.5) return;            // not zoomed: no bar
+        g.setColour(juce::Colour(0xff141416)); g.fillRoundedRectangle(r, 3.f);
+        g.setColour(scrolling ? ui::white : ui::dim); g.fillRoundedRectangle(thumbOf(r, a, b, total), 3.f);
+    }
+    void scrollTo(float x)
+    {
+        auto r = proc.getResult(); auto src = proc.getSource();
+        if (scrolling == 1 && r)
+        {
+            const double total = std::max(1, r->loop.getNumSamples()), span = pv1 - pv0, sr = patScrollRect().getWidth();
+            const double a = juce::jlimit(0.0, total - span, (double) (x - patScrollRect().getX()) / sr * total - scrollGrab);
+            pv0 = a; pv1 = a + span;
+        }
+        if (scrolling == 2 && src)
+        {
+            const double total = (double) src->length(), span = (double) (v1 - v0), sr = srcScrollRect().getWidth();
+            const double a = juce::jlimit(0.0, total - span, (double) (x - srcScrollRect().getX()) / sr * total - scrollGrab);
+            v0 = (juce::int64) a; v1 = (juce::int64) (a + span);
+        }
+        repaint();
+    }
+    bool scrollDown(juce::Point<float> p)
+    {
+        auto r = proc.getResult(); auto src = proc.getSource();
+        if (page == pPattern && r && patScrollRect().expanded(0, 5.f).contains(p) && pv1 - pv0 < r->loop.getNumSamples() - 0.5)
+        {
+            const double total = std::max(1, r->loop.getNumSamples());
+            const auto th = thumbOf(patScrollRect(), pv0, pv1, total);
+            scrolling = 1; scrollGrab = th.contains(p.x, th.getCentreY()) ? (double) (p.x - th.getX()) / patScrollRect().getWidth() * total : (pv1 - pv0) * 0.5;
+            scrollTo(p.x); return true;
+        }
+        if (page == pSource && src && srcScrollRect().expanded(0, 5.f).contains(p) && v1 - v0 < src->length())
+        {
+            const double total = (double) src->length();
+            const auto th = thumbOf(srcScrollRect(), (double) v0, (double) v1, total);
+            scrolling = 2; scrollGrab = th.contains(p.x, th.getCentreY()) ? (double) (p.x - th.getX()) / srcScrollRect().getWidth() * total : (double) (v1 - v0) * 0.5;
+            scrollTo(p.x); return true;
+        }
+        return false;
+    }
     void mouseDown(const juce::MouseEvent& e) override
     {
+        if (scrollDown(e.position)) return;
         const int dz = zoneAt(e.position); dragStarted = false; downPad = -1; hasDown = dz >= 0;
         if (hasDown) { downZone = zones[(size_t) dz]; return; }   // a zone acts on mouse up (or on a drag)
         const int pad = padAt(e.position);
@@ -1241,6 +1290,7 @@ public:
     }
     void mouseDrag(const juce::MouseEvent& e) override
     {
+        if (scrolling) { scrollTo(e.position.x); return; }
         if (dragTight) { setTight(e.position.x); return; }
         if (!dragStarted && e.getDistanceFromDragStart() > 6)
         {
@@ -1259,6 +1309,7 @@ public:
     void mouseUp(const juce::MouseEvent& e) override
     {
         const bool wasDragTight = dragTight; dragTight = false; dragWhat = 0;
+        if (scrolling) { scrolling = 0; repaint(); return; }
         if (dragCursor) { dragCursor = false; return; }
         if (patEditing) { patternUp(); repaint(); return; }
         if (wasDragTight || dragStarted) return;
@@ -1343,7 +1394,7 @@ public:
             {
                 lastMatchMsg = msg;
                 if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY") || msg.startsWith("LAYERED") || msg.startsWith("NO LAYER")
-                    || msg.startsWith("LAYER REMOVED") || msg.startsWith("KIT BUILT") || msg.startsWith("BUILD MY KIT") || msg.startsWith("SUGGESTION") || msg.startsWith("COULD NOT"))
+                    || msg.startsWith("LAYER REMOVED") || msg.startsWith("UNDO") || msg.startsWith("KIT BUILT") || msg.startsWith("BUILD MY KIT") || msg.startsWith("SUGGESTION") || msg.startsWith("COULD NOT"))
                     toast(ui::lower(msg));
                 rebindKnobs();
             }
@@ -1355,7 +1406,7 @@ public:
         if (page == pSamples && selected != browsedPad) { browsedPad = selected; samples.repaint(); }
         rebindKnobs();
         bool lit = false; for (float l : levels) lit = lit || l > 0.01f;
-        const bool moving = lit || patEditing || loopListening || busy || building || proc.isMatching() || proc.isMidiPlaying() || proc.isSourcePlaying() || proc.isPreviewing()
+        const bool moving = lit || patEditing || loopListening || scrolling || busy || building || proc.isMatching() || proc.isMidiPlaying() || proc.isSourcePlaying() || proc.isPreviewing()
                          || now - settleStart < 1000 || now - buildEnd < 1000 || juce::Time::getMillisecondCounter() < toastUntil + 100
                          || std::abs(tightShown - (proc.midiMode() == ds::kTight ? proc.apvts.getRawParameterValue("quant")->load() : 0.f)) > 0.001f;
         if (moving || ++idle >= 6) { idle = 0; repaint(); }      // otherwise 5 times a second is enough to follow changes
@@ -1508,7 +1559,7 @@ private:
        #ifdef JucePlugin_VersionString
         const juce::String ver = JucePlugin_VersionString;
        #else
-        const juce::String ver = "2.2.0";
+        const juce::String ver = "2.3.0";
        #endif
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
         g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
@@ -1843,8 +1894,8 @@ private:
     float wx0() const { return content.getX(); }
     float ww() const { return content.getWidth(); }
     juce::Rectangle<float> waveZone() const { return { content.getX() - 6.f, content.getY() + 40.f, content.getWidth() + 12.f, content.getHeight() - 86.f }; }
-    float waveMid() const { return content.getY() + 52.f + (content.getHeight() - 110.f) * 0.5f; }
-    const float waveH = (372.f - 110.f) * 0.5f - 14.f;
+    float waveMid() const { return content.getY() + 171.f; }
+    const float waveH = 96.f;
     void fixView(const ds::Source& s) { if (s.id != viewId || v1 <= v0 || v1 > s.length()) { v0 = 0; v1 = s.length(); viewId = s.id; } }
     float xOf(juce::int64 smp) const { return wx0() + (float) ((double) (smp - v0) / (double) std::max<juce::int64>(1, v1 - v0)) * ww(); }
     juce::int64 sampleAt(float x) const { return v0 + (juce::int64) std::llround((double) (x - wx0()) / ww() * (double) (v1 - v0)); }
@@ -1983,6 +2034,7 @@ private:
             const double p = proc.sourcePos();
             if (p >= (double) v0 && p <= (double) v1 && proc.isSourcePlaying()) { g.setColour(ui::white); g.fillRect(xOf((juce::int64) p) - 0.5f, mid - hh - 4.f, 1.f, 2.f * hh + 8.f); }
         }
+        drawScroll(g, srcScrollRect(), (double) v0, (double) v1, (double) n);
         // bottom row: listen, snap, the part's length, analyse
         const float y = C.getBottom() - 46.f;
         const auto pr = juce::Rectangle<float>(C.getX(), y, 28.f, 28.f);
@@ -2231,12 +2283,14 @@ private:
                 }
             }
             if (playX > 0) { g.setColour(ui::orange); g.fillRect(playX - 0.5f, L.getY() - 6.f, 1.f, L.getHeight() + 12.f); }
+            else if (false) {}
             else
             {   // the cursor: play starts here (drag it on the strip above the rows)
                 const float cx = pxOf(patCursor);
                 g.setColour(ui::orange.withAlpha(0.6f)); g.fillRect(cx - 0.5f, L.getY() - 6.f, 1.f, L.getHeight() + 12.f);
             }
         }
+        drawScroll(g, patScrollRect(), pv0, pv1, len);
         // bottom: how to edit, snap, how tight
         const float y = C.getBottom() - 30.f;
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
@@ -2540,7 +2594,7 @@ private:
         juce::String ids[8];
         if (src) { ids[0] = "bpm"; ids[1] = "sens"; ids[2] = "quant"; ids[3] = "master"; }      // the source page: 4 (the 2nd row rests)
         else { ids[0] = "mamt" + s; ids[1] = "vol" + s; ids[2] = "pitch" + s; ids[3] = "tone" + s;
-               ids[4] = "pan" + s;  ids[5] = "punch" + s; ids[6] = "sus" + s; ids[7] = "atk" + s; }
+               ids[4] = "pan" + s;  ids[5] = "punch" + s; ids[6] = "sus" + s; ids[7] = "room" + s; }
         for (int k = 0; k < 8; ++k)
         {
             auto& sl = knobs[(size_t) k];
@@ -2576,6 +2630,7 @@ private:
         if (id.startsWith("tone")) return [](double v) { return std::abs(v) < 0.05 ? juce::String("0") : juce::String(v > 0 ? "bright " : "dark ") + juce::String(std::abs(v), 1); };
         if (id.startsWith("punch") || id.startsWith("sus")) return [](double v) { return juce::String(v > 0 ? "+" : "") + juce::String(v, 1); };
         if (id.startsWith("atk")) return [](double v) { return juce::String(v, v < 10 ? 1 : 0) + " ms"; };
+        if (id.startsWith("room")) return [](double v) { return std::abs(v - 100.0) < 0.6 ? juce::String("loop") : v < 0.5 ? juce::String("dry") : juce::String(juce::roundToInt(v)) + "%"; };
         if (id == "sens" || id == "quant") return [](double v) { return juce::String(juce::roundToInt(v * 100)); };
         if (id == "bpm") return [](double v) { return juce::String(v, 1); };
         return [](double v) { return juce::String(v, 1); };
@@ -2590,6 +2645,7 @@ private:
         if (id.startsWith("punch")) return "punch";
         if (id.startsWith("sus")) return "sustain";
         if (id.startsWith("atk")) return "attack";
+        if (id.startsWith("room")) return "room";
         if (id == "bpm") return "tempo";
         if (id == "sens") return "sensitivity";
         if (id == "quant") return "how tight";
@@ -2715,13 +2771,17 @@ private:
                 if (srcPage) { if (proc.getSource()) proc.playSource(!proc.isSourcePlaying()); }
                 else if (proc.getResult()) proc.playMidi(!proc.isMidiPlaying()); });
         key(1, [&](juce::Rectangle<float> r) {
-            const bool can = proc.undo.canUndo();
+            const bool can = proc.undo.canUndo() || proc.canUndoBuild();
             juce::Path a; const auto c = r.getCentre();
             a.startNewSubPath(c.x - 1.f, c.y - 6.f); a.lineTo(c.x - 6.f, c.y - 1.f); a.lineTo(c.x - 1.f, c.y + 4.f);
             a.startNewSubPath(c.x - 6.f, c.y - 1.f); a.lineTo(c.x + 3.f, c.y - 1.f); a.quadraticTo(c.x + 7.f, c.y - 1.f, c.x + 7.f, c.y + 3.f); a.quadraticTo(c.x + 7.f, c.y + 7.f, c.x + 3.f, c.y + 7.f);
             g.setColour(can ? ui::white : ui::faint); g.strokePath(a, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded)); },
-            [this] { if (proc.undo.canUndo()) { proc.undo.undo(); toast("undo  .  " + ui::lower(proc.undo.getUndoDescription().isNotEmpty() ? proc.undo.getUndoDescription() : juce::String("the last knob / shape move"))); shape.invalidate(); }
-                     else toast("nothing to undo  (knobs and the sound's shape can be undone)"); });
+            [this] { if (proc.undo.canUndo()) { proc.undo.undo(); toast("undo"); shape.invalidate(); }
+                     else if (proc.canUndoBuild()) { proc.undoBuild(); shape.invalidate(); }
+                     else toast("nothing to undo"); });
+        if (hot(keyRect(1)))
+            hint = proc.undo.canUndo() ? "undo: " + ui::lower(proc.undo.getUndoDescription().isNotEmpty() ? proc.undo.getUndoDescription() : juce::String("the last knob / sound shape move"))
+                 : proc.canUndoBuild() ? juce::String("undo: build my kit  (the kit as it was before)") : juce::String("nothing to undo");
         key(2, [&](juce::Rectangle<float> r) {
             g.setColour(res ? ui::white : ui::faint); g.setFont(ui::mono(9.f));
             g.drawText("midi", r.withTrimmedBottom(14.f).withTrimmedTop(8.f), juce::Justification::centred);

@@ -45,6 +45,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         p.push_back(std::make_unique<F>(juce::ParameterID{ "tone" + s, 1 },  n + " Tone",    NR(-12.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "gain" + s, 1 },  n + " Gain",    NR(-24.f, 12.f, 0.1f), 0.f));
         p.push_back(std::make_unique<F>(juce::ParameterID{ "mamt" + s, 1 },  n + " Match Amount", NR(0.f, 100.f, 0.1f), 100.f));
+        p.push_back(std::make_unique<F>(juce::ParameterID{ "room" + s, 1 },  n + " Room", NR(0.f, 200.f, 0.1f), 100.f));   // 100 = the loop's room
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "best" + juce::String(i), 1 }, n + " Best hit", false));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ "usec" + juce::String(i), 1 }, n + " Your sample", false));
     }
@@ -74,7 +75,7 @@ ShapeParams DrumSlicerProcessor::shapeParams(int i) const
     p.start = v("st"); p.end = v("en"); p.attack = v("atk"); p.hold = v("hold"); p.decay = v("dcy");
     p.punch = v("punch"); p.sustain = v("sus"); p.best = v("best") > 0.5f;
     p.attackCurve = v("fic"); p.fadeOut = v("fo"); p.fadeOutCurve = v("foc"); p.user = v("usec") > 0.5f;
-    p.tone = v("tone"); p.gainDb = v("gain");
+    p.tone = v("tone"); p.gainDb = v("gain"); p.room = v("room");
     p.matchAmount = v("mamt") * 0.01f;
     { std::lock_guard<std::mutex> g(matchLock); p.matchVersion = matchVer[(size_t) i] + (match[(size_t) i].on ? 100000 : 0); }
     return p;
@@ -176,11 +177,21 @@ void applyMatchChain(juce::AudioBuffer<float>& x, double sr, const MatchData& m,
 juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& rawIn, double sr, const ShapeParams& p, int& offset, const MatchData* match)
 {
     juce::AudioBuffer<float> matched;
+    const float rk = juce::jlimit(0.f, 2.f, p.room / 100.f);   // ROOM knob: 0 = dry, 1 = the loop's room, 2 = twice as wet
+    auto stereoCopy = [&] { matched.makeCopyOf(rawIn);
+        if (matched.getNumChannels() < 2) { matched.setSize(2, matched.getNumSamples(), true); matched.copyFrom(1, 0, matched, 0, 0, matched.getNumSamples()); } };
     if (match != nullptr && match->on && p.matchAmount > 0.001f)
     {
-        matched.makeCopyOf(rawIn);
-        if (matched.getNumChannels() < 2) { matched.setSize(2, matched.getNumSamples(), true); matched.copyFrom(1, 0, matched, 0, 0, matched.getNumSamples()); }
-        applyMatchChain(matched, sr, *match, p.matchAmount);
+        stereoCopy();
+        MatchData m2 = *match;
+        if (m2.useRoom && m2.roomMix > 0) m2.roomMix *= rk;
+        else if (rk > 1.001f) { m2.useRoom = true; m2.roomMix = (rk - 1.f) * 0.15f; m2.roomRt = std::max(m2.roomRt, 0.9f); m2.roomPre = 8.f; }
+        applyMatchChain(matched, sr, m2, p.matchAmount);
+    }
+    else if (rk > 1.001f)
+    {   // a sound without a match (the loop's own, or yours as it is): the knob can only add room
+        stereoCopy();
+        mt::addRoom(matched, sr, 0.9f, (rk - 1.f) * 0.15f, 8.f);
     }
     const juce::AudioBuffer<float>& raw = matched.getNumSamples() > 0 ? matched : rawIn;
     const int len = raw.getNumSamples();
@@ -1656,6 +1667,21 @@ void DrumSlicerProcessor::buildKit()
         if (!j.paths.empty()) jobs->push_back(std::move(j));
     }
     if (jobs->empty()) { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILD MY KIT: NOTHING TO BUILD (EVERY PAD IS LOCKED)"; return; }
+    {   // undo build: everything a build changes, as it is now
+        auto snap = std::make_shared<BuildSnap>();
+        snap->res = r;
+        { std::lock_guard<std::mutex> g(matchLock); snap->match = match; snap->matchVer = matchVer; }
+        { std::lock_guard<std::mutex> g(suggLock); snap->sugg = sugg; }
+        { std::lock_guard<std::mutex> g(slotLock); snap->slots = slots; snap->slotOwner = slotOwner; }
+        for (auto* prm : getParameters())
+            if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(prm))
+            {
+                const auto id = rp->getParameterID();
+                if (id == "master" || id == "sens" || id == "bpm" || id == "quant" || id == "tight" || id == "sync") continue;
+                snap->params.push_back({ id, rp->getValue() });
+            }
+        buildSnap = snap;
+    }
     const double sr = r->sr;
     building = true; matching = true;
     { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILDING KIT ..."; }
@@ -2140,6 +2166,25 @@ void DrumSlicerProcessor::editHits(std::vector<ds::Hit> h)
     auto cur = getResult(); if (!cur) return;
     undo.beginNewTransaction("the pattern");
     undo.perform(new HitsEdit(*this, cur->hits, std::move(h)), "the pattern");
+}
+
+bool DrumSlicerProcessor::undoBuild()
+{
+    auto snap = buildSnap; buildSnap.reset();
+    if (!snap || !snap->res || building.load() || matching.load()) return false;
+    auto cur = getResult();
+    if (!cur || cur->sourceId != snap->res->sourceId) return false;   // another loop since: nothing to go back to
+    { std::lock_guard<std::mutex> g(matchLock); match = snap->match; for (int i = 0; i < ds::kPads; ++i) matchVer[(size_t) i] = snap->matchVer[(size_t) i] + 1000; }
+    { std::lock_guard<std::mutex> g(suggLock); sugg = snap->sugg; }
+    { std::lock_guard<std::mutex> g(slotLock); slots = snap->slots; slotOwner = snap->slotOwner; }
+    for (auto& pv : snap->params) if (auto* rp = apvts.getParameter(pv.first)) rp->setValueNotifyingHost(pv.second);
+    auto r2 = std::make_shared<ds::Result>(*snap->res);
+    r2->hits = cur->hits;                                  // the pattern stays as it is now (it has its own undo)
+    for (auto& pd : r2->pads) pd.hits = 0;
+    for (auto& h : r2->hits) if (h.pad >= 0 && h.pad < ds::kPads) ++r2->pads[(size_t) h.pad].hits;
+    publish(r2, getKitDir(), getLoopFile(), orphan());
+    { std::lock_guard<std::mutex> g(matchLock); matchMsg = "UNDO: THE KIT AS IT WAS BEFORE THE BUILD"; }
+    return true;
 }
 
 bool DrumSlicerProcessor::previewKit(const juce::File& kit)
