@@ -184,14 +184,8 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& rawIn, double
     {
         stereoCopy();
         MatchData m2 = *match;
-        if (m2.useRoom && m2.roomMix > 0) m2.roomMix *= rk;
-        else if (rk > 1.001f) { m2.useRoom = true; m2.roomMix = (rk - 1.f) * 0.15f; m2.roomRt = std::max(m2.roomRt, 0.9f); m2.roomPre = 8.f; }
+        if (m2.useRoom && m2.roomMix > 0) m2.roomMix *= std::min(1.f, rk);   // below "loop": less of the loop's room
         applyMatchChain(matched, sr, m2, p.matchAmount);
-    }
-    else if (rk > 1.001f)
-    {   // a sound without a match (the loop's own, or yours as it is): the knob can only add room
-        stereoCopy();
-        mt::addRoom(matched, sr, 0.9f, (rk - 1.f) * 0.15f, 8.f);
     }
     const juce::AudioBuffer<float>& raw = matched.getNumSamples() > 0 ? matched : rawIn;
     const int len = raw.getNumSamples();
@@ -245,6 +239,12 @@ juce::AudioBuffer<float> shapeShot(const juce::AudioBuffer<float>& rawIn, double
         auto* d = o.getWritePointer(c);
         for (int i = 0; i < fin; ++i) d[i] *= (float) i / fin;
         for (int i = 0; i < fout; ++i) d[n - 1 - i] *= (float) i / fout;
+    }
+    if (rk > 1.001f)
+    {   // ROOM above "loop": more room on any sound (raw, matched, the loop's own), as a send after the shape:
+        // a longer, deeper tail (it rings out after END), up to about the dry level at 200
+        const float rt = std::max(1.2f, match != nullptr && match->on ? match->roomRt * 1.5f : 0.f);
+        mt::addRoom(o, sr, std::min(2.5f, rt), (rk - 1.f) * 0.55f, 12.f);
     }
     return o;
 }
@@ -2116,6 +2116,20 @@ bool DrumSlicerProcessor::previewSample(const juce::File& f, int pad)
     retire(std::move(old));
     { juce::SpinLock::ScopedLockType l(fileLock); previewDir = f; }
     srcPlay = false;
+    previewStop = false; previewPlaying = true;
+    return true;
+}
+
+bool DrumSlicerProcessor::previewLoopFile(const juce::File& f)
+{
+    auto b = std::make_shared<juce::AudioBuffer<float>>(); double sr = 44100;
+    if (!ds::loadAudio(f, *b, sr, 60.0)) return false;
+    if (b->getNumChannels() < 2) { b->setSize(2, b->getNumSamples(), true); b->copyFrom(1, 0, *b, 0, 0, b->getNumSamples()); }
+    std::shared_ptr<juce::AudioBuffer<float>> old;
+    { juce::SpinLock::ScopedLockType l(lock); old = preview; preview = b; previewSR = sr; }
+    retire(std::move(old));
+    { juce::SpinLock::ScopedLockType l(fileLock); previewDir = f; }
+    srcPlay = false; midiPlay = false;
     previewStop = false; previewPlaying = true;
     return true;
 }

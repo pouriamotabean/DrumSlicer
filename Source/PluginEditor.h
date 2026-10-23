@@ -617,7 +617,8 @@ public:
     std::function<void()> onBack;                  // the path at the top:  ‹ Kick   Samples
     std::function<juce::String()> backName;
 
-    explicit SampleBrowser(DrumSlicerProcessor& p) : proc(p)
+    std::function<void()> onOther;                 // LOOPS: a file from anywhere (the system's file window)
+    explicit SampleBrowser(DrumSlicerProcessor& p, bool loopsPage = false) : proc(p), loopsMode(loopsPage)
     {
         addAndMakeVisible(list);
         list.setModel(this); list.setRowHeight(30); list.setOutlineThickness(0);
@@ -663,6 +664,15 @@ public:
         revealBtn.onClick = [this] { if (auto f = selectedFile(); f.existsAsFile()) f.revealToUser(); else if (dir.isDirectory()) dir.revealToUser(); };
         loadSettings();
         updateLimit();
+        if (loopsMode)
+        {   // LOOPS: your loop folders; click = hear it as it is, double-click / load = it becomes the loop
+            mode = 0;
+            firstBtn.setButtonText("add your loop folder");
+            useBtn.setButtonText("load this loop"); useBtn.setTooltip("Load the selected loop (then choose the part and analyse)");
+            revealBtn.setButtonText("other file ...");
+            revealBtn.onClick = [this] { if (onOther) onOther(); };
+            for (juce::Component* c : std::initializer_list<juce::Component*> { &tabFolders, &tabSimilar, &tryBtn }) c->setVisible(false);
+        }
     }
     ~SampleBrowser() override { if (rank) rank->cancel = true; saveSettings(); }
 
@@ -688,7 +698,7 @@ public:
             }
             else backRect = {};
             g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
-            g.drawText("Samples", juce::Rectangle<float>(x, 0.f, 160.f, 38.f), juce::Justification::centredLeft);
+            g.drawText(loopsMode ? "Loops" : "Samples", juce::Rectangle<float>(x, 0.f, 160.f, 38.f), juce::Justification::centredLeft);
         }
         if (tryMode)
         {   // trying: say it, so it is not forgotten
@@ -701,7 +711,7 @@ public:
         {
             auto r = juce::Rectangle<int>(0, 60, getWidth(), 120);
             g.setColour(ui::white); g.setFont(ui::inter(14.f, 500));
-            g.drawText("choose a sample of yours for a pad", r.removeFromTop(24), juce::Justification::centredLeft);
+            g.drawText(loopsMode ? juce::String("listen to your loops before you load one") : juce::String("choose a sample of yours for a pad"), r.removeFromTop(24), juce::Justification::centredLeft);
             g.setColour(ui::dim); g.setFont(ui::inter(12.f));
             g.drawFittedText("1.  add your one-shot folder (once, it is remembered)\n2.  click a file (or the arrow keys): you hear it as loud as the pad\n"
                              "3.  double-click it, drag it onto a pad, or use on pad\n4.  similar: the sounds of your folders nearest to the pad",
@@ -779,7 +789,7 @@ public:
         firstBtn.setBounds(0, 186, 240, 34);
         useBtn.setBounds(lx, h - 30, 104, 28);
         tryBtn.setBounds(useBtn.getRight() + 8, h - 30, 90, 28);
-        revealBtn.setBounds(tryBtn.getRight() + 8, h - 30, 100, 28);
+        revealBtn.setBounds(loopsMode ? useBtn.getRight() + 8 : tryBtn.getRight() + 8, h - 30, 100, 28);
         moreBtn.setBounds(w - 70, h - 30, 70, 28);
     }
     void mouseUp(const juce::MouseEvent& e) override
@@ -826,7 +836,8 @@ private:
     int listX() const { return 206; }
     juce::Rectangle<float> leftCol() const { return { 0.f, 46.f, 190.f, (float) getHeight() - 46.f }; }
     juce::Rectangle<float> rootRect(int i) const { return { 0.f, 46.f + i * 30.f, 190.f, 26.f }; }
-    static juce::File settingsFile() { return ds::root().getChildFile("browser.txt"); }
+    bool loopsMode = false;
+    juce::File settingsFile() const { return ds::root().getChildFile(loopsMode ? "loops.txt" : "browser.txt"); }
     static bool isAudio(const juce::File& f) { return f.hasFileExtension("wav;wave;aif;aiff;flac;mp3;ogg"); }
     juce::String shortPath(const juce::File& d) const
     {
@@ -859,7 +870,7 @@ private:
     void updateLimit() { limitBtn.setButtonText("< " + juce::String(juce::roundToInt(proc.library->maxSeconds())) + " s"); }
     void setMode(int m)
     {
-        mode = m;
+        mode = loopsMode ? 0 : m;
         tabFolders.setToggleState(mode == 0, juce::dontSendNotification); tabSimilar.setToggleState(mode == 1, juce::dontSendNotification);
         list.setRowHeight(30);
         updateControls();
@@ -874,7 +885,8 @@ private:
         const bool any = !rootDirs.isEmpty(), f = any && mode == 0, sm = any && mode == 1;
         for (juce::Component* c : std::initializer_list<juce::Component*> { &remBtn, &upBtn, &filter, &addBtn }) c->setVisible(f);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &scanBtn, &limitBtn, &moreBtn, &likeBtn[0] }) c->setVisible(sm);
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &list, &useBtn, &revealBtn, &tabFolders, &tabSimilar, &tryBtn }) c->setVisible(any);
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &list, &useBtn, &revealBtn, &tabFolders, &tabSimilar, &tryBtn }) c->setVisible(any && !(loopsMode && (c == &tabFolders || c == &tabSimilar || c == &tryBtn)));
+        if (loopsMode) revealBtn.setVisible(true);
         firstBtn.setVisible(!any);
         remBtn.setEnabled(any);
     }
@@ -972,7 +984,8 @@ private:
         if (!f.existsAsFile()) return;
         const int pad = targetPad ? targetPad() : -1;
         auto r = proc.getResult();
-        if (tryMode && r && pad >= 0 && r->pads[(size_t) pad].valid) { proc.tryOnPad(pad, f); if (onTried) onTried(); }
+        if (loopsMode) proc.previewLoopFile(f);
+        else if (tryMode && r && pad >= 0 && r->pads[(size_t) pad].valid) { proc.tryOnPad(pad, f); if (onTried) onTried(); }
         else proc.previewSample(f, pad);
         list.repaint();
     }
@@ -1031,7 +1044,7 @@ private:
     void returnKeyPressed(int row) override { activate(row); }
     juce::var getDragSourceDescription(const juce::SparseSet<int>& rows) override
     {
-        if (rows.size() != 1) return {};
+        if (rows.size() != 1 || loopsMode) return {};
         const auto f = rowFile(rows[0]);
         return f.existsAsFile() ? juce::var("rekit-sample:" + f.getFullPathName()) : juce::var();
     }
@@ -1076,11 +1089,16 @@ class DrumSlicerPanel : public juce::Component, public juce::FileDragAndDropTarg
                         public juce::DragAndDropContainer, public juce::DragAndDropTarget, private juce::Timer
 {
 public:
-    enum Page { pKit = 0, pSource, pPattern, pPad, pMore, pSamples, pKits };
+    enum Page { pKit = 0, pSource, pPattern, pPad, pMore, pSamples, pKits, pLoops };
     static constexpr int W = 1240, H = 720;
 
-    explicit DrumSlicerPanel(DrumSlicerProcessor& p) : proc(p), shape(p), samples(p), kitsPage(p)
+    explicit DrumSlicerPanel(DrumSlicerProcessor& p) : proc(p), shape(p), samples(p), loops(p, true), kitsPage(p)
     {
+        addChildComponent(loops);
+        loops.onUse = [this](const juce::File& f) { proc.stopPreview(); proc.loadSource(f); setPage(pSource); };
+        loops.onBack = [this] { setPage(pSource); };
+        loops.backName = [] { return juce::String("Source"); };
+        loops.onOther = [this] { chooseLoop(); };
         setSize(W, H);
         setLookAndFeel(&look);
         setWantsKeyboardFocus(true);
@@ -1147,6 +1165,7 @@ public:
         shape.setBounds(juce::Rectangle<float>(content.getX(), content.getY() + 128.f, content.getWidth() - 290.f, content.getHeight() - 180.f).toNearestInt());
         samples.setBounds(content.withTrimmedBottom(0).toNearestInt());
         kitsPage.setBounds(content.toNearestInt());
+        loops.setBounds(content.toNearestInt());
         delPad.setBounds(juce::Rectangle<float>(content.getX() + 230.f, content.getBottom() - 34.f, 200.f, 30.f).toNearestInt());
     }
 
@@ -1532,6 +1551,8 @@ private:
         const bool showSamples = page == pSamples && !proc.isBusy();
         if (showSamples != samples.isVisible()) { samples.setVisible(showSamples); if (showSamples) samples.showFor(); }
         kitsPage.setVisible(page == pKits && !proc.isBusy());
+        const bool showLoops = page == pLoops && !proc.isBusy();
+        if (showLoops != loops.isVisible()) { loops.setVisible(showLoops); if (showLoops) loops.showFor(); }
         delPad.setVisible(page == pMore && res && res->pads[(size_t) selected].valid && !proc.isBusy());
         rebindKnobs();
     }
@@ -1559,7 +1580,7 @@ private:
        #ifdef JucePlugin_VersionString
         const juce::String ver = JucePlugin_VersionString;
        #else
-        const juce::String ver = "2.3.0";
+        const juce::String ver = "2.3.1";
        #endif
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
         g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
@@ -1586,7 +1607,7 @@ private:
     {
         static const char* names[] = { "kit", "source", "pattern", "pad", "samples", "kits" };
         static const Page pages[] = { pKit, pSource, pPattern, pPad, pSamples, pKits };
-        const Page cur = page == pMore ? pPad : page;
+        const Page cur = page == pMore ? pPad : page == pLoops ? pSource : page;
         float x = content.getX();
         const float y = display.getBottom() - 30.f;
         g.setFont(ui::mono(11.f));
@@ -1878,10 +1899,10 @@ private:
         g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
         g.drawText(st.startsWith("COULD NOT") ? ui::lower(st) : juce::String("drop a drum loop"), C.withTrimmedBottom(60.f), juce::Justification::centred, true);
         g.setColour(ui::dim); g.setFont(ui::inter(12.f));
-        g.drawText("from the pool, mediabay or explorer  .  or click to choose a file", C.withTrimmedTop(70.f).withTrimmedBottom(20.f), juce::Justification::centred);
+        g.drawText("from the pool, mediabay or explorer  .  or click: your loops, listen first", C.withTrimmedTop(70.f).withTrimmedBottom(20.f), juce::Justification::centred);
         // a quiet row of dots
         for (int i = 0; i < 32; ++i) { const float x = C.getCentreX() - 155.f + i * 10.f; g.setColour(i % 4 == 0 ? ui::dark : ui::line); g.fillEllipse(juce::Rectangle<float>(4.f, 4.f).withCentre({ x, C.getCentreY() + 60.f })); }
-        zone(C, [this] { chooseLoop(); });
+        zone(C, [this] { setPage(pLoops); });
     }
     void chooseLoop()
     {
@@ -2062,7 +2083,7 @@ private:
         }
         const bool done = proc.selectionAnalysed();
         const auto ab = chip(g, C.getRight(), y, done ? "re-analyse" : "analyse this part", done ? cNormal : cAccent, [this] { proc.reanalyse(); }, 30.f, 12.f, true);
-        chip(g, ab.getX() - 10.f, y, "load another loop", cNormal, [this] { chooseLoop(); }, 30.f, 12.f, true);
+        chip(g, ab.getX() - 10.f, y, "load another loop", cNormal, [this] { setPage(pLoops); }, 30.f, 12.f, true);
         if (mine && !done) { g.setColour(ui::orange); g.setFont(ui::mono(10.f)); g.drawText("the part changed: analyse it", juce::Rectangle<float>(ab.getX() - 400.f, y - 18.f, 400.f + ab.getWidth(), 12.f), juce::Justification::centredRight); }
     }
 
@@ -2898,6 +2919,7 @@ private:
     std::array<std::unique_ptr<juce::SliderParameterAttachment>, 8> knobAtt;
     ShapeView shape;
     SampleBrowser samples;
+    SampleBrowser loops;
     KitsPage kitsPage;
     HoldButton delPad;
     juce::TooltipWindow tips { this, 700 };

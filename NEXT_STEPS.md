@@ -125,3 +125,8 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 - Scrollbar under zoomed views (pattern, source).
 - ROOM knob (instead of attack): 0 = dry, loop = the measured room, 200 = twice as wet; the room is now the Suno Chain FDN reverb, sized for drums.
 - Undo key also undoes BUILD MY KIT (after the knob / pattern steps that came after it).
+
+## v2.3.1
+- LOOPS page: your loop folders inside ReKit, click = listen as it is, load this loop / other file.
+- ROOM above "loop" is a send after the shape: works on raw / unmatched sounds too, deeper (up to ~dry level), its tail rings past END.
+- Next (2.4, engine): closed hats were labelled O-HAT (OLIVER_100 808 loop) -> label by decay; clap+snare layered (burst pattern) -> CLAP / snare+clap, bursts = one hit; kick doubles 12-34 ms; loudness per instrument band.

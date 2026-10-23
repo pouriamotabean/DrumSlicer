@@ -237,7 +237,7 @@ struct RoomLine
 inline void addRoom(juce::AudioBuffer<float>& x, double fs, float rt60, float mix, float preMs)
 {
     if (mix <= 0.001f || rt60 <= 0.02f) return;
-    const int tail = (int) (std::min(2.0f, rt60 * 1.2f) * fs);
+    const int tail = (int) (std::min(3.5f, rt60 * 1.4f) * fs);
     const int n0 = x.getNumSamples(), n = n0 + tail;
     x.setSize(2, n, true, true, false);
     constexpr int N = 8, kAp = 6;

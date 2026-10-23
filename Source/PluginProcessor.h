@@ -213,7 +213,8 @@ public:
     }
     float midiPlayFrac() const { return seqFrac.load(); }   // where the MIDI preview is in its turn (0..1)
     juce::AudioBuffer<float> heardShot(int pad) const;   // the pad as you hear it (+ volume, pan, pitch): files, drags, kits
-    bool previewLoopSound(int pad);                     // the loop's own sound of a pad, without changing what it plays
+    bool previewLoopSound(int pad);
+    bool previewLoopFile(const juce::File& f);          // LOOPS page: a loop of yours, as it is, before loading it                     // the loop's own sound of a pad, without changing what it plays
     void editHits(std::vector<ds::Hit> h);              // PATTERN page: new hits (undoable)
     bool canUndoBuild() const { return buildSnap != nullptr; }
     bool undoBuild();                                    // the kit as it was before the last BUILD MY KIT
