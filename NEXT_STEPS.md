@@ -136,3 +136,7 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 
 ## v2.3.4
 - First run: "where should ReKit keep its data?" (choose a folder = what is there now moves with it, or keep Documents/ReKit). Later: kits page > data folder. Location in <app data>/ReKit/location.txt.
+
+## To do next (Pouria, 2026-10-23)
+- PATTERN velocity: select a dot, then change it with the mouse (visible value / bar), not only by dot size; today: drag a dot up / down already changes it - make it obvious.
+- Engine 2.4 (with the regression harness: 10 old loops + OLIVER_100 808, nothing may get worse): hat class by decay (closed / open / crash), metallic hats penalised only when the loop is softer, clap+snare = one sound -> layered build, clap bursts = one hit, kick doubles, loudness per instrument band.
