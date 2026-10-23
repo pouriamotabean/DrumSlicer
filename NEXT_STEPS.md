@@ -22,6 +22,23 @@
    loop, same measure, live).
 8. Graphics drawn in code (flat, dark graphite + amber); no ChatGPT images needed. Window ~1300 x 780.
 
+## Added in the final mockup round (screens C1-C8)
+9. Where each sound comes from (pad ADVANCED): THE LOOP'S = "from N hits", click = they light up on the loop's wave;
+   BEST REAL HIT = "hit 4 at 0:03.27", play it raw from the loop; YOURS = file + folder, OPEN FOLDER, drag the original file;
+   a layer partner shows its own folder. On the main screen the selected pad's hits are lit on the source line.
+10. Two numbers on top: EXTRACTION (fixed after analysis) and YOUR KIT (live).
+11. UNDO BUILD next to BUILD MY KIT (back to the kit as it was before the last build).
+12. Layer: FIND A LAYER (automatic) or CHOOSE ONE... (opens the browser; LAYER WITH YOURS on any row).
+13. Browser (click a pad's sample name): covers the pads, the pattern above keeps playing; SIMILAR / FOLDERS, filter;
+    each row: % after match, USE (goes on the pad, matched, pad locks), LAYER WITH YOURS, open folder, drag original.
+14. Source ADVANCED: the selection on the whole file with the flags, snap, sensitivity, RE-ANALYSE THIS PART.
+    Pattern ADVANCED: MIDI timing EXACT / ON THE GRID, HOW TIGHT, loop / project tempo, grid. Kit settings: volume,
+    sample folders (+ add, rescan, loop length limit), what EXPORT ALL gives, window size S / M / L.
+15. Start: drop zone + LOAD + OPEN A KIT + recent; when a file is loaded: flags, ANALYSE THIS PART.
+16. KITS: save as (name), list with play preview, OPEN, folder, DELETE.
+17. TAB (loop / your kit) only works while the plugin window has the keyboard: the on-screen toggle stays the main control.
+18. Window: designed at 1300 x 780, resizable (fixed aspect), sizes S / M / L - check it fits the Cubase screen first.
+
 ## Then
 - Pouria uses v2.0 for a few days, notes every place he hesitates -> v2.1.
 - Later project: "Audio manager" VST (Splice-like browser for his own archive; splicedd UI; key/BPM/sync/drag).
