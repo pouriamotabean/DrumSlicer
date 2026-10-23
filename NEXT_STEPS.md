@@ -39,6 +39,18 @@
 17. TAB (loop / your kit) only works while the plugin window has the keyboard: the on-screen toggle stays the main control.
 18. Window: designed at 1300 x 780, resizable (fixed aspect), sizes S / M / L - check it fits the Cubase screen first.
 
+## Visual direction (decided 2026-10-23): "a device from the future", BLACK body (mockup "D2 · FUTURE · black")
+- Teenage Engineering / Apple-like: minimal, monochrome, one accent (orange #FF5A1F) for live / main things only.
+- Black device body, a big black display = the heart: kit name large, ring "your kit", pattern as dots of light
+  (lit hits glow, the playing one orange), display pages kit / source / pattern / pad replace the ADVANCED drawers.
+- Four knobs for the selected pad (like the loop [orange], volume, pitch, attack); loop / your kit switch.
+- Round orange BUILD MY KIT key, play, undo. Eight clean pads (4 x 2): a shape glyph per sound (kick filled circle,
+  snare ring + dot, hats dots, rim triangle, tom square, clap x, shaker lines) + name + sample + a thin bar that lights on hits.
+- Dark only (long sessions). No wood, no amber, no light theme.
+- Still to draw before code: the source / pattern / pad display pages, the pad hover state (< > suggestions, lock, M, S, %).
+- Merge in the ChatGPT reviews: undo history, raw vs matched audition, compare at the same position, status labels,
+  lock apart from M/S, archive health, simpler start (auto region + one ANALYSE), tempo x2 / /2, arrow keys.
+
 ## Then
 - Pouria uses v2.0 for a few days, notes every place he hesitates -> v2.1.
 - Later project: "Audio manager" VST (Splice-like browser for his own archive; splicedd UI; key/BPM/sync/drag).
