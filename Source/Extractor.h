@@ -175,16 +175,46 @@ inline std::shared_ptr<Source> makeSource(juce::AudioBuffer<float> audio, double
 
 // ---------------------------------------------------------------- folders
 // Documents/ReKit  (the folder of the old name "DrumSlicer" is moved once, so caches and kits stay)
-inline juce::File root()
+// where ReKit keeps its data (analyses, kits, exports, the sample index). Chosen once (ReKit 2.4: asked the first
+// time), written to <user app data>/ReKit/location.txt. Not chosen yet: Documents/ReKit as before.
+inline juce::File locationFile() { return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("ReKit").getChildFile("location.txt"); }
+inline bool rootChosen() { return locationFile().existsAsFile(); }
+inline juce::File& rootRef()
 {
-    static const juce::File r = []
+    static juce::File r = []
     {
+        const auto t = locationFile().loadFileAsString().trim();
+        if (juce::File::isAbsolutePath(t) && (juce::File(t).isDirectory() || juce::File(t).createDirectory())) return juce::File(t);
         const auto docs = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
         auto now = docs.getChildFile("ReKit"), old = docs.getChildFile("DrumSlicer");
         if (!now.exists() && old.isDirectory() && !old.moveFileTo(now)) return old;   // could not move: keep using it
         return now;
     }();
     return r;
+}
+inline juce::File root() { return rootRef(); }
+// a new place: what is in the old one is moved there (copied, then the old one removed only when all arrived)
+inline bool setRoot(const juce::File& d, bool moveData, juce::String& why)
+{
+    const auto old = root();
+    if (d == old) { locationFile().getParentDirectory().createDirectory(); locationFile().replaceWithText(d.getFullPathName()); return true; }
+    if (d.isAChildOf(old)) { why = "a folder inside the current one"; return false; }
+    if (!d.isDirectory() && !d.createDirectory()) { why = "cannot create " + d.getFullPathName(); return false; }
+    if (moveData && old.isDirectory())
+    {
+        for (const auto& e : juce::RangedDirectoryIterator(old, false, "*", juce::File::findFilesAndDirectories))
+        {
+            const auto src = e.getFile(), dst = d.getChildFile(src.getFileName());
+            if (dst.exists()) continue;                                   // never overwrite what is there
+            const bool ok = src.isDirectory() ? src.copyDirectoryTo(dst) : src.copyFileTo(dst);
+            if (!ok) { why = "could not copy " + src.getFileName(); return false; }
+        }
+        old.deleteRecursively();
+    }
+    locationFile().getParentDirectory().createDirectory();
+    if (!locationFile().replaceWithText(d.getFullPathName())) { why = "cannot write " + locationFile().getFullPathName(); return false; }
+    rootRef() = d;
+    return true;
 }
 // cache + exports of one loop: Documents/ReKit/<loop>_<id>/ - the id comes from the full path, so two
 // stems both called "Drums.wav" from different projects never share (or overwrite) a folder

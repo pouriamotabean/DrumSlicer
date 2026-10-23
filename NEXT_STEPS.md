@@ -133,3 +133,6 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
+
+## v2.3.4
+- First run: "where should ReKit keep its data?" (choose a folder = what is there now moves with it, or keep Documents/ReKit). Later: kits page > data folder. Location in <app data>/ReKit/location.txt.

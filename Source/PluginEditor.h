@@ -438,9 +438,14 @@ class KitsPage : public juce::Component, private juce::Timer
 public:
     std::function<void(const juce::File&)> onLoad;
     std::function<void(const juce::String&)> onToast;
+    std::function<void()> onDataFolder;
 
     explicit KitsPage(DrumSlicerProcessor& p) : proc(p)
     {
+        addAndMakeVisible(dataBtn);
+        dataBtn.setButtonText("data folder ...");
+        dataBtn.setTooltip("Where ReKit keeps its analyses, kits and exports (and how big it is)");
+        dataBtn.onClick = [this] { if (onDataFolder) onDataFolder(); };
         addAndMakeVisible(name);
         name.setFont(ui::inter(13.f)); name.setIndents(10, 6);
         name.setTextToShowWhenEmpty("kit name", ui::faint);
@@ -479,6 +484,7 @@ public:
         exportBtn.setBounds(folderBtn.getX() - 168, 4, 160, 30);
         saveBtn.setBounds(exportBtn.getX() - 124, 4, 116, 30);
         name.setBounds(saveBtn.getX() - 190, 4, 182, 30);
+        dataBtn.setBounds(getWidth() - 120, getHeight() - 22, 120, 22);
     }
     void paint(juce::Graphics& g) override
     {
@@ -540,7 +546,7 @@ public:
 private:
     DrumSlicerProcessor& proc;
     juce::TextEditor name;
-    juce::TextButton saveBtn, exportBtn, folderBtn;
+    juce::TextButton saveBtn, exportBtn, folderBtn, dataBtn;
     HoldButton del;
     juce::Array<juce::File> kits;
     int scroll = 0, hoverKit = -1;
@@ -1089,7 +1095,7 @@ class DrumSlicerPanel : public juce::Component, public juce::FileDragAndDropTarg
                         public juce::DragAndDropContainer, public juce::DragAndDropTarget, private juce::Timer
 {
 public:
-    enum Page { pKit = 0, pSource, pPattern, pPad, pMore, pSamples, pKits, pLoops };
+    enum Page { pKit = 0, pSource, pPattern, pPad, pMore, pSamples, pKits, pLoops, pSetup };
     static constexpr int W = 1240, H = 720;
 
     explicit DrumSlicerPanel(DrumSlicerProcessor& p) : proc(p), shape(p), samples(p), loops(p, true), kitsPage(p)
@@ -1131,6 +1137,7 @@ public:
         addChildComponent(kitsPage);
         kitsPage.onLoad = [this](const juce::File& k) { proc.stopPreview(); proc.loadKit(k); toast("kit  " + k.getFileName()); setPage(pKit); };
         kitsPage.onToast = [this](const juce::String& t) { toast(t); };
+        kitsPage.onDataFolder = [this] { shownSize = -1; setPage(pSetup); };
         addChildComponent(delPad);
         delPad.text = "hold to delete pad + hits";
         delPad.onHold = [this] {
@@ -1138,6 +1145,7 @@ public:
             const auto nm = r->pads[(size_t) selected].name;
             proc.deletePad(selected); toast("deleted  " + nm); setPage(pKit); };
         page = proc.getSource() ? (proc.getResult() ? pKit : pSource) : pSource;
+        if (!ds::rootChosen()) page = pSetup;                       // the first time: where ReKit keeps its data
         rebindKnobs();
         updatePage();
         startTimerHz(30);
@@ -1463,6 +1471,7 @@ public:
                     case pPattern: drawPattern(g, res, now); break;
                     case pPad:     drawPad(g, res); break;
                     case pMore:    drawMore(g, res); break;
+                    case pSetup:   drawSetup(g); break;
                     default: break;
                 }
             drawTabs(g, res);
@@ -1580,7 +1589,7 @@ private:
        #ifdef JucePlugin_VersionString
         const juce::String ver = JucePlugin_VersionString;
        #else
-        const juce::String ver = "2.3.3";
+        const juce::String ver = "2.3.4";
        #endif
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
         g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
@@ -1607,7 +1616,7 @@ private:
     {
         static const char* names[] = { "kit", "source", "pattern", "pad", "samples", "kits" };
         static const Page pages[] = { pKit, pSource, pPattern, pPad, pSamples, pKits };
-        const Page cur = page == pMore ? pPad : page == pLoops ? pSource : page;
+        const Page cur = page == pMore ? pPad : page == pLoops ? pSource : page == pSetup ? pKits : page;
         float x = content.getX();
         const float y = display.getBottom() - 30.f;
         g.setFont(ui::mono(11.f));
@@ -2546,6 +2555,52 @@ private:
             x = r.getRight() + 8.f;
         }
         chip(g, C.getX(), y + 44.f, "from the file name  .  choose a sample", cNormal, [this] { pendingType.clear(); setPage(pSamples); }, 30.f, 12.f);
+    }
+
+    // ---------------------------------------------------------------- page: SETUP (the first time, and from KITS): the data folder
+    static juce::int64 folderSize(const juce::File& d)
+    {
+        juce::int64 n = 0;
+        for (const auto& e : juce::RangedDirectoryIterator(d, true, "*", juce::File::findFiles)) n += e.getFileSize();
+        return n;
+    }
+    juce::int64 shownSize = -1; juce::String setupWhy;
+    void drawSetup(juce::Graphics& g)
+    {
+        const auto C = content;
+        const auto cur = ds::root();
+        if (shownSize < 0) shownSize = cur.isDirectory() ? folderSize(cur) : 0;
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        g.drawText("Where should ReKit keep its data?", juce::Rectangle<float>(C.getX(), C.getY(), C.getWidth(), 38.f), juce::Justification::centredLeft);
+        g.setColour(ui::dim); g.setFont(ui::inter(12.f));
+        g.drawFittedText("the analysis of every loop you open (so it opens at once the next time, about 2-6 MB each), your kits, exports and the index of your sample folders.\n"
+                         "a drive with room is best. you can change it later on the kits page.",
+                         juce::Rectangle<float>(C.getX(), C.getY() + 52.f, C.getWidth(), 40.f).toNearestInt(), juce::Justification::topLeft, 3);
+        g.setColour(ui::dim2); g.setFont(ui::mono(11.f));
+        g.drawText("now: " + cur.getFullPathName() + "   (" + juce::String((double) shownSize / (1024.0 * 1024.0), 1) + " MB)",
+                   juce::Rectangle<float>(C.getX(), C.getY() + 108.f, C.getWidth(), 16.f), juce::Justification::centredLeft, true);
+        const auto a = chip(g, C.getX(), C.getY() + 140.f, "choose a folder ...  (what is there now moves with it)", cAccent, [this] { chooseRoot(); }, 32.f, 12.f);
+        chip(g, a.getRight() + 12.f, C.getY() + 140.f, "keep it here", cNormal, [this] {
+            juce::String why; ds::setRoot(ds::root(), false, why); setPage(proc.getSource() ? (proc.getResult() ? pKit : pSource) : pSource); }, 32.f, 12.f);
+        if (setupWhy.isNotEmpty()) { g.setColour(ui::orange); g.setFont(ui::mono(11.f)); g.drawText(setupWhy, juce::Rectangle<float>(C.getX(), C.getY() + 188.f, C.getWidth(), 16.f), juce::Justification::centredLeft); }
+        g.setColour(ui::faint); g.setFont(ui::mono(10.f));
+        g.drawText("rekit 1.14 keeps using documents / rekit: after a move it no longer sees the kits that moved", juce::Rectangle<float>(C.getX(), C.getBottom() - 24.f, C.getWidth(), 14.f), juce::Justification::centredLeft);
+    }
+    void chooseRoot()
+    {
+        chooser = std::make_unique<juce::FileChooser>("Where ReKit keeps its data", ds::root().getParentDirectory());
+        chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+            [this, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](const juce::FileChooser& fc)
+            {
+                if (sp == nullptr) return;
+                auto d = fc.getResult();
+                if (d == juce::File()) return;
+                if (d.getFileName() != "ReKit") d = d.getChildFile("ReKit");          // its own folder, never loose files
+                proc.stopPreview();
+                juce::String why;
+                if (ds::setRoot(d, true, why)) { setupWhy.clear(); shownSize = -1; toast("rekit data:  " + d.getFullPathName()); setPage(proc.getSource() ? (proc.getResult() ? pKit : pSource) : pSource); }
+                else { setupWhy = "could not use it: " + why; repaint(); }
+            });
     }
 
     // ---------------------------------------------------------------- page: the pad's ···  (what it is, its hits) - no menus
