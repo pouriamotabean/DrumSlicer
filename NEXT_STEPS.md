@@ -102,3 +102,15 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
   as it was) - the never-worse rule of MATCH is not applied inside BUILD. To look at in 2.0.x.
 - Honest limits: undo covers knobs and the sound's shape (not sample choices: < > and the pad page do those);
   the build animation shows the real % but the rows lock in together at the end (the engine reports one %).
+
+## v2.1.0 — first round of ReKit 2 feedback
+- Kit page = the sounds (a row per pad: sample, its wave, how near, < n/N >, open). Pattern page = the rhythm:
+  every bar, wheel zoom, edit hits (click = add on the grid, drag = move, up/down = how hard, right-click / delete
+  = remove), undoable; dots belong to where they are (no extra kick at the end of a bar).
+- BUILD MY KIT builds from what you hear: pads that play your sample are kept, loop's / best-hit pads are built
+  (from that sound). Lock = keep the loop's own sound. Hint over the key: how many it builds / keeps.
+  Never worse inside BUILD too (a sample nearer as it is plays as it is).
+- Files are what you hear: drag WAV, export, the kit's files and its preview include volume, pan, pitch.
+- Pad page: loop | raw | matched (loop only listens, the pad keeps what it plays). Sound editor: fixed view.
+- Samples: path back (< Kick  Samples), one "like my sample" switch (else: like the pad's card), keep on pad,
+  "trying on ..." notice. Trim flags grab at their dot. Bigger display, smaller knobs / pads.

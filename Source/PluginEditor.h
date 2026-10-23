@@ -138,7 +138,7 @@ struct Look : juce::LookAndFeel_V4
     void drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider& s) override
     {
         const auto b = juce::Rectangle<float>((float) x, (float) y, (float) w, (float) h);
-        const float d = std::min(b.getWidth(), b.getHeight()) - 26.f, r = d * 0.5f;
+        const float d = std::min(b.getWidth(), b.getHeight()) - 24.f, r = d * 0.5f;
         const auto c = b.getCentre();
         const bool hero = s.getProperties()["hero"] && s.isEnabled();
         const float ang = a0 + pos * (a1 - a0);
@@ -216,9 +216,9 @@ public:
             const auto pk = peaks[(size_t) i];
             const float a = std::max(std::abs(pk.first), std::abs(pk.second));
             const bool in = ms >= sp.start && ms <= endMs;
-            const float e = in ? std::min(1.f / std::max(0.05f, a), level(sp, ms) * gainLin(sp)) : 1.f;
+            const float e = in ? level(sp, ms) : 1.f;
             const float bh = std::max(1.5f, a * hh * e);
-            g.setColour(in ? (e * a > 0.08f ? ui::white : ui::line) : juce::Colour(0xff1c1c1f));
+            g.setColour(in ? (e * a > 0.02f ? ui::white : ui::line) : juce::Colour(0xff1c1c1f));
             g.fillRoundedRectangle(x - 1.f, mid - bh, 2.f, 2.f * bh, 1.f);
         }
         // envelope line
@@ -264,9 +264,6 @@ public:
             g.setColour(ui::orange); g.drawText(t, juce::Rectangle<float>(w.getX(), 0, w.getWidth(), 11.f), juce::Justification::centredLeft);
         }
         else { g.setColour(ui::faint); g.drawText(ms(endMs - sp.start), juce::Rectangle<float>(w.getX(), 0, w.getWidth(), 11.f), juce::Justification::centredLeft); }
-        const auto zb = zoomRect();
-        g.setColour(zoomFit ? ui::white : ui::faint);
-        g.drawText(zoomFit ? "full" : "fit", zb, juce::Justification::centredRight);
     }
 
     void mouseMove(const juce::MouseEvent& e) override { const int h = hit(e.position); if (h != hot) { hot = h; repaint(); } }
@@ -274,7 +271,6 @@ public:
     void mouseDown(const juce::MouseEvent& e) override
     {
         auto res = proc.getResult(); if (!res || !res->pads[(size_t) pad].valid) return;
-        if (zoomRect().contains(e.position)) { zoomFit = !zoomFit; peakKey = -1; repaint(); return; }
         drag = hit(e.position);
         if (drag && e.getNumberOfClicks() > 1) { proc.undo.beginNewTransaction(); resetHandle(drag); drag = 0; }
         else if (drag) { proc.undo.beginNewTransaction(); beginGesture(); startSp = proc.shapeParams(pad); startPos = e.position; }
@@ -296,7 +292,7 @@ public:
         switch (drag)
         {
             case 1: set("st", juce::jlimit(0.f, endMs - 5.f - sp.attack - sp.fadeOut, m)); break;
-            case 5: set("en", m >= totalMs - 0.5f ? 2000.f : std::max(m, sp.start + 5.f + sp.attack + sp.fadeOut)); break;
+            case 5: set("en", m >= std::min(totalMs, viewMs()) - 0.5f ? 2000.f : std::max(m, sp.start + 5.f + sp.attack + sp.fadeOut)); break;
             case 2: set("atk", juce::jlimit(0.f, std::max(0.f, len - sp.fadeOut), startSp.attack + 2.f * (m - m0)));
                     if (std::abs(dy) > 1.f) set("fic", curveFrom(startSp.attackCurve));
                     break;
@@ -358,13 +354,8 @@ private:
     float gainToY(float db) const { const auto r = gainRect(); return r.getY() + (12.f - juce::jlimit(-24.f, 12.f, db)) / 36.f * r.getHeight(); }
     float yToGain(float y) const { const auto r = gainRect(); return juce::jlimit(-24.f, 12.f, 12.f - (y - r.getY()) / r.getHeight() * 36.f); }
     static float gainLin(const ShapeParams& sp) { return juce::Decibels::decibelsToGain(sp.gainDb); }
-    juce::Rectangle<float> zoomRect() const { return { (float) getWidth() - 60.f, 0.f, 36.f, 11.f }; }
-    float viewMs() const
-    {
-        if (!zoomFit) return totalMs;
-        const auto sp = proc.shapeParams(pad);
-        return juce::jlimit(20.f, totalMs, std::min(sp.end, totalMs) * 1.12f + 5.f);
-    }
+    // the view: the sound up to where it really ends (-60 dB), a little more - it does not move while you trim
+    float viewMs() const { return juce::jlimit(20.f, std::max(20.f, totalMs), audibleMs * 1.1f + 5.f); }
     float msToX(float m) const { const auto w = wave(); return w.getX() + juce::jlimit(0.f, 1.f, m / std::max(1.f, viewMs())) * w.getWidth(); }
     float xToMs(float x) const { const auto w = wave(); return (x - w.getX()) / w.getWidth() * viewMs(); }
     static juce::String ms(float v) { return v >= 100.f ? juce::String(juce::roundToInt(v)) + " ms" : juce::String(v, 1) + " ms"; }
@@ -386,10 +377,16 @@ private:
     {
         const auto& a = r.pads[(size_t) pad].get(best, user);
         const int n = a.getNumSamples(); totalMs = (float) (n / r.sr * 1000.0);
-        const float vm = viewMs();
         const int key = pad * 4 + (best ? 1 : 0) + (user ? 2 : 0) + 100 * proc.getResultVersion();
         const int W = (int) wave().getWidth();
-        if (key == peakKey && (int) peaks.size() == W && vm == peakView) return;
+        if (key == peakKey && (int) peaks.size() == W) return;
+        {   // where the sound really ends
+            float pk = 1e-9f; for (int c = 0; c < a.getNumChannels(); ++c) pk = std::max(pk, a.getMagnitude(c, 0, n));
+            int last = 0;
+            for (int i = n - 1; i >= 0; --i) { bool loud = false; for (int c = 0; c < a.getNumChannels(); ++c) loud = loud || std::abs(a.getSample(c, i)) > pk * 0.003f; if (loud) { last = i; break; } }
+            audibleMs = (float) (last / r.sr * 1000.0);
+        }
+        const float vm = viewMs();
         peakKey = key; peakView = vm; peaks.clear();
         const int nv = std::min(n, (int) (vm * 0.001 * r.sr) + 1);
         float mx = 1e-6f; for (int c = 0; c < a.getNumChannels(); ++c) mx = std::max(mx, a.getMagnitude(c, 0, n));
@@ -404,8 +401,7 @@ private:
     DrumSlicerProcessor& proc;
     std::vector<std::pair<float, float>> peaks;
     int peakKey = -1, drag = 0, hot = 0;
-    float totalMs = 800.f, peakView = -1.f;
-    bool zoomFit = true;
+    float totalMs = 800.f, peakView = -1.f, audibleMs = 800.f;
     ShapeParams startSp; juce::Point<float> startPos;
 };
 
@@ -471,7 +467,7 @@ public:
         if (name.getText().isEmpty() || !name.hasKeyboardFocus(true)) name.setText(proc.baseName(), false);
         saveBtn.setEnabled(proc.getResult() != nullptr && !proc.isBusy());
         exportBtn.setEnabled(proc.getResult() != nullptr);
-        scroll = juce::jlimit(0, std::max(0, rows() - 2), scroll);
+        scroll = juce::jlimit(0, std::max(0, rows() - visRows()), scroll);
         confirmUntil = 0; saveBtn.setButtonText("save this kit");
         repaint();
     }
@@ -520,10 +516,10 @@ public:
                 g.drawText("folder", folderRect(i).toNearestInt(), juce::Justification::centred);
             }
         }
-        if (rows() > 2)
+        if (rows() > visRows())
         {
             g.setColour(ui::faint); g.setFont(ui::mono(10.f));
-            g.drawText(juce::String(scroll + 1) + "-" + juce::String(std::min(rows(), scroll + 2)) + " / " + juce::String(rows()) + " rows  (wheel)",
+            g.drawText(juce::String(scroll + 1) + "-" + juce::String(std::min(rows(), scroll + visRows())) + " / " + juce::String(rows()) + " rows  (wheel)",
                        getLocalBounds().removeFromBottom(14), juce::Justification::centredRight);
         }
         else { g.setColour(ui::faint); g.setFont(ui::mono(10.f)); g.drawText("documents / rekit / kits   .   click = open  .  hover = listen, folder, delete", getLocalBounds().removeFromBottom(14), juce::Justification::centredLeft); }
@@ -531,7 +527,7 @@ public:
     void mouseMove(const juce::MouseEvent& e) override { setHover(kitAt(e.position)); }
     void mouseExit(const juce::MouseEvent&) override { if (!del.isMouseButtonDown()) setHover(kitAt(getMouseXYRelative().toFloat())); }
     void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& w) override
-    { scroll = juce::jlimit(0, std::max(0, rows() - 2), scroll + (w.deltaY < 0 ? 1 : -1)); setHover(-1); repaint(); }
+    { scroll = juce::jlimit(0, std::max(0, rows() - visRows()), scroll + (w.deltaY < 0 ? 1 : -1)); setHover(-1); repaint(); }
     void mouseUp(const juce::MouseEvent& e) override
     {
         const int i = kitAt(e.position);
@@ -553,12 +549,13 @@ private:
 
     static juce::String lowerDate(juce::Time t) { return t.formatted("%d %b %Y").toLowerCase(); }
     int rows() const { return (kits.size() + 2) / 3; }
+    int visRows() const { return std::max(1, (getHeight() - 66) / 104); }
     juce::Rectangle<float> cardRect(int i) const
     {
         const int row = i / 3 - scroll, col = i % 3;
-        if (row < 0 || row > 1) return {};
+        if (row < 0 || row >= visRows()) return {};
         const float w = ((float) getWidth() - 20.f) / 3.f;
-        return { col * (w + 10.f), 50.f + row * 108.f, w, 98.f };
+        return { col * (w + 10.f), 50.f + row * 104.f, w, 94.f };
     }
     juce::Rectangle<float> playRect(int i) const { const auto r = cardRect(i); return { r.getX() + 12.f, r.getBottom() - 34.f, 22.f, 22.f }; }
     juce::Rectangle<float> folderRect(int i) const { const auto r = cardRect(i); return { r.getX() + 42.f, r.getBottom() - 34.f, 50.f, 22.f }; }
@@ -617,6 +614,8 @@ public:
     std::function<int()> targetPad;
     std::function<juce::String()> targetName;
     std::function<void()> onTried;
+    std::function<void()> onBack;                  // the path at the top:  ‹ Kick   Samples
+    std::function<juce::String()> backName;
 
     explicit SampleBrowser(DrumSlicerProcessor& p) : proc(p)
     {
@@ -628,7 +627,8 @@ public:
         firstBtn.setButtonText("add your sample folder"); firstBtn.getProperties().set("kind", "primary");
         firstBtn.onClick = [this] { addFolder(); };
         addBtn.setButtonText("+ folder"); remBtn.setButtonText("remove"); upBtn.setButtonText("up");
-        useBtn.setButtonText("use on pad"); useBtn.getProperties().set("kind", "primary");
+        useBtn.setButtonText("keep on pad"); useBtn.getProperties().set("kind", "primary");
+        useBtn.setTooltip("The selected file becomes this pad's sound (and the pad is locked)");
         revealBtn.setButtonText("open folder");
         tabFolders.setButtonText("folders"); tabSimilar.setButtonText("similar  .  ranked after match");
         tabFolders.onClick = [this] { setMode(0); };
@@ -642,12 +642,11 @@ public:
         tryBtn.setButtonText("try in kit");
         tryBtn.setTooltip("On: every file you pick sits on the pad for now and plays in the pattern. use on pad keeps it, off goes back.");
         tryBtn.onClick = [this] { tryMode = !tryMode; tryBtn.setToggleState(tryMode, juce::dontSendNotification); if (!tryMode) proc.endTry(false); };
-        for (int k = 0; k < 3; ++k)
-        {   // what to look like: the loop's sound (default), the best hit, or your sample on the pad
-            addAndMakeVisible(likeBtn[(size_t) k]);
-            likeBtn[(size_t) k].setButtonText(k == 0 ? "like the loop's" : k == 1 ? "like the best hit" : "like yours");
-            likeBtn[(size_t) k].onClick = [this, k] { likeSrc = k; want = 5; findSimilar(true); };
-        }
+        // what to look like: what the pad's card says (the loop's sound, or its best hit) - or, switched on, your sample
+        addAndMakeVisible(likeBtn[0]);
+        likeBtn[0].setButtonText("like my sample");
+        likeBtn[0].setTooltip("On: look for sounds like the sample on this pad (not like the loop)");
+        likeBtn[0].onClick = [this] { likeMine = !likeMine; want = 5; findSimilar(true); };
         moreBtn.onClick = [this] { want += 5; if (want > (int) matches.size()) findSimilar(true); else { list.updateContent(); list.repaint(); } };
         addBtn.setTooltip("Add a sample folder (remembered)"); remBtn.setTooltip("Take the folder you are in off the list (files stay)");
         addAndMakeVisible(filter);
@@ -675,11 +674,29 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
-        g.drawText("Samples", 0, 0, 160, 38, juce::Justification::centredLeft);
-        const auto tn = targetName ? targetName() : juce::String();
-        g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
-        g.drawText(tn.isNotEmpty() ? "for " + ui::lower(tn) : juce::String("choose a pad"), 136, 12, 220, 20, juce::Justification::centredLeft);
+        {
+            const auto bn = backName ? backName() : juce::String();
+            float x = 0;
+            if (bn.isNotEmpty())
+            {
+                const auto t = juce::String(juce::CharPointer_UTF8("\xe2\x80\xb9 ")) + bn;
+                const float w = ui::textW(ui::inter(30.f, 300), t);
+                backRect = { 0.f, 0.f, w + 4.f, 38.f };
+                g.setColour(backHot ? ui::white : ui::dim); g.setFont(ui::inter(30.f, 300));
+                g.drawText(t, backRect, juce::Justification::centredLeft);
+                x = w + 18.f;
+            }
+            else backRect = {};
+            g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+            g.drawText("Samples", juce::Rectangle<float>(x, 0.f, 160.f, 38.f), juce::Justification::centredLeft);
+        }
+        if (tryMode)
+        {   // trying: say it, so it is not forgotten
+            const auto tn = targetName ? targetName() : juce::String();
+            g.setColour(ui::orange); g.setFont(ui::mono(10.f));
+            g.drawText("trying on " + ui::lower(tn) + "  .  press play to hear it in the kit  .  keep on pad keeps it",
+                       juce::Rectangle<int>(revealBtn.getRight() + 12, revealBtn.getY(), getWidth() - revealBtn.getRight() - 90, revealBtn.getHeight()), juce::Justification::centredLeft, true);
+        }
         if (rootDirs.isEmpty())
         {
             auto r = juce::Rectangle<int>(0, 60, getWidth(), 120);
@@ -710,6 +727,11 @@ public:
             return;
         }
         auto& lib = *proc.library;
+        {   // what it looks for
+            g.setColour(ui::dim); g.setFont(ui::inter(11.f));
+            g.drawText(likeSrc == 2 ? "looking like: your sample" : likeSrc == 1 ? "looking like: the best hit" : "looking like: the loop's sound",
+                       lc.withTrimmedTop(32).withHeight(16).toNearestInt(), juce::Justification::centredLeft);
+        }
         {
             const auto st = lib.status();
             g.setColour(ui::soft); g.setFont(ui::inter(11.f));
@@ -748,7 +770,7 @@ public:
         // left column
         const int lw = (int) leftCol().getWidth();
         addBtn.setBounds(0, h - 30, 72, 26); remBtn.setBounds(76, h - 30, 66, 26);
-        for (int k = 0; k < 3; ++k) likeBtn[(size_t) k].setBounds(0, 46 + k * 30, lw, 26);
+        likeBtn[0].setBounds(0, 46, lw, 26);
         scanBtn.setBounds(0, h - 30, 70, 26); limitBtn.setBounds(76, h - 30, 56, 26);
         // list + bottom row
         upBtn.setBounds(lx, 42, 44, 24);
@@ -762,9 +784,17 @@ public:
     }
     void mouseUp(const juce::MouseEvent& e) override
     {
+        if (!backRect.isEmpty() && backRect.contains(e.position)) { if (onBack) onBack(); return; }
         if (mode != 0) return;
         for (int i = 0; i < rootDirs.size(); ++i) if (rootRect(i).contains(e.position)) { open(rootDirs[i]); return; }
     }
+    void mouseMove(const juce::MouseEvent& e) override
+    {
+        const bool h = !backRect.isEmpty() && backRect.contains(e.position);
+        setMouseCursor(h ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+        if (h != backHot) { backHot = h; repaint(); }
+    }
+    void mouseExit(const juce::MouseEvent&) override { if (backHot) { backHot = false; repaint(); } }
 
 private:
     DrumSlicerProcessor& proc;
@@ -773,7 +803,7 @@ private:
     juce::TextButton addBtn, remBtn, upBtn, useBtn, revealBtn, firstBtn, tabFolders, tabSimilar, scanBtn, limitBtn, moreBtn;
     std::array<juce::TextButton, 3> likeBtn;
     juce::TextButton tryBtn;
-    bool tryMode = false;
+    bool tryMode = false, likeMine = false;
     int likeSrc = 0;
     juce::uint32 lastFind = 0;
     juce::Array<juce::File> rootDirs, items;
@@ -792,6 +822,7 @@ private:
     juce::uint32 selectedAt = 0;
     bool scanWas = false;
 
+    juce::Rectangle<float> backRect; bool backHot = false;
     int listX() const { return 206; }
     juce::Rectangle<float> leftCol() const { return { 0.f, 46.f, 190.f, (float) getHeight() - 46.f }; }
     juce::Rectangle<float> rootRect(int i) const { return { 0.f, 46.f + i * 30.f, 190.f, 26.f }; }
@@ -842,7 +873,7 @@ private:
     {
         const bool any = !rootDirs.isEmpty(), f = any && mode == 0, sm = any && mode == 1;
         for (juce::Component* c : std::initializer_list<juce::Component*> { &remBtn, &upBtn, &filter, &addBtn }) c->setVisible(f);
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &scanBtn, &limitBtn, &moreBtn, &likeBtn[0], &likeBtn[1], &likeBtn[2] }) c->setVisible(sm);
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &scanBtn, &limitBtn, &moreBtn, &likeBtn[0] }) c->setVisible(sm);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &list, &useBtn, &revealBtn, &tabFolders, &tabSimilar, &tryBtn }) c->setVisible(any);
         firstBtn.setVisible(!any);
         remBtn.setEnabled(any);
@@ -899,9 +930,9 @@ private:
         const int pad = targetPad ? targetPad() : -1;
         havePad = r && pad >= 0 && pad < ds::kPads && r->pads[(size_t) pad].valid;
         const bool hasC = havePad && r->pads[(size_t) pad].user.getNumSamples() > 0;
-        if (likeSrc == 2 && !hasC) likeSrc = 0;
+        likeSrc = likeMine && hasC ? 2 : (havePad && proc.padSource(pad) == 1 ? 1 : 0);
         const int src = likeSrc;
-        for (int k = 0; k < 3; ++k) { likeBtn[(size_t) k].setToggleState(k == src, juce::dontSendNotification); likeBtn[(size_t) k].setEnabled(havePad && (k < 2 || hasC)); }
+        likeBtn[0].setToggleState(likeMine && hasC, juce::dontSendNotification); likeBtn[0].setEnabled(hasC);
         auto ix = proc.library->index();
         const juce::String key = havePad ? juce::String(proc.getResultVersion()) + "|" + juce::String(pad) + "|" + juce::String(src) + "|"
                                            + juce::String((juce::pointer_sized_int) ix.get()) : juce::String();
@@ -1052,6 +1083,7 @@ public:
     {
         setSize(W, H);
         setLookAndFeel(&look);
+        setWantsKeyboardFocus(true);
         for (int k = 0; k < 4; ++k)
         {
             auto& s = knobs[(size_t) k];
@@ -1069,6 +1101,11 @@ public:
         addChildComponent(samples);
         samples.onUse = [this](const juce::File& f) { useSample(selected, f); };
         samples.targetPad = [this] { return selected; };
+        samples.onBack = [this] { setPage(samplesFrom == pSamples ? pPad : samplesFrom); };
+        samples.backName = [this] { auto r = proc.getResult(); if (!r) return juce::String();
+                                    const auto& pd = r->pads[(size_t) selected];
+                                    if (samplesFrom == pKit) return juce::String("Kit");
+                                    return pd.valid ? juce::String(pd.name.substring(0, 1)) + pd.name.substring(1).toLowerCase() : juce::String("Empty pad"); };
         samples.onTried = [this] { repaint(); };
         samples.onKept = [this](const juce::File& f) { proc.setPadLocked(selected, true); toast("yours  " + f.getFileNameWithoutExtension()); repaint(); };
         samples.targetName = [this] { auto r = proc.getResult(); if (!r) return juce::String();
@@ -1093,19 +1130,20 @@ public:
     { selected = juce::jlimit(0, ds::kPads - 1, pad); knobBank = bank; hoverPad = hover; page = (Page) pg; updatePage(); timerCallback(); }
 
     // ------------------------------------------------------------------ layout (design size 1240 x 720)
-    const juce::Rectangle<float> display { 34.f, 64.f, 846.f, 342.f };
-    const juce::Rectangle<float> content { 60.f, 84.f, 794.f, 280.f };          // inside the display, above the page dots
-    juce::Rectangle<int> knobArea() const { return { 900, 60, 316, 350 }; }
-    juce::Rectangle<float> knobRect(int k) const { return { 920.f + (k % 2) * 150.f, 96.f + (k / 2) * 134.f, 110.f, 110.f }; }
-    juce::Rectangle<float> padRect(int i) const { return { 242.f + (i % 4) * 244.f, 426.f + (i / 4) * 140.f, 230.f, 126.f }; }
-    juce::Rectangle<float> buildRect() const { return { 70.f, 450.f, 108.f, 108.f }; }
-    juce::Rectangle<float> keyRect(int k) const { return { 46.f + k * 58.f, 600.f, 48.f, 48.f }; }   // play, undo, midi
-    juce::Rectangle<float> switchRect() const { return { 966.f, 376.f, 66.f, 30.f }; }
+    // the display is the work place: big. Knobs and pads only as big as a hand needs.
+    const juce::Rectangle<float> display { 34.f, 64.f, 912.f, 434.f };
+    const juce::Rectangle<float> content { 60.f, 84.f, 860.f, 372.f };          // inside the display, above the page dots
+    juce::Rectangle<int> knobArea() const { return { 960, 60, 260, 446 }; }
+    juce::Rectangle<float> knobRect(int k) const { return { 976.f + (k % 2) * 120.f, 110.f + (k / 2) * 156.f, 90.f, 90.f }; }
+    juce::Rectangle<float> padRect(int i) const { return { 230.f + (i % 4) * 247.f, 518.f + (i / 4) * 94.f, 235.f, 84.f }; }
+    juce::Rectangle<float> buildRect() const { return { 82.f, 518.f, 88.f, 88.f }; }
+    juce::Rectangle<float> keyRect(int k) const { return { 58.f + k * 48.f, 628.f, 40.f, 40.f }; }   // play, undo, midi
+    juce::Rectangle<float> switchRect() const { return { 1032.f, 440.f, 60.f, 28.f }; }
 
     void resized() override
     {
         for (int k = 0; k < 4; ++k) knobs[(size_t) k].setBounds(knobRect(k).toNearestInt());
-        shape.setBounds(juce::Rectangle<float>(content.getX(), content.getY() + 128.f, content.getWidth() - 280.f, 92.f).toNearestInt());
+        shape.setBounds(juce::Rectangle<float>(content.getX(), content.getY() + 128.f, content.getWidth() - 290.f, content.getHeight() - 180.f).toNearestInt());
         samples.setBounds(content.withTrimmedBottom(0).toNearestInt());
         kitsPage.setBounds(content.toNearestInt());
         delPad.setBounds(juce::Rectangle<float>(content.getX() + 230.f, content.getBottom() - 34.f, 200.f, 30.f).toNearestInt());
@@ -1196,7 +1234,8 @@ public:
             downPad = pad; return;
         }
         if (page == pSource && display.contains(e.position)) sourceDown(e);
-        if (page == pPattern && tightRect().contains(e.position)) { proc.undo.beginNewTransaction(); dragTight = true; setTight(e.position.x); }
+        if (page == pPattern && tightRect().contains(e.position)) { proc.undo.beginNewTransaction(); dragTight = true; setTight(e.position.x); return; }
+        if (page == pPattern && patLanes().expanded(6.f, 8.f).contains(e.position)) patternDown(e);
     }
     void mouseDrag(const juce::MouseEvent& e) override
     {
@@ -1213,10 +1252,12 @@ public:
             }
         }
         if (page == pSource) sourceDrag(e);
+        if (page == pPattern) patternDrag(e);
     }
     void mouseUp(const juce::MouseEvent& e) override
     {
         const bool wasDragTight = dragTight; dragTight = false; dragWhat = 0;
+        if (patEditing) { patternUp(); repaint(); return; }
         if (wasDragTight || dragStarted) return;
         if (hasDown) { hasDown = false; if (downZone.r.contains(e.position) && downZone.click) { auto fn = downZone.click; fn(); repaint(); } return; }
         if (downPad >= 0 && downPad == padAt(e.position)) padClick(downPad, e.position);
@@ -1233,6 +1274,7 @@ public:
     }
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
+        if (page == pPattern && display.contains(e.position)) { patternWheel(e, w); return; }
         auto src = proc.getSource();
         if (page != pSource || !src || !display.contains(e.position)) return;
         fixView(*src);
@@ -1256,6 +1298,7 @@ public:
     bool keyPressed(const juce::KeyPress& k) override
     {
         if (k == juce::KeyPress::escapeKey) { setPage(proc.getResult() ? pKit : pSource); return true; }
+        if (page == pPattern && (k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey)) { deleteSelectedHit(); repaint(); return true; }
         return false;
     }
 
@@ -1286,7 +1329,8 @@ public:
             juce::String sig;
             if (res) for (int i = 0; i < ds::kPads; ++i) { const auto& pd = res->pads[(size_t) i]; const auto md = proc.getMatch(i);
                 sig << pd.userPath << pd.layerPath << (int) md.on << juce::roundToInt(md.after) << proc.suggestionIndex(i) << "|"; }
-            sig << proc.getResultVersion();
+            if (res) { sig << (juce::int64) res->sourceId; for (auto& pd : res->pads) sig << pd.name << (int) pd.valid; }
+            sig << proc.getKitDir().getFullPathName() << proc.getLoopFile().getFullPathName();
             if (sig != soundSig) { soundSig = sig; proc.undo.clearUndoHistory(); }
         }
         // messages of the processor -> toast
@@ -1308,7 +1352,7 @@ public:
         if (page == pSamples && selected != browsedPad) { browsedPad = selected; samples.repaint(); }
         rebindKnobs();
         bool lit = false; for (float l : levels) lit = lit || l > 0.01f;
-        const bool moving = lit || busy || building || proc.isMatching() || proc.isMidiPlaying() || proc.isSourcePlaying() || proc.isPreviewing()
+        const bool moving = lit || patEditing || busy || building || proc.isMatching() || proc.isMidiPlaying() || proc.isSourcePlaying() || proc.isPreviewing()
                          || now - settleStart < 1000 || now - buildEnd < 1000 || juce::Time::getMillisecondCounter() < toastUntil + 100
                          || std::abs(tightShown - (proc.midiMode() == ds::kTight ? proc.apvts.getRawParameterValue("quant")->load() : 0.f)) > 0.001f;
         if (moving || ++idle >= 6) { idle = 0; repaint(); }      // otherwise 5 times a second is enough to follow changes
@@ -1350,10 +1394,11 @@ public:
                 }
             drawTabs(g, res);
         }
-        drawToast(g);
+        hint.clear();
         drawKnobs(g, res);
         drawKeys(g, res);
         drawPads(g, res, now);
+        drawToast(g);
     }
 
 private:
@@ -1418,7 +1463,13 @@ private:
     }
 
     // ---------------------------------------------------------------- pages
-    void setPage(Page p) { if (p == page) { updatePage(); return; } page = p; updatePage(); repaint(); }
+    Page samplesFrom = pPad;
+    void setPage(Page p)
+    {
+        if (p == page) { updatePage(); return; }
+        if (p == pSamples) samplesFrom = page == pKit ? pKit : page == pMore ? pMore : pPad;
+        page = p; updatePage(); repaint();
+    }
     void updatePage()
     {
         auto res = proc.getResult();
@@ -1454,7 +1505,7 @@ private:
        #ifdef JucePlugin_VersionString
         const juce::String ver = JucePlugin_VersionString;
        #else
-        const juce::String ver = "2.0.0";
+        const juce::String ver = "2.1.0";
        #endif
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
         g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
@@ -1503,8 +1554,16 @@ private:
         }
     }
     void toast(const juce::String& t) { toastText = t; toastUntil = juce::Time::getMillisecondCounter() + 2600; repaint(); }
+    juce::String hint;      // what a key would do, while the mouse is over it (in the strip above the display)
     void drawToast(juce::Graphics& g)
     {
+        if ((juce::Time::getMillisecondCounter() >= toastUntil || toastText.isEmpty()) && hint.isNotEmpty())
+        {
+            const auto f = ui::mono(11.f);
+            const auto t = juce::Rectangle<float>(std::min(640.f, ui::textW(f, hint) + 36.f), 26.f).withCentre({ 600.f, 35.f });
+            g.setColour(ui::dim); g.setFont(f); g.drawText(hint, t, juce::Justification::centred, true);
+            return;
+        }
         if (juce::Time::getMillisecondCounter() >= toastUntil || toastText.isEmpty()) return;
         const auto f = ui::mono(11.f);
         const float w = std::min(display.getWidth() - 60.f, ui::textW(f, toastText) + 36.f);
@@ -1515,8 +1574,8 @@ private:
     }
 
     // ---------------------------------------------------------------- the lanes: every hit a dot at its real time
-    juce::Rectangle<float> lanesRect() const { return { content.getX() + 26.f, content.getY() + 92.f, content.getWidth() - 26.f, 176.f }; }
-    static float laneY(juce::Rectangle<float> L, int k) { return L.getY() + 8.f + k * (L.getHeight() - 16.f) / 7.f; }
+    // ---------------------------------------------------------------- page: KIT = the sounds (one row per pad)
+    juce::Rectangle<float> rowsRect() const { return { content.getX(), content.getY() + 84.f, content.getWidth(), content.getHeight() - 96.f }; }
     float kitScore() const
     {
         auto r = proc.getResult(); if (!r) return -1.f;
@@ -1529,20 +1588,42 @@ private:
         }
         return n ? s / n : -1.f;
     }
+    // small waves of what each pad plays (from the shaped sounds)
+    std::array<std::vector<float>, ds::kPads> miniWave; const void* miniKey = nullptr;
+    void refreshMini()
+    {
+        auto sh = proc.getShaped(); auto r = proc.getResult();
+        if (!sh || !r) { for (auto& m : miniWave) m.clear(); miniKey = nullptr; return; }
+        if (sh.get() == miniKey) return;
+        miniKey = sh.get();
+        for (int p = 0; p < ds::kPads; ++p)
+        {
+            auto& w = miniWave[(size_t) p]; w.assign(64, 0.f);
+            const auto& b = sh->buf[(size_t) p];
+            const int n = b.getNumSamples(); if (n == 0) continue;
+            const int span = std::min(n, (int) (0.6 * r->sr));
+            float mx = 1e-6f;
+            for (int i = 0; i < 64; ++i)
+            {
+                const int s0 = span * i / 64, s1 = std::max(s0 + 1, span * (i + 1) / 64);
+                float m = 0; for (int k = s0; k < s1; k += 4) m = std::max(m, std::abs(b.getSample(0, k)));
+                w[(size_t) i] = m; mx = std::max(mx, m);
+            }
+            for (auto& v : w) v /= mx;
+        }
+    }
     void drawKit(juce::Graphics& g, const std::shared_ptr<ds::Result>& res, double now)
     {
         if (!res) { drawDropHere(g); return; }
         const auto C = content;
-        // name of the loop / kit
         g.setColour(ui::dim2); g.setFont(ui::mono(11.f));
         const auto kd = proc.getKitDir();
         g.drawText(kd != juce::File() ? "kit  .  " + kd.getFileName() : proc.getLoopFile().getFileName().toLowerCase(), juce::Rectangle<float>(C.getX(), C.getY(), 500.f, 14.f), juce::Justification::centredLeft, true);
-        const auto titleR = juce::Rectangle<float>(C.getX(), C.getY() + 14.f, 520.f, 52.f);
+        const auto titleR = juce::Rectangle<float>(C.getX(), C.getY() + 14.f, 560.f, 52.f);
         g.setColour(ui::white); g.setFont(ui::inter(42.f, 300, -0.02f));
         g.drawText(ui::nice(proc.baseName()), titleR, juce::Justification::centredLeft, true);
         zone(titleR, [this] { setPage(pKits); });
-        // the score ring: your kit against the loop
-        {
+        {   // your kit against the loop
             float target = kitScore();
             const double since = now - buildEnd;
             if (buildEnd > 0 && since < 700) target = scoreFrom + (std::max(0.f, target) - scoreFrom) * (float) juce::jlimit(0.0, 1.0, since / 700.0);
@@ -1560,86 +1641,87 @@ private:
             g.setColour(ui::dim); g.setFont(ui::inter(11.f));
             g.drawText(target > 0 ? "your kit vs the loop" : "build my kit, or choose samples", juce::Rectangle<float>(rc.getRight() + 12.f, rc.getY() + 36.f, 200.f, 16.f), juce::Justification::centredLeft);
         }
-        drawLanes(g, *res, lanesRect(), now, false);
-    }
-    void drawLanes(juce::Graphics& g, const ds::Result& r, juce::Rectangle<float> L, double now, bool zoom)
-    {
-        const double len = std::max(1, r.loop.getNumSamples());
-        const double barLen = 240.0 / std::max(1.0, r.bpm) * r.sr;
-        const int nb = bars(r);
-        const double from = zoom ? patBar * barLen : 0.0, span = zoom ? barLen : len;
-        auto xOfT = [&](double t) { return L.getX() + (float) ((t - from) / span) * L.getWidth(); };
-        // bar / beat lines
-        if (zoom) for (int j = 0; j <= 16; ++j) { const float x = L.getX() + L.getWidth() * j / 16.f; g.setColour(j % 4 == 0 ? juce::Colour(0xff2a2a2d) : juce::Colour(0xff161618)); g.drawVerticalLine((int) x, L.getY() - 4.f, L.getBottom() + 4.f); }
-        else for (int b = 0; b <= nb; ++b) { const float x = xOfT(b * barLen); if (x > L.getRight() + 1) break; g.setColour(juce::Colour(0xff161618)); g.drawVerticalLine((int) x, L.getY() - 4.f, L.getBottom() + 4.f); }
-        // the glyphs
+        refreshMini();
+        const auto R = rowsRect();
+        const float rh = R.getHeight() / 8.f;
+        const bool building = proc.isBuilding();
+        const double sinceEnd = now - buildEnd, sinceSettle = now - settleStart;
+        if (building)
+        {
+            g.setColour(ui::orange); g.setFont(ui::mono(11.f));
+            g.drawText("building your kit  " + proc.matchMessage().toLowerCase().replace("building kit", "").trim(), juce::Rectangle<float>(R.getX(), R.getY() - 18.f, R.getWidth(), 14.f), juce::Justification::centredRight);
+        }
         for (int k = 0; k < ds::kPads; ++k)
         {
-            const auto& pd = r.pads[(size_t) k];
-            const float y = laneY(L, k);
-            const auto gr = juce::Rectangle<float>(13.f, 13.f).withCentre({ L.getX() - 20.f, y });
-            ui::glyph(g, pd.valid ? pd.name : "-", gr, pd.valid ? (k == selected ? ui::white : ui::soft) : ui::line);
-            if (pd.valid) zone(gr.expanded(6.f), [this, k] { selectPad(k); proc.audition(k); });
-        }
-        // building: every lane looks for its sound (the real %, the rows lock in at the end)
-        const bool building = proc.isBuilding();
-        const double sinceEnd = now - buildEnd;
-        const bool locking = !building && buildEnd > 0 && sinceEnd < 700;
-        const double sinceSettle = now - settleStart;
-        const bool settling = settleStart > 0 && sinceSettle < 900;
-        const float playX = proc.isMidiPlaying() ? L.getX() + proc.midiPlayFrac() * L.getWidth() : -1.f;
-        const int mm = proc.midiMode();
-        const float tightNow = zoom ? tightShown : 0.f;
-        for (size_t h = 0; h < r.hits.size(); ++h)
-        {
-            const auto& hit = r.hits[h];
-            if (hit.pad < 0 || hit.pad >= ds::kPads || !r.pads[(size_t) hit.pad].valid) continue;
-            if (zoom && (hit.time < from || hit.time >= from + span)) continue;
-            const float v = juce::jlimit(0.f, 1.f, hit.velocity / 127.f);
-            const double gridT = from + std::round((hit.time - from) / (barLen / 16.0)) * (barLen / 16.0);
-            const double t = hit.time + (gridT - hit.time) * tightNow;
-            float x = xOfT(t), y = laneY(L, hit.pad);
-            float w = zoom ? 6.f + 7.f * v : 5.f + 3.f * v;
-            juce::Colour c = ui::white.withAlpha(0.55f + 0.45f * v);
-            if (settling)
-            {   // the dots fly from the wave's middle into their rows
-                const float f = (float) juce::jlimit(0.0, 1.0, (sinceSettle - 400.0 * (double) (h % 23) / 23.0) / 500.0);
-                const float e = 1.f - (1.f - f) * (1.f - f);
-                y = L.getCentreY() + (y - L.getCentreY()) * e;
-                c = c.withMultipliedAlpha(0.4f + 0.6f * e);
-            }
-            if (building || locking)
+            const auto row = juce::Rectangle<float>(R.getX(), R.getY() + k * rh, R.getWidth(), rh - 2.f);
+            const auto& pd = res->pads[(size_t) k];
+            const bool valid = pd.valid, sel = k == selected;
+            float alpha = 1.f;
+            if (settleStart > 0 && sinceSettle < 900) alpha = (float) juce::jlimit(0.0, 1.0, (sinceSettle - 70.0 * k) / 250.0);   // rows come in one by one
+            if (valid && !proc.padAudible(k)) alpha *= 0.35f;
+            if (sel) { g.setColour(ui::card.withMultipliedAlpha(alpha)); g.fillRoundedRectangle(row, 8.f); }
+            else if (hot(row)) { g.setColour(juce::Colour(0xff0c0c0e)); g.fillRoundedRectangle(row, 8.f); }
+            const float cy = row.getCentreY(), lv = levels[(size_t) k];
+            const auto ink = (lv > 0.05f ? ui::orange : ui::white).withMultipliedAlpha(alpha);
+            ui::glyph(g, valid ? pd.name : "-", juce::Rectangle<float>(12.f, 12.f).withCentre({ row.getX() + 16.f, cy }), valid ? ink : ui::line);
+            const juce::String nm = valid ? juce::String(pd.name.substring(0, 1)) + pd.name.substring(1).toLowerCase() : juce::String("-");
+            g.setColour(valid ? ui::white.withMultipliedAlpha(alpha) : ui::line); g.setFont(ui::inter(13.f, 500));
+            g.drawText(nm, juce::Rectangle<float>(row.getX() + 34.f, row.getY(), 96.f, row.getHeight()), juce::Justification::centredLeft, true);
+            const int src = valid ? proc.padSource(k) : 0;
+            const bool hasC = valid && pd.user.getNumSamples() > 0;
+            juce::String sub = !valid ? juce::String("empty  .  click to add") : proc.padIsSilent(k) ? juce::String("no sound  .  click to add")
+                             : (src == 2 && hasC) ? pd.userName + (pd.layered() ? " + " + pd.layerName : juce::String()) : src == 1 ? juce::String("best hit (the loop's)") : juce::String("the loop's sound");
+            g.setColour((src == 2 && hasC ? ui::soft : ui::dim2).withMultipliedAlpha(valid ? alpha : 0.6f)); g.setFont(ui::inter(11.f));
+            g.drawText(sub, juce::Rectangle<float>(row.getX() + 134.f, row.getY(), 250.f, row.getHeight()), juce::Justification::centredLeft, true);
+            // the wave of what it plays (building: a light looks for its sound)
+            const auto wr = juce::Rectangle<float>(row.getX() + 396.f, row.getY() + 4.f, 236.f, row.getHeight() - 8.f);
+            const bool toBuild = building && valid && pd.hits > 0 && !proc.padLocked(k) && !(src == 2 && hasC);
+            const bool locking = !building && buildEnd > 0 && sinceEnd < 700;
+            const auto& w = miniWave[(size_t) k];
+            for (size_t i = 0; i < w.size() && valid; ++i)
             {
-                const bool done = locking && sinceEnd > 80.0 * hit.pad;
-                c = done ? c : ui::dark; w = done ? w : 3.f;
+                const float x = wr.getX() + (float) i * wr.getWidth() / (float) w.size();
+                const float h = std::max(1.f, w[i] * wr.getHeight() * 0.5f);
+                juce::Colour c = toBuild ? ui::line : (locking && sinceEnd < 80.0 * k ? ui::line : ink.withMultipliedAlpha(sel ? 1.f : 0.75f));
+                g.setColour(c); g.fillRoundedRectangle(x, wr.getCentreY() - h, 2.f, 2.f * h, 1.f);
             }
-            if (!proc.padAudible(hit.pad)) c = c.withMultipliedAlpha(0.3f);
-            const bool now_ = playX >= 0 && x <= playX && playX - x < 14.f;
-            if (now_) { g.setColour(ui::orange.withAlpha(0.35f)); g.fillEllipse(juce::Rectangle<float>(w + 8.f, w + 8.f).withCentre({ x, y })); c = ui::orange; }
-            else if (hit.pad == selected && page == pKit && !building) c = ui::white;
-            g.setColour(c); g.fillEllipse(juce::Rectangle<float>(w, w).withCentre({ x, y }));
-            if (zoom && mm == ds::kTight && tightNow < 0.999f)
-            {   // where the grid would put it
-                g.setColour(ui::dark); g.drawEllipse(juce::Rectangle<float>(w + 4.f, w + 4.f).withCentre({ xOfT(gridT), y }), 1.f);
-            }
-            else if (zoom && mm != ds::kTight && std::abs(xOfT(gridT) - x) > 2.f)
-            { g.setColour(ui::dark); g.drawEllipse(juce::Rectangle<float>(w + 4.f, w + 4.f).withCentre({ xOfT(gridT), y }), 1.f); }
-        }
-        if (building)
-            for (int k = 0; k < ds::kPads; ++k)
+            if (toBuild)
             {
-                if (!r.pads[(size_t) k].valid || r.pads[(size_t) k].hits == 0 || proc.padLocked(k)) continue;
-                const float ph = (float) std::fmod((now - buildStart) / 1400.0 + k * 0.137, 1.0);
-                const float x = L.getX() + ph * L.getWidth(), y = laneY(L, k);
-                g.setColour(ui::orange.withAlpha(0.3f)); g.fillRoundedRectangle(x - 10.f, y - 3.f, 20.f, 6.f, 3.f);
-                g.setColour(ui::orange); g.fillRoundedRectangle(x - 7.f, y - 1.5f, 14.f, 3.f, 1.5f);
+                const float ph = (float) std::fmod((now - buildStart) / 1300.0 + k * 0.137, 1.0);
+                const float x = wr.getX() + ph * wr.getWidth();
+                g.setColour(ui::orange.withAlpha(0.3f)); g.fillRoundedRectangle(x - 12.f, wr.getCentreY() - 3.f, 24.f, 6.f, 3.f);
+                g.setColour(ui::orange); g.fillRoundedRectangle(x - 8.f, wr.getCentreY() - 1.5f, 16.f, 3.f, 1.5f);
             }
-        if (playX >= 0 && !zoom) { g.setColour(ui::orange.withAlpha(0.3f)); g.fillRect(playX - 1.5f, L.getY() - 8.f, 3.f, L.getHeight() + 16.f); g.setColour(ui::orange); g.fillRect(playX - 0.5f, L.getY() - 8.f, 1.f, L.getHeight() + 16.f); }
-        if (building)
-        {   // what is being done, honestly: the real progress of the build
-            const auto m = proc.matchMessage().toLowerCase().replace("building kit", "").trim();
-            g.setColour(ui::orange); g.setFont(ui::mono(11.f));
-            g.drawText("building your kit  " + m, juce::Rectangle<float>(L.getX(), L.getY() - 22.f, L.getWidth(), 14.f), juce::Justification::centredRight);
+            // how near it is (your sample, matched)
+            const auto md = valid ? proc.getMatch(k) : MatchData();
+            g.setFont(ui::mono(12.f, true));
+            g.setColour(src == 2 && hasC && md.on ? ui::white.withMultipliedAlpha(alpha) : ui::line);
+            g.drawText(src == 2 && hasC && md.on ? "[" + juce::String(juce::roundToInt(md.after)) + "]" : juce::String("[--]"), juce::Rectangle<float>(row.getX() + 646.f, row.getY(), 56.f, row.getHeight()), juce::Justification::centredLeft);
+            if (valid && proc.padLocked(k)) ui::lockIcon(g, juce::Rectangle<float>(11.f, 11.f).withCentre({ row.getX() + 712.f, cy }), ui::orange, true);
+            // ‹ n / N ›
+            const int ns = valid ? proc.suggestionCount(k) : 0;
+            if (ns > 0)
+            {
+                const int si = proc.suggestionIndex(k);
+                const auto lb = juce::Rectangle<float>(row.getX() + 728.f, cy - 9.f, 18.f, 18.f), rb = juce::Rectangle<float>(row.getX() + 800.f, cy - 9.f, 18.f, 18.f);
+                g.setFont(ui::mono(13.f));
+                g.setColour(si > 0 ? (hot(lb) ? ui::orange : ui::white) : ui::line); g.drawText(juce::CharPointer_UTF8("\xe2\x80\xb9"), lb, juce::Justification::centred);
+                g.setColour(si + 1 < ns ? (hot(rb) ? ui::orange : ui::white) : ui::line); g.drawText(juce::CharPointer_UTF8("\xe2\x80\xba"), rb, juce::Justification::centred);
+                g.setColour(ui::dim2); g.setFont(ui::mono(10.f));
+                g.drawText((si >= 0 ? juce::String(si + 1) : juce::String("-")) + "/" + juce::String(ns), juce::Rectangle<float>(lb.getRight(), cy - 7.f, rb.getX() - lb.getRight(), 14.f), juce::Justification::centred);
+                zone(lb, [this, k] { proc.stepSuggestion(k, -1); });
+                zone(rb, [this, k] { proc.stepSuggestion(k, 1); });
+            }
+            // the row: click = listen (and choose it); › = its page
+            zone(row.withTrimmedRight(row.getWidth() - 640.f), [this, k, valid] {
+                selectPad(k);
+                auto r = proc.getResult();
+                if (!valid || proc.padIsSilent(k)) { pendingType.clear(); setPage(pSamples); return; }
+                proc.audition(k); });
+            const auto go = juce::Rectangle<float>(row.getRight() - 52.f, cy - 11.f, 48.f, 22.f);
+            g.setColour(hot(go) ? ui::white : ui::dim); g.setFont(ui::mono(10.f));
+            g.drawText("open", go, juce::Justification::centred);
+            zone(go, [this, k] { selectPad(k); setPage(pPad); });
         }
     }
 
@@ -1742,9 +1824,9 @@ private:
     // ---------------------------------------------------------------- page: SOURCE (the loaded file, the part to learn)
     float wx0() const { return content.getX(); }
     float ww() const { return content.getWidth(); }
-    juce::Rectangle<float> waveZone() const { return { content.getX() - 6.f, content.getY() + 52.f, content.getWidth() + 12.f, 150.f }; }
-    float waveMid() const { return content.getY() + 120.f; }
-    static constexpr float waveH = 60.f;
+    juce::Rectangle<float> waveZone() const { return { content.getX() - 6.f, content.getY() + 40.f, content.getWidth() + 12.f, content.getHeight() - 86.f }; }
+    float waveMid() const { return content.getY() + 52.f + (content.getHeight() - 110.f) * 0.5f; }
+    const float waveH = (372.f - 110.f) * 0.5f - 14.f;
     void fixView(const ds::Source& s) { if (s.id != viewId || v1 <= v0 || v1 > s.length()) { v0 = 0; v1 = s.length(); viewId = s.id; } }
     float xOf(juce::int64 smp) const { return wx0() + (float) ((double) (smp - v0) / (double) std::max<juce::int64>(1, v1 - v0)) * ww(); }
     juce::int64 sampleAt(float x) const { return v0 + (juce::int64) std::llround((double) (x - wx0()) / ww() * (double) (v1 - v0)); }
@@ -1914,8 +1996,109 @@ private:
         if (mine && !done) { g.setColour(ui::orange); g.setFont(ui::mono(10.f)); g.drawText("the part changed: analyse it", juce::Rectangle<float>(ab.getX() - 400.f, y - 18.f, 400.f + ab.getWidth(), 12.f), juce::Justification::centredRight); }
     }
 
-    // ---------------------------------------------------------------- page: PATTERN (one bar, the MIDI you will drag)
-    juce::Rectangle<float> tightRect() const { return { content.getRight() - 160.f, content.getBottom() - 32.f, 120.f, 16.f }; }
+    // ---------------------------------------------------------------- page: PATTERN = the rhythm: every bar, zoom, edit the hits
+    juce::Rectangle<float> patLanes() const { return { content.getX() + 26.f, content.getY() + 66.f, content.getWidth() - 26.f, content.getHeight() - 112.f }; }
+    static float laneY(juce::Rectangle<float> L, int k) { return L.getY() + 8.f + k * (L.getHeight() - 16.f) / 7.f; }
+    double pv0 = 0, pv1 = 0; juce::uint64 pvId = 0; bool patSnap = true;
+    std::vector<ds::Hit> patEdit; int patIdx = -1, patMode = 0; bool patEditing = false, patChanged = false;
+    juce::Point<float> patDown; double patT0 = 0; int patV0 = 100, patSel = -1;
+    double step16(const ds::Result& r) const { return 60.0 / std::max(1.0, r.bpm) * r.sr / 4.0; }
+    void fixPatView(const ds::Result& r)
+    {
+        const double len = std::max(1, r.loop.getNumSamples());
+        if (pvId != r.sourceId || pv1 <= pv0 || pv1 > len + 1) { pv0 = 0; pv1 = len; pvId = r.sourceId; }
+    }
+    float pxOf(double t) const { const auto L = patLanes(); return L.getX() + (float) ((t - pv0) / std::max(1.0, pv1 - pv0)) * L.getWidth(); }
+    double tOf(float x) const { const auto L = patLanes(); return pv0 + (double) (x - L.getX()) / L.getWidth() * (pv1 - pv0); }
+    const std::vector<ds::Hit>& patHits(const ds::Result& r) const { return patEditing ? patEdit : r.hits; }
+    double shownT(const ds::Result& r, const ds::Hit& h) const
+    {
+        const double s = step16(r), gridT = std::round(h.time / s) * s;
+        return h.time + (gridT - h.time) * tightShown;
+    }
+    int patHitAt(const ds::Result& r, juce::Point<float> p) const
+    {
+        const auto L = patLanes(); const auto& hs = patHits(r);
+        int best = -1; float bd = 10.f;
+        for (size_t i = 0; i < hs.size(); ++i)
+        {
+            const auto& h = hs[i];
+            if (h.pad < 0 || h.pad >= ds::kPads) continue;
+            const float d = juce::Point<float>(pxOf(shownT(r, h)), laneY(L, h.pad)).getDistanceFrom(p);
+            if (d < bd) { bd = d; best = (int) i; }
+        }
+        return best;
+    }
+    int laneAt(juce::Point<float> p) const
+    {
+        const auto L = patLanes();
+        for (int k = 0; k < ds::kPads; ++k) if (std::abs(p.y - laneY(L, k)) < (L.getHeight() - 16.f) / 14.f) return k;
+        return -1;
+    }
+    double snapT(const ds::Result& r, double t, bool alt) const { const double s = step16(r); return (patSnap != alt) ? std::round(t / s) * s : t; }
+    void patternDown(const juce::MouseEvent& e)
+    {
+        auto r = proc.getResult(); if (!r) return;
+        grabKeyboardFocus();
+        const int h = patHitAt(*r, e.position);
+        patEdit = r->hits; patEditing = true; patChanged = false; patDown = e.position; patMode = 0;
+        if (h >= 0 && e.mods.isPopupMenu())
+        {   // right-click = remove it
+            patEdit.erase(patEdit.begin() + h); patChanged = true; patIdx = -1; patSel = -1; return;
+        }
+        if (h >= 0) { patIdx = h; patSel = h; patT0 = patEdit[(size_t) h].time; patV0 = patEdit[(size_t) h].velocity; proc.audition(patEdit[(size_t) h].pad); return; }
+        const int lane = laneAt(e.position);
+        if (lane >= 0 && r->pads[(size_t) lane].valid && !e.mods.isPopupMenu())
+        {   // an empty place on a row: a new hit (on the grid unless snap is off / ALT)
+            const double len = std::max(1, r->loop.getNumSamples());
+            ds::Hit nh; nh.pad = lane; nh.velocity = 100; nh.time = juce::jlimit(0.0, len - 1.0, snapT(*r, tOf(e.position.x), e.mods.isAltDown()));
+            patEdit.push_back(nh); patIdx = (int) patEdit.size() - 1; patSel = patIdx; patT0 = nh.time; patV0 = 100; patChanged = true;
+            proc.audition(lane);
+            return;
+        }
+        patEditing = false; patIdx = -1;
+    }
+    void patternDrag(const juce::MouseEvent& e)
+    {
+        auto r = proc.getResult(); if (!r || !patEditing || patIdx < 0 || patIdx >= (int) patEdit.size()) return;
+        const auto d = e.position - patDown;
+        if (patMode == 0 && std::max(std::abs(d.x), std::abs(d.y)) > 4.f) patMode = std::abs(d.x) >= std::abs(d.y) ? 1 : 2;
+        auto& h = patEdit[(size_t) patIdx];
+        const double len = std::max(1, r->loop.getNumSamples());
+        if (patMode == 1) { h.time = juce::jlimit(0.0, len - 1.0, snapT(*r, patT0 + (tOf(e.position.x) - tOf(patDown.x)), e.mods.isAltDown())); patChanged = true; }
+        if (patMode == 2) { h.velocity = juce::jlimit(1, 127, patV0 - juce::roundToInt(d.y * 0.8f)); patChanged = true; }
+        repaint();
+    }
+    void patternUp()
+    {
+        if (patEditing && patChanged) { proc.editHits(patEdit); patSel = -1; }
+        patEditing = false; patIdx = -1;
+    }
+    void deleteSelectedHit()
+    {
+        auto r = proc.getResult(); if (!r || patSel < 0 || patSel >= (int) r->hits.size()) return;
+        auto h = r->hits; h.erase(h.begin() + patSel); patSel = -1; proc.editHits(h);
+    }
+    void patternWheel(const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
+    {
+        auto r = proc.getResult(); if (!r) return;
+        fixPatView(*r);
+        const double len = std::max(1, r->loop.getNumSamples()), span = pv1 - pv0;
+        if (e.mods.isShiftDown() || std::abs(w.deltaX) > std::abs(w.deltaY))
+        {
+            const double dd = -(std::abs(w.deltaX) > std::abs(w.deltaY) ? w.deltaX : w.deltaY) * span * 0.25;
+            const double a = juce::jlimit(0.0, len - span, pv0 + dd); pv0 = a; pv1 = a + span;
+        }
+        else
+        {
+            const double at = tOf(e.position.x);
+            const double ns = juce::jlimit(std::min(len, 2.0 * step16(*r)), len, span * std::pow(0.8, w.deltaY * 4.0));
+            const double f = (at - pv0) / span;
+            const double a = juce::jlimit(0.0, len - ns, at - f * ns); pv0 = a; pv1 = a + ns;
+        }
+        repaint();
+    }
+    juce::Rectangle<float> tightRect() const { return { content.getRight() - 160.f, content.getBottom() - 30.f, 120.f, 16.f }; }
     void setTight(float x)
     {
         const auto r = tightRect();
@@ -1923,38 +2106,94 @@ private:
     }
     void drawPattern(juce::Graphics& g, const std::shared_ptr<ds::Result>& res, double now)
     {
+        juce::ignoreUnused(now);
         if (!res) { drawDropHere(g); return; }
         const auto C = content;
-        const int nb = bars(*res);
-        patBar = juce::jlimit(0, nb - 1, patBar);
+        const auto& r = *res;
+        fixPatView(r);
         g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
         g.drawText("Pattern", juce::Rectangle<float>(C.getX(), C.getY(), 130.f, 38.f), juce::Justification::centredLeft);
-        // bar ‹ n of N ›
-        {
-            const float x = C.getX() + 140.f, y = C.getY() + 12.f;
-            const auto l = juce::Rectangle<float>(x, y - 2.f, 18.f, 20.f), r = juce::Rectangle<float>(x + 118.f, y - 2.f, 18.f, 20.f);
-            g.setFont(ui::mono(13.f)); g.setColour(patBar > 0 ? ui::white : ui::line); g.drawText(juce::CharPointer_UTF8("\xe2\x80\xb9"), l, juce::Justification::centred);
-            g.setColour(patBar + 1 < nb ? ui::white : ui::line); g.drawText(juce::CharPointer_UTF8("\xe2\x80\xba"), r, juce::Justification::centred);
-            g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
-            g.drawText("bar " + juce::String(patBar + 1) + " of " + juce::String(nb), juce::Rectangle<float>(x + 18.f, y, 100.f, 16.f), juce::Justification::centred);
-            zone(l, [this] { patBar = std::max(0, patBar - 1); });
-            zone(r, [this, nb] { patBar = std::min(nb - 1, patBar + 1); });
-        }
+        const int nb = bars(r);
+        const double len = std::max(1, r.loop.getNumSamples());
+        g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+        g.drawText(juce::String(nb) + (nb == 1 ? " bar" : " bars") + ((pv0 > 0 || pv1 < len) ? juce::String("  .  zoom (wheel)") : juce::String("  .  wheel = zoom")),
+                   juce::Rectangle<float>(C.getX() + 140.f, C.getY() + 12.f, 260.f, 16.f), juce::Justification::centredLeft);
         const int mm = proc.midiMode();
         segmented(g, juce::Rectangle<float>(C.getRight() - 430.f, C.getY() + 4.f, 430.f, 32.f),
                   { "exact . as played", "sync . follows the song tempo", "tight . on the grid" }, mm == ds::kExact ? 0 : mm == ds::kSync ? 1 : 2,
                   [this](int i) { proc.setMidiMode(i == 0 ? ds::kExact : i == 1 ? ds::kSync : ds::kTight); });
-        // the dots slide to where the MIDI will put them (tight: as far as "how tight")
         const float q = proc.apvts.getRawParameterValue("quant")->load();
         const float target = mm == ds::kTight ? q : 0.f;
         tightShown += (target - tightShown) * 0.25f;
         if (std::abs(target - tightShown) < 0.002f) tightShown = target;
-        drawLanes(g, *res, juce::Rectangle<float>(C.getX() + 26.f, C.getY() + 56.f, C.getWidth() - 26.f, 176.f), now, true);
-        const float y = C.getBottom() - 32.f;
-        g.setColour(ui::dim); g.setFont(ui::inter(11.f));
-        g.drawText(juce::CharPointer_UTF8("\xe2\x97\x8b = where the grid would put it   .   size = how hard"), juce::Rectangle<float>(C.getX(), y, 400.f, 16.f), juce::Justification::centredLeft);
+        const auto L = patLanes();
+        {   // grid: bars (numbered), beats, sixteenths - as many as there is room for
+            juce::Graphics::ScopedSaveState ss(g);
+            g.reduceClipRegion(L.expanded(0.f, 22.f).toNearestInt());
+            const double s16 = step16(r), pxPer16 = L.getWidth() * s16 / (pv1 - pv0);
+            const int i0 = (int) std::floor(pv0 / s16), i1 = (int) std::ceil(pv1 / s16);
+            for (int i = std::max(0, i0); i <= i1; ++i)
+            {
+                const bool bar = i % 16 == 0, beat = i % 4 == 0;
+                if (!bar && !(beat && pxPer16 * 4 > 14) && !(pxPer16 > 9)) continue;
+                const float x = pxOf(i * s16);
+                g.setColour(bar ? juce::Colour(0xff2a2a2d) : beat ? juce::Colour(0xff1a1a1c) : juce::Colour(0xff111113));
+                g.drawVerticalLine((int) x, L.getY() - 4.f, L.getBottom() + 4.f);
+                if (bar && pxPer16 * 16 > 26) { g.setColour(ui::faint); g.setFont(ui::mono(10.f)); g.drawText(juce::String(i / 16 + 1), juce::Rectangle<float>(x + 3.f, L.getY() - 20.f, 30.f, 12.f), juce::Justification::centredLeft); }
+            }
+        }
+        for (int k = 0; k < ds::kPads; ++k)
+        {
+            const auto& pd = r.pads[(size_t) k];
+            const auto gr = juce::Rectangle<float>(12.f, 12.f).withCentre({ L.getX() - 20.f, laneY(L, k) });
+            ui::glyph(g, pd.valid ? pd.name : "-", gr, pd.valid ? (k == selected ? ui::white : ui::soft) : ui::line);
+            if (pd.valid) zone(gr.expanded(6.f), [this, k] { selectPad(k); proc.audition(k); });
+        }
+        {
+            juce::Graphics::ScopedSaveState ss(g);
+            g.reduceClipRegion(L.expanded(8.f, 10.f).toNearestInt());
+            const auto& hs = patHits(r);
+            const float playX = proc.isMidiPlaying() ? pxOf(proc.midiPlayFrac() * len) : -100.f;
+            for (size_t i = 0; i < hs.size(); ++i)
+            {
+                const auto& h = hs[i];
+                if (h.pad < 0 || h.pad >= ds::kPads || !r.pads[(size_t) h.pad].valid) continue;
+                const double s = step16(r), gridT = std::round(h.time / s) * s, t = shownT(r, h);
+                if (t < pv0 - s || t > pv1 + s) continue;
+                const float v = juce::jlimit(0.f, 1.f, h.velocity / 127.f);
+                const float x = pxOf(t), y = laneY(L, h.pad), w = 5.f + 8.f * v;
+                const bool edited = patEditing && (int) i == patIdx, selHit = (int) i == patSel;
+                if (std::abs(pxOf(gridT) - x) > 2.5f) { g.setColour(ui::dark); g.drawEllipse(juce::Rectangle<float>(w + 3.f, w + 3.f).withCentre({ pxOf(gridT), y }), 1.f); }
+                juce::Colour c = ui::white.withAlpha(0.5f + 0.5f * v);
+                if (!proc.padAudible(h.pad)) c = c.withMultipliedAlpha(0.3f);
+                if (playX > 0 && x <= playX && playX - x < 12.f) { g.setColour(ui::orange.withAlpha(0.35f)); g.fillEllipse(juce::Rectangle<float>(w + 8.f, w + 8.f).withCentre({ x, y })); c = ui::orange; }
+                g.setColour(c); g.fillEllipse(juce::Rectangle<float>(w, w).withCentre({ x, y }));
+                if (edited || selHit) { g.setColour(ui::orange); g.drawEllipse(juce::Rectangle<float>(w + 6.f, w + 6.f).withCentre({ x, y }), 1.5f); }
+                if (edited)
+                {
+                    const double secs = h.time / r.sr, beats = h.time / (s * 4.0);
+                    const int bar = (int) (beats / 4.0) + 1, beat = (int) std::fmod(beats, 4.0) + 1, six = (int) std::fmod(beats * 4.0, 4.0) + 1;
+                    g.setFont(ui::mono(10.f)); g.setColour(ui::orange);
+                    g.drawText(ui::lower(r.pads[(size_t) h.pad].name) + "  " + juce::String(bar) + "." + juce::String(beat) + "." + juce::String(six) + "  v" + juce::String(h.velocity) + "  " + juce::String(secs, 3) + " s",
+                               juce::Rectangle<float>(x - 120.f, y - w - 22.f, 240.f, 12.f), juce::Justification::centred);
+                }
+            }
+            if (playX > 0) { g.setColour(ui::orange); g.fillRect(playX - 0.5f, L.getY() - 6.f, 1.f, L.getHeight() + 12.f); }
+        }
+        // bottom: how to edit, snap, how tight
+        const float y = C.getBottom() - 30.f;
+        g.setColour(ui::faint); g.setFont(ui::mono(10.f));
+        g.drawText("click = add  .  drag = move  .  up / down = how hard  .  right-click = remove", juce::Rectangle<float>(C.getX(), y, 520.f, 16.f), juce::Justification::centredLeft);
+        {
+            const auto sr = juce::Rectangle<float>(C.getX() + 528.f, y - 4.f, 96.f, 24.f);
+            g.setColour(patSnap ? ui::white : ui::dim); g.drawEllipse(juce::Rectangle<float>(10.f, 10.f).withCentre({ sr.getX() + 8.f, sr.getCentreY() }), 1.2f);
+            if (patSnap) g.fillEllipse(juce::Rectangle<float>(5.f, 5.f).withCentre({ sr.getX() + 8.f, sr.getCentreY() }));
+            g.setFont(ui::inter(11.f)); g.setColour(ui::dim); g.drawText("snap to 1/16", sr.withTrimmedLeft(20.f), juce::Justification::centredLeft);
+            zone(sr, [this] { patSnap = !patSnap; });
+        }
         const auto tr = tightRect();
-        g.setColour(mm == ds::kTight ? ui::dim : ui::line); g.drawText("how tight", juce::Rectangle<float>(tr.getX() - 80.f, y, 72.f, 16.f), juce::Justification::centredRight);
+        g.setFont(ui::inter(11.f));
+        g.setColour(mm == ds::kTight ? ui::dim : ui::line); g.drawText("how tight", juce::Rectangle<float>(tr.getX() - 70.f, y, 64.f, 16.f), juce::Justification::centredRight);
         g.setColour(juce::Colour(0xff232325)); g.fillRoundedRectangle(tr.withSizeKeepingCentre(tr.getWidth(), 4.f), 2.f);
         g.setColour(mm == ds::kTight ? ui::white : ui::dark); g.fillRoundedRectangle(tr.withSizeKeepingCentre(tr.getWidth(), 4.f).withWidth(tr.getWidth() * q), 2.f);
         g.fillEllipse(juce::Rectangle<float>(12.f, 12.f).withCentre({ tr.getX() + tr.getWidth() * q, tr.getCentreY() }));
@@ -1996,12 +2235,14 @@ private:
         }
         if (matched)
         {
-            const juce::String big = juce::String(juce::roundToInt(md.before)) + juce::String(juce::CharPointer_UTF8(" \xe2\x86\x92 [")) + juce::String(juce::roundToInt(md.after)) + "]";
+            const bool asIs = md.bestAmount < 0.01f;      // nearer as it is: it plays unmatched
+            const juce::String big = asIs ? "[" + juce::String(juce::roundToInt(md.after)) + "]"
+                                          : juce::String(juce::roundToInt(md.before)) + juce::String(juce::CharPointer_UTF8(" \xe2\x86\x92 [")) + juce::String(juce::roundToInt(md.after)) + "]";
             const float bw = ui::textW(ui::mono(22.f, true), big);
             g.setColour(ui::white); g.setFont(ui::mono(22.f, true));
             g.drawText(big, juce::Rectangle<float>(hx - bw, C.getY() + 4.f, bw, 30.f), juce::Justification::centredRight);
             g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
-            g.drawText("like the loop", juce::Rectangle<float>(hx - bw - 130.f, C.getY() + 10.f, 122.f, 20.f), juce::Justification::centredRight);
+            g.drawText(asIs ? "like the loop  .  as it is" : "like the loop", juce::Rectangle<float>(hx - bw - 210.f, C.getY() + 10.f, 202.f, 20.f), juce::Justification::centredRight);
         }
         // the three sources: the loop's (learned), the best real hit, yours
         const float cw = (C.getWidth() - 20.f) / 3.f, cy = C.getY() + 48.f, ch = 62.f;
@@ -2048,19 +2289,25 @@ private:
         }
         // right of the sound editor: raw / matched, the shape, the layer
         const float rx = C.getRight() - 262.f, ry = C.getY() + 128.f;
+        // listen and compare: the loop's own sound (only heard, the pad keeps what it plays) | yours raw | matched
+        float ly = ry + 40.f;
         if (matched)
         {
             const float amt = proc.apvts.getRawParameterValue("mamt" + juce::String(selected))->load();
-            segmented(g, juce::Rectangle<float>(rx, ry, 262.f, 30.f), { "raw", "matched" }, amt > 0.5f ? 1 : 0, [this, md](int i) { setMatched(i == 1, md); });
+            const bool onC = src == 2;
+            segmented(g, juce::Rectangle<float>(rx, ry, 262.f, 30.f), { "loop", "raw", "matched" }, !onC ? -1 : amt > 0.5f ? 2 : 1,
+                      [this, md](int i) { if (i == 0) proc.previewLoopSound(selected); else { if (proc.padSource(selected) != 2) proc.setPadSource(selected, 2); setMatched(i == 2, md); } });
         }
         else if (hasC)
         {
-            const auto mr = chip(g, rx, ry, proc.isMatching() ? "matching ..." : "match to the loop", cAccent, [this] { if (!proc.isMatching()) { proc.startMatch(selected); toast("matching to the loop ..."); } }, 30.f, 12.f);
-            juce::ignoreUnused(mr);
+            segmented(g, juce::Rectangle<float>(rx, ry, 262.f, 30.f), { "loop", "yours" }, src == 2 ? 1 : -1,
+                      [this](int i) { if (i == 0) proc.previewLoopSound(selected); else setSource(selected, 2); });
+            chip(g, rx, ry + 38.f, proc.isMatching() ? "matching ..." : "match to the loop", cAccent, [this] { if (!proc.isMatching()) { proc.startMatch(selected); toast("matching to the loop ..."); } }, 28.f, 12.f);
+            ly = ry + 76.f;
         }
         else { g.setColour(ui::dim); g.setFont(ui::inter(11.f)); g.drawFittedText("the loop's own sound. choose a sample of yours and it is matched to this.", juce::Rectangle<float>(rx, ry, 262.f, 30.f).toNearestInt(), juce::Justification::topLeft, 2); }
         {
-            float x = rx; const float y = ry + 40.f;
+            float x = rx; const float y = ly;
             const auto f = ui::mono(10.f);
             const juce::String t1 = "drag edges, fades, gain  .  ";
             g.setColour(ui::faint); g.setFont(f); g.drawText(t1, juce::Rectangle<float>(x, y, ui::textW(f, t1) + 2.f, 14.f), juce::Justification::centredLeft);
@@ -2071,7 +2318,7 @@ private:
         }
         if (hasC)
         {
-            const float y = ry + 62.f;
+            const float y = ly + 22.f;
             g.setFont(ui::inter(11.f));
             if (pd.layered())
             {
@@ -2173,14 +2420,19 @@ private:
         const auto& pd = res->pads[(size_t) selected];
         if (!pd.valid) { drawEmptyPad(g); return; }
         const auto C = content;
-        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
-        const auto nm = juce::String(pd.name.substring(0, 1)) + pd.name.substring(1).toLowerCase();
-        const float nw = ui::textW(ui::inter(30.f, 300), nm);
-        g.drawText(nm, juce::Rectangle<float>(C.getX(), C.getY(), nw + 4.f, 38.f), juce::Justification::centredLeft);
-        g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
-        g.drawText(juce::MidiMessage::getMidiNoteName(pd.note, true, true, 3).toLowerCase() + "  .  " + juce::String(pd.hits) + " hits  .  " + juce::String(juce::CharPointer_UTF8("\xc2\xb7\xc2\xb7\xc2\xb7")),
-                   juce::Rectangle<float>(C.getX() + nw + 12.f, C.getY() + 12.f, 240.f, 18.f), juce::Justification::centredLeft);
-        chip(g, C.getRight(), C.getY() + 6.f, "back to the pad", cNormal, [this] { setPage(pPad); }, 26.f, 11.f, true);
+        {   // the path:  ‹ Snare   ···    (click the name = back to the pad)
+            const auto nm = juce::String(juce::CharPointer_UTF8("\xe2\x80\xb9 ")) + juce::String(pd.name.substring(0, 1)) + pd.name.substring(1).toLowerCase();
+            const float nw = ui::textW(ui::inter(30.f, 300), nm);
+            const auto br = juce::Rectangle<float>(C.getX(), C.getY(), nw + 4.f, 38.f);
+            g.setColour(hot(br) ? ui::white : ui::dim); g.setFont(ui::inter(30.f, 300));
+            g.drawText(nm, br, juce::Justification::centredLeft);
+            zone(br, [this] { setPage(pPad); });
+            g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+            g.drawText(juce::String(juce::CharPointer_UTF8("\xc2\xb7\xc2\xb7\xc2\xb7")), juce::Rectangle<float>(br.getRight() + 14.f, C.getY(), 60.f, 38.f), juce::Justification::centredLeft);
+            g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+            g.drawText(juce::MidiMessage::getMidiNoteName(pd.note, true, true, 3).toLowerCase() + "  .  " + juce::String(pd.hits) + " hits",
+                       juce::Rectangle<float>(br.getRight() + 80.f, C.getY() + 12.f, 200.f, 18.f), juce::Justification::centredLeft);
+        }
         auto row = [&](float y, const juce::String& label) { g.setColour(ui::dim); g.setFont(ui::inter(12.f)); g.drawText(label, juce::Rectangle<float>(C.getX(), y, 150.f, 24.f), juce::Justification::centredLeft); };
         float y = C.getY() + 56.f;
         row(y, "it is a");
@@ -2288,10 +2540,10 @@ private:
         const bool src = page == pSource || !res;
         g.setColour(ui::dim2); g.setFont(ui::mono(11.f));
         g.drawText(src ? juce::String("analysis") : res->pads[(size_t) selected].valid ? ui::lower(res->pads[(size_t) selected].name) : juce::String("empty pad"),
-                   juce::Rectangle<float>(908.f, 72.f, 160.f, 16.f), juce::Justification::centredLeft);
+                   juce::Rectangle<float>(972.f, 72.f, 140.f, 16.f), juce::Justification::centredLeft);
         if (!src)
         {   // bank 1 | 2
-            const auto br = juce::Rectangle<float>(1146.f, 68.f, 60.f, 24.f);
+            const auto br = juce::Rectangle<float>(1146.f, 68.f, 60.f, 24.f);   // bank 1 | 2
             g.setColour(juce::Colour(0xff0e0e10)); g.fillRoundedRectangle(br, 8.f);
             for (int b = 1; b <= 2; ++b)
             {
@@ -2308,7 +2560,7 @@ private:
             auto& sl = knobs[(size_t) k];
             const juce::String nm = knobName(knobId[k]);
             const juce::String val = sl.isEnabled() ? sl.getTextFromValue(sl.getValue()) : juce::String("--");
-            const auto f1 = ui::inter(12.f), f2 = ui::mono(12.f);
+            const auto f1 = ui::inter(11.f), f2 = ui::mono(11.f);
             const float w1 = ui::textW(f1, nm + " "), w2 = ui::textW(f2, val);
             const float x0 = r.getCentreX() - (w1 + w2) * 0.5f, y = r.getBottom() - 6.f;
             g.setColour(sl.isEnabled() ? ui::label : ui::faint); g.setFont(f1); g.drawText(nm, juce::Rectangle<float>(x0, y, w1, 16.f), juce::Justification::centredLeft);
@@ -2375,10 +2627,17 @@ private:
             if (!can) { g.setColour(juce::Colours::black.withAlpha(0.45f)); g.fillPath(p); }
             if (hot(r) && can) { g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillPath(p); }
             g.setColour(juce::Colours::white.withAlpha(0.25f)); g.drawEllipse(r.reduced(1.f), 1.f);
-            g.setColour(juce::Colours::white); g.setFont(ui::inter(14.f, 500));
+            g.setColour(juce::Colours::white); g.setFont(ui::inter(13.f, 500));
             juce::String t = "build\nmy kit";
             if (proc.isBuilding()) t = "building\n" + proc.matchMessage().fromLastOccurrenceOf(" ", false, false).toLowerCase();
             g.drawFittedText(t, r.toNearestInt(), juce::Justification::centred, 2, 1.f);
+            if (hot(r) && res && !proc.isBuilding())
+            {   // before you press it: what it will do
+                int keep = 0; for (int i = 0; i < ds::kPads; ++i) if (res->pads[(size_t) i].valid && res->pads[(size_t) i].hits > 0) ++keep;
+                const int n = proc.padsToBuild(); keep -= n;
+                hint = n == 0 ? juce::String("every pad plays your sample or is locked  .  switch to loop to build them all again")
+                              : "builds " + juce::String(n) + (n == 1 ? " pad" : " pads") + " from your samples  .  keeps " + juce::String(keep) + " (yours or locked)";
+            }
             zone(r, [this] {
                 if (proc.getResult() == nullptr) { toast("analyse a loop first"); return; }
                 if (proc.isMatching() || proc.isBusy()) return;
@@ -2424,7 +2683,7 @@ private:
             [this] { auto f = proc.makeMidiFile(); if (f.existsAsFile()) juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, this); });
         g.setColour(ui::faint); g.setFont(ui::mono(9.f));
         g.drawText(srcPage ? "play the loop" : "play the pattern", juce::Rectangle<float>(keyRect(0).getCentreX() - 50.f, keyRect(0).getBottom() + 6.f, 100.f, 12.f), juce::Justification::centred);
-        g.drawText("drag", juce::Rectangle<float>(keyRect(2).getX(), keyRect(2).getBottom() + 6.f, 48.f, 12.f), juce::Justification::centred);
+        g.drawText("drag", juce::Rectangle<float>(keyRect(2).getCentreX() - 24.f, keyRect(2).getBottom() + 6.f, 48.f, 12.f), juce::Justification::centred);
     }
 
     // ---------------------------------------------------------------- the 8 pads
@@ -2448,7 +2707,7 @@ private:
             if (sel) { g.setColour(ui::white); g.strokePath(p, juce::PathStrokeType(1.5f)); }
             else if (hov) { g.setColour(juce::Colour(0xff4a4a4d)); g.strokePath(p, juce::PathStrokeType(1.f)); }
             if (dropPad == i) { g.setColour(ui::orange); g.strokePath(p, juce::PathStrokeType(2.f)); }
-            ui::glyph(g, has ? pd.name : "-", juce::Rectangle<float>(r.getX() + 14.f, r.getY() + 14.f, 13.f, 13.f), has ? ui::white : ui::line);
+            ui::glyph(g, has ? pd.name : "-", juce::Rectangle<float>(r.getX() + 14.f, r.getY() + 13.f, 12.f, 12.f), has ? ui::white : ui::line);
             // name + what it plays
             const juce::String nm = has ? juce::String(pd.name.substring(0, 1)) + pd.name.substring(1).toLowerCase() : juce::String("-");
             juce::String sub;
@@ -2458,11 +2717,11 @@ private:
             else if (src == 2 && pd.user.getNumSamples() > 0) sub = pd.userName + (pd.layered() ? " + " + pd.layerName : juce::String());
             else sub = src == 1 ? "best hit" : "the loop's sound";
             const bool showSugg = hov && proc.suggestionCount(i) > 0;
-            g.setColour(has ? ui::white : ui::faint); g.setFont(ui::inter(16.f, 500));
-            g.drawText(nm, juce::Rectangle<float>(r.getX() + 16.f, r.getBottom() - 50.f, r.getWidth() - 32.f, 22.f), juce::Justification::centredLeft, true);
-            if (!showSugg) { g.setColour(ui::dim2); g.setFont(ui::inter(10.f)); g.drawText(sub, juce::Rectangle<float>(r.getX() + 16.f, r.getBottom() - 30.f, r.getWidth() - 32.f, 14.f), juce::Justification::centredLeft, true); }
+            g.setColour(has ? ui::white : ui::faint); g.setFont(ui::inter(15.f, 500));
+            g.drawText(nm, juce::Rectangle<float>(r.getX() + 14.f, r.getBottom() - 46.f, r.getWidth() - 28.f, 20.f), juce::Justification::centredLeft, true);
+            if (!showSugg) { g.setColour(ui::dim2); g.setFont(ui::inter(10.f)); g.drawText(sub, juce::Rectangle<float>(r.getX() + 14.f, r.getBottom() - 27.f, r.getWidth() - 28.f, 13.f), juce::Justification::centredLeft, true); }
             // level bar
-            const auto bar = juce::Rectangle<float>(r.getX() + 16.f, r.getBottom() - 10.f, r.getWidth() - 32.f, 3.f);
+            const auto bar = juce::Rectangle<float>(r.getX() + 14.f, r.getBottom() - 9.f, r.getWidth() - 28.f, 2.5f);
             if (lv > 0.03f) { g.setColour(ui::orange.withAlpha(0.35f * lv)); g.fillRoundedRectangle(bar.expanded(2.f, 2.f), 3.f); g.setColour(ui::orange.withAlpha(0.4f + 0.6f * lv)); }
             else g.setColour(sel ? ui::white : juce::Colour(0xff38383b));
             g.fillRoundedRectangle(bar, 1.5f);
@@ -2472,7 +2731,7 @@ private:
             float cx = r.getRight() - 14.f;
             auto small = [&](const juce::String& t, bool on, juce::Colour onCol, std::function<void()> click)
             {
-                const auto br = juce::Rectangle<float>(cx - 24.f, r.getY() + 10.f, 24.f, 22.f);
+                const auto br = juce::Rectangle<float>(cx - 22.f, r.getY() + 8.f, 22.f, 20.f);
                 g.setColour(on ? onCol : juce::Colour(0xff343437).brighter(hot(br) ? 0.1f : 0.f)); g.fillRoundedRectangle(br, 6.f);
                 g.setColour(on ? juce::Colour(0xff0b0b0c) : ui::white); g.setFont(ui::inter(10.f, 600)); g.drawText(t, br, juce::Justification::centred);
                 zone(br, std::move(click));
@@ -2482,7 +2741,7 @@ private:
             if (hov || mu) small("m", mu, ui::white, [this, i] { proc.mute[(size_t) i] = !proc.mute[(size_t) i].load(); });
             if (hov || lk)
             {
-                const auto br = juce::Rectangle<float>(cx - 24.f, r.getY() + 10.f, 24.f, 22.f);
+                const auto br = juce::Rectangle<float>(cx - 22.f, r.getY() + 8.f, 22.f, 20.f);
                 if (hov) { g.setColour(juce::Colour(0xff343437).brighter(hot(br) ? 0.1f : 0.f)); g.fillRoundedRectangle(br, 6.f); }
                 ui::lockIcon(g, br.withSizeKeepingCentre(12.f, 12.f), lk ? ui::orange : ui::white, lk);
                 zone(br, [this, i] { proc.setPadLocked(i, !proc.padLocked(i)); toast(proc.padLocked(i) ? "locked: build my kit keeps this pad" : "unlocked: build my kit may change this pad"); });
@@ -2490,8 +2749,9 @@ private:
             if (showSugg)
             {   // ‹ the sample · n / N · % ›
                 const int n = proc.suggestionCount(i), k = proc.suggestionIndex(i);
-                const auto row = juce::Rectangle<float>(r.getX() + 14.f, r.getY() + 44.f, r.getWidth() - 28.f, 28.f);
-                const auto lb = row.withWidth(24.f).withSizeKeepingCentre(24.f, 24.f), rb = row.withTrimmedLeft(row.getWidth() - 24.f).withSizeKeepingCentre(24.f, 24.f);
+                // the line under the name becomes:  ‹  the sample  .  n / N  .  %  ›
+                const auto row = juce::Rectangle<float>(r.getX() + 10.f, r.getBottom() - 30.f, r.getWidth() - 20.f, 18.f);
+                const auto lb = row.withWidth(18.f).withSizeKeepingCentre(18.f, 18.f), rb = row.withTrimmedLeft(row.getWidth() - 18.f).withSizeKeepingCentre(18.f, 18.f);
                 for (auto [b, dir, can] : { std::tuple<juce::Rectangle<float>, int, bool> { lb, -1, k > 0 }, { rb, 1, k + 1 < n } })
                 {
                     g.setColour(juce::Colour(0xff343437).brighter(hot(b) ? 0.1f : 0.f)); g.fillEllipse(b);
@@ -2500,13 +2760,14 @@ private:
                     const int d = dir;
                     zone(b, [this, i, d] { proc.stepSuggestion(i, d); });
                 }
-                const auto mid = row.reduced(28.f, 0.f);
-                g.setColour(ui::white); g.setFont(ui::inter(11.f));
-                g.drawText(sub, mid.withHeight(14.f), juce::Justification::centred, true);
+                const auto mid = row.reduced(22.f, 0.f);
                 const auto md = proc.getMatch(i);
+                const juce::String cnt = "  " + (k >= 0 ? juce::String(k + 1) : juce::String("-")) + "/" + juce::String(n) + (md.on ? " " + juce::String(juce::roundToInt(md.after)) + "%" : juce::String());
+                const float cw2 = ui::textW(ui::mono(10.f), cnt);
                 g.setColour(ui::dim); g.setFont(ui::mono(10.f));
-                g.drawText((k >= 0 ? juce::String(k + 1) : juce::String("-")) + " / " + juce::String(n) + (md.on ? "  .  " + juce::String(juce::roundToInt(md.after)) + "%" : juce::String()),
-                           mid.withTrimmedTop(14.f), juce::Justification::centred);
+                g.drawText(cnt, mid.withTrimmedLeft(mid.getWidth() - cw2), juce::Justification::centredRight);
+                g.setColour(ui::white); g.setFont(ui::inter(10.f));
+                g.drawText(sub, mid.withTrimmedRight(cw2), juce::Justification::centredLeft, true);
             }
         }
     }
@@ -2517,7 +2778,7 @@ private:
     ui::Look look;
     Page page = pSource;
     int idle = 0;
-    int selected = 0, shownVersion = -1, hoverPad = -1, dropPad = -1, browsedPad = -1, patBar = 0;
+    int selected = 0, shownVersion = -1, hoverPad = -1, dropPad = -1, browsedPad = -1;
     bool dropping = false, analysing = false, wasBuilding = false;
     const ds::Result* lastRes = nullptr;
     double settleStart = 0, analyseStart = 0, buildStart = 0, buildEnd = 0;

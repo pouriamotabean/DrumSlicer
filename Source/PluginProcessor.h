@@ -212,6 +212,23 @@ public:
         return any ? solo[(size_t) pad].load() : !mute[(size_t) pad].load();
     }
     float midiPlayFrac() const { return seqFrac.load(); }   // where the MIDI preview is in its turn (0..1)
+    juce::AudioBuffer<float> heardShot(int pad) const;   // the pad as you hear it (+ volume, pan, pitch): files, drags, kits
+    bool previewLoopSound(int pad);                     // the loop's own sound of a pad, without changing what it plays
+    void editHits(std::vector<ds::Hit> h);              // PATTERN page: new hits (undoable)
+    void setHits(std::vector<ds::Hit> h);
+    // BUILD MY KIT would build these pads now (the others are kept): what you hear decides
+    int padsToBuild() const
+    {
+        auto r = getResult(); int n = 0; if (!r) return 0;
+        for (int p = 0; p < ds::kPads; ++p)
+        {
+            const auto& pd = r->pads[(size_t) p];
+            if (!pd.valid || pd.hits == 0 || padLocked(p)) continue;
+            if (padSource(p) == 2 && pd.user.getNumSamples() > 0) continue;
+            ++n;
+        }
+        return n;
+    }
     juce::String suggestionPath(int pad, int idx) const
     { std::lock_guard<std::mutex> g(suggLock); return pad >= 0 && pad < ds::kPads && idx >= 0 && idx < (int) sugg[(size_t) pad].paths.size() ? sugg[(size_t) pad].paths[(size_t) idx] : juce::String(); }
     float suggestionAfter(int pad, int idx) const

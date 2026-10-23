@@ -718,15 +718,38 @@ juce::File DrumSlicerProcessor::makeMidiFile()
     return f;
 }
 
+// the pad exactly as you hear it in ReKit: its shaped sound + its VOLUME, PAN and PITCH (what a voice does)
+juce::AudioBuffer<float> DrumSlicerProcessor::heardShot(int pad) const
+{
+    auto r = getResult(); auto sh = getShaped();
+    juce::AudioBuffer<float> out;
+    if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid) return out;
+    const auto& src = (sh && sh->buf[(size_t) pad].getNumSamples() > 0) ? sh->buf[(size_t) pad] : r->pads[(size_t) pad].audio;
+    const int n = src.getNumSamples(); if (n == 0) return out;
+    const float vol = pVol[(size_t) pad]->load(), pan = pPan[(size_t) pad]->load();
+    const float a = (pan + 1.f) * juce::MathConstants<float>::pi * 0.25f;
+    const float gl = vol * 1.41421356f * std::cos(a), gr = vol * 1.41421356f * std::sin(a);
+    const double step = std::pow(2.0, pPitch[(size_t) pad]->load() / 12.0);
+    const int m = std::max(1, (int) std::floor((n - 1) / step));
+    out.setSize(2, m);
+    const float* sL = src.getReadPointer(0); const float* sR = src.getReadPointer(src.getNumChannels() > 1 ? 1 : 0);
+    for (int i = 0; i < m; ++i)
+    {
+        const double pos = i * step; const int i0 = (int) pos; const float fr = (float) (pos - i0);
+        const int i1 = std::min(n - 1, i0 + 1);
+        out.setSample(0, i, (sL[i0] + (sL[i1] - sL[i0]) * fr) * gl);
+        out.setSample(1, i, (sR[i0] + (sR[i1] - sR[i0]) * fr) * gr);
+    }
+    return out;
+}
+
 juce::File DrumSlicerProcessor::shotFile(int pad)
 {
     auto r = getResult();
     if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid) return {};
-    // the sound as you hear it: chosen version (A / B) with its shaping
-    auto sh = getShaped();
     auto f = exportFolder().getChildFile("EXPORT").getChildFile(baseName() + "_" + r->pads[(size_t) pad].name.removeCharacters(" ") + ".wav");
-    const bool ok = (sh && sh->buf[(size_t) pad].getNumSamples() > 0) ? ds::writeWav24(f, sh->buf[(size_t) pad], r->sr)
-                                                                      : ds::writeWav24(f, r->pads[(size_t) pad].audio, r->sr);
+    const auto heard = heardShot(pad);
+    const bool ok = heard.getNumSamples() > 0 && ds::writeWav24(f, heard, r->sr);
     if (!ok) { setStatus("COULD NOT WRITE " + f.getFileName()); return {}; }
     return f;
 }
@@ -1607,24 +1630,31 @@ void DrumSlicerProcessor::buildKit()
     {
         const auto& pd = r->pads[(size_t) p];
         if (!pd.valid) continue;
-        // locked, or a pad you added (no hits in the loop: its sound is already yours): kept as it is
-        if (padLocked(p) || pd.hits == 0) { if (pd.userPath.isNotEmpty()) taken.push_back(pd.userPath); continue; }
-        if (pd.audio.getMagnitude(0, pd.audio.getNumSamples()) < 1.0e-6f) continue;   // a cleared pad: nothing to look like
+        // ReKit 2: what you hear is what it builds from. A pad that plays your sample is kept as it is (you heard it,
+        // it is in the kit); a pad on the loop's sound or its best hit gets your sample nearest to THAT sound.
+        // Locked (keep the loop's own sound) and pads you added (no hits in the loop) are kept too.
+        const int src = padSource(p);
+        const bool yours = src == 2 && pd.user.getNumSamples() > 0;
+        if (padLocked(p) || pd.hits == 0 || yours) { if (pd.userPath.isNotEmpty()) taken.push_back(pd.userPath); continue; }
+        const bool useB = src == 1 && pd.best.getNumSamples() > 0;
+        const auto& target = useB ? pd.best : pd.audio;
+        if (target.getMagnitude(0, target.getNumSamples()) < 1.0e-6f) continue;   // a cleared pad: nothing to look like
         Job j; j.pad = p; j.name = pd.name; j.fam = ds::familyOf(pd.name);
-        j.A = std::make_shared<juce::AudioBuffer<float>>(); j.A->makeCopyOf(pd.audio);
+        j.A = std::make_shared<juce::AudioBuffer<float>>(); j.A->makeCopyOf(target);
         j.B = std::make_shared<juce::AudioBuffer<float>>(); j.B->makeCopyOf(pd.best);
-        j.ref = std::make_shared<ds::Pad>(); j.ref->audio.makeCopyOf(pd.audio); j.ref->valid = true;
+        j.ref = std::make_shared<ds::Pad>(); j.ref->audio.makeCopyOf(target); j.ref->valid = true;
         for (int k = 0; k < kShapeN; ++k)
             if (auto* q = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(p))) j.neutral[(size_t) k] = q->convertFrom0to1(q->getDefaultValue());
-        {   // A as it is shaped now (its own slot)
+        {   // the reference as it is shaped now (its own slot)
             std::lock_guard<std::mutex> g(slotLock);
-            j.vA = slotOwner[(size_t) p] == 0 ? shownShape(p) : (slots[(size_t) p][0].valid ? slots[(size_t) p][0].v : j.neutral);
+            const int sl = useB ? 1 : 0;
+            j.vA = slotOwner[(size_t) p] == sl ? shownShape(p) : (slots[(size_t) p][(size_t) sl].valid ? slots[(size_t) p][(size_t) sl].v : j.neutral);
         }
         std::shared_ptr<const ds::LibIndex> holder;
-        for (auto& m : library->nearest(pd.audio, r->sr, pd.name, 30, holder)) if (m.e != nullptr) j.paths.push_back(m.e->path);
+        for (auto& m : library->nearest(target, r->sr, pd.name, 30, holder)) if (m.e != nullptr) j.paths.push_back(m.e->path);
         if (!j.paths.empty()) jobs->push_back(std::move(j));
     }
-    if (jobs->empty()) { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILD MY KIT: NOTHING TO BUILD (ALL PADS LOCKED?)"; return; }
+    if (jobs->empty()) { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILD MY KIT: NOTHING TO BUILD (EVERY PAD PLAYS YOUR SAMPLE OR IS LOCKED - SWITCH TO LOOP TO BUILD ALL AGAIN)"; return; }
     const double sr = r->sr;
     building = true; matching = true;
     { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILDING KIT ..."; }
@@ -1646,7 +1676,15 @@ void DrumSlicerProcessor::buildKit()
                     {
                         juce::AudioBuffer<float> c;
                         if (ds::loadUserShot(juce::File(j.paths[i]), *j.ref, sr, c))
-                        { j.md[i] = computeMatch(*j.A, j.vA, c, j.neutral, j.neutral, MatchData(), false, sr, j.fam, *stats, j.B.get()); j.after[i] = j.md[i].after; }
+                        {
+                            j.md[i] = computeMatch(*j.A, j.vA, c, j.neutral, j.neutral, MatchData(), false, sr, j.fam, *stats, j.B.get());
+                            auto& m = j.md[i];
+                            if (m.before > m.after + 0.5f)
+                            {   // never worse: as it is, it is nearer than matched -> it plays as it is
+                                m.after = m.before; m.bestAmount = 0.f; m.pitch = 0.f; m.en = 2000.f; m.gainDb = 0.f;
+                            }
+                            j.after[i] = m.after;
+                        }
                         ++done; say();
                     }
                     j.order.resize(j.paths.size()); for (size_t i = 0; i < j.order.size(); ++i) j.order[i] = (int) i;
@@ -2055,6 +2093,54 @@ bool DrumSlicerProcessor::previewSample(const juce::File& f, int pad)
     return true;
 }
 
+bool DrumSlicerProcessor::previewLoopSound(int pad)
+{
+    auto r = getResult();
+    if (!r || pad < 0 || pad >= ds::kPads || !r->pads[(size_t) pad].valid) return false;
+    auto b = std::make_shared<juce::AudioBuffer<float>>(); b->makeCopyOf(r->pads[(size_t) pad].audio);
+    b->applyGain(pVol[(size_t) pad]->load());
+    std::shared_ptr<juce::AudioBuffer<float>> old;
+    { juce::SpinLock::ScopedLockType l(lock); old = preview; preview = b; previewSR = r->sr; }
+    retire(std::move(old));
+    { juce::SpinLock::ScopedLockType l(fileLock); previewDir = juce::File(); }
+    srcPlay = false;
+    previewStop = false; previewPlaying = true;
+    return true;
+}
+
+// PATTERN editing: the hits as a whole are replaced (undoable, one step per gesture)
+void DrumSlicerProcessor::setHits(std::vector<ds::Hit> h)
+{
+    auto cur = getResult(); if (!cur) return;
+    auto r = std::make_shared<ds::Result>(*cur);
+    const double len = (double) std::max(1, r->loop.getNumSamples());
+    h.erase(std::remove_if(h.begin(), h.end(), [&](const ds::Hit& x) { return x.pad < 0 || x.pad >= ds::kPads || !r->pads[(size_t) x.pad].valid; }), h.end());
+    for (auto& x : h) { x.time = juce::jlimit(0.0, len - 1.0, std::round(x.time)); x.velocity = juce::jlimit(1, 127, x.velocity); }
+    std::sort(h.begin(), h.end(), [](const ds::Hit& a, const ds::Hit& b) { return a.time < b.time; });
+    r->hits = std::move(h);
+    for (auto& pd : r->pads) pd.hits = 0;
+    for (auto& x : r->hits) ++r->pads[(size_t) x.pad].hits;
+    publish(r, getKitDir(), getLoopFile(), orphan());
+    rebuildSeq();
+}
+namespace
+{
+struct HitsEdit : juce::UndoableAction
+{
+    HitsEdit(DrumSlicerProcessor& p, std::vector<ds::Hit> b, std::vector<ds::Hit> a) : proc(p), before(std::move(b)), after(std::move(a)) {}
+    bool perform() override { proc.setHits(after); return true; }
+    bool undo() override { proc.setHits(before); return true; }
+    int getSizeInUnits() override { return (int) (before.size() + after.size()) * 24 + 16; }
+    DrumSlicerProcessor& proc; std::vector<ds::Hit> before, after;
+};
+}
+void DrumSlicerProcessor::editHits(std::vector<ds::Hit> h)
+{
+    auto cur = getResult(); if (!cur) return;
+    undo.beginNewTransaction("the pattern");
+    undo.perform(new HitsEdit(*this, cur->hits, std::move(h)), "the pattern");
+}
+
 bool DrumSlicerProcessor::previewKit(const juce::File& kit)
 {
     auto b = std::make_shared<juce::AudioBuffer<float>>(); double sr = 44100;
@@ -2093,7 +2179,8 @@ juce::File DrumSlicerProcessor::saveKit(const juce::String& rawName)
         const auto& pd = r->pads[(size_t) p];
         if (!pd.valid) continue;
         const auto f = tmp.getChildFile(name + "_" + pd.name.removeCharacters(" ") + ".wav");
-        ok = (sh && sh->buf[(size_t) p].getNumSamples() > 0) ? ds::writeWav24(f, sh->buf[(size_t) p], r->sr) : ds::writeWav24(f, pd.audio, r->sr);
+        const auto heard = heardShot(p);          // as you hear it (volume, pan, pitch too): the kit's preview plays these
+        ok = heard.getNumSamples() > 0 ? ds::writeWav24(f, heard, r->sr) : ds::writeWav24(f, pd.audio, r->sr);
     }
     for (int t = 0; t < 3 && ok; ++t)
     {
