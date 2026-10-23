@@ -54,3 +54,37 @@
 ## Then
 - Pouria uses v2.0 for a few days, notes every place he hesitates -> v2.1.
 - Later project: "Audio manager" VST (Splice-like browser for his own archive; splicedd UI; key/BPM/sync/drag).
+
+## v2.0 access map (every 1.14 function has one fixed home; no menus, no drawers)
+
+Rule: the display is the only place for details. Hover and right-click are shortcuts only;
+everything they do is also on a display page. Pages are one level deep:
+kit · source · pattern · pad (+ pad ···) · samples · kits.
+
+| 1.14 function | v2.0 home |
+|---|---|
+| LOAD / drop loop | drop on the device; source page |
+| selection flags, SNAP (ALT), ANALYSE / RE-ANALYSE | source page (drag on the wave, "snap to hits", "analyse this part") |
+| SENS, BPM (÷2 ×2), GRID, MASTER | source page: the 4 knobs become tempo / sensitivity / grid / master |
+| EXACT / SYNC / TIGHT | pattern page, 3-way switch |
+| DRAG MIDI | hardware key "midi" next to play / undo (drag it) |
+| DRAG WAV | drag the pad itself; "drag original" on the pad page's yours card |
+| EXPORT | kits page: "export all · wav + midi" |
+| KITS: save / open / delete / open folder | kits page |
+| BUILD MY KIT | orange key |
+| < n/N > suggestions | pad hover; "next" chips on the pad page |
+| lock | lock icon always visible on a locked pad; toggle on hover and on the pad page |
+| A learned / B best hit / C yours | the 3 source cards on the pad page (click = plays it) |
+| "show its hits" (A) | card 1 lights its hits on the loop |
+| open folder of the sample (C) | card 3: open folder · drag original |
+| MATCH TO A / MATCH n% | "like the loop" knob (amount) + raw / matched switch |
+| match parts EQ SHAPE ROOM PITCH LENGTH DROP SATURATION WIDTH | the 8 pills on the pad page (dashed = not needed) |
+| MATCH AGAIN / REMOVE MATCH | pill "match again"; raw = match off |
+| LAYER MATCH / LAYER AGAIN / REMOVE LAYER | layer line on the pad page: "+ add layer" or "change · remove" |
+| BROWSE, FOLDERS / SIMILAR, + - UP folder, RESCAN, < n S, MORE, USE ON PAD, TRY IN KIT, OPEN FOLDER | samples page |
+| envelope START / FADES + curves / END / GAIN, FIT/FULL | drag on the pad page's wave; "reset" text replaces the reset menu |
+| VOL PITCH MATCH amount + ATTACK | knob bank 1 |
+| PAN PUNCH SUSTAIN TONE | knob bank 2 (1 / 2 switch above the knobs) |
+| pad type, move hits into another pad, clear sound, delete pad | pad ··· page (delete = hold) |
+| empty pad: add a sound | click it = samples page filtered for that type; drop a file still works |
+| m / s | pad hover (new in 2.0) |
