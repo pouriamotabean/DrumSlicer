@@ -9,164 +9,191 @@
 void rekitRaiseFrame(void* nativeHandle);   // WinRaise.cpp (does nothing outside Windows)
 
 // =====================================================================================================
-//  REKIT UI  -  dark graphite, one amber accent.   by Pouria Motabean
-//  1000 x 600.  Text, waveforms, arcs and buttons are drawn in code; PNG skin (optional) in /Assets:
-//  background.png, knob.png, pad_off.png, pad_on.png (pad_on is tinted to each pad's colour).
+//  REKIT 2  -  a black device: few keys, one display that shows the details of wherever you are.
+//  Monochrome + one orange.  Design size 1240 x 720 (scaled).   by Pouria Motabean
+//  Pages of the display (one level deep): kit, source, pattern, pad (+ its ···), samples, kits.
+//  No popup menus and no dialogs: every choice is on a page.
 // =====================================================================================================
 namespace ui
 {
-static const juce::Colour amber(0xffffb347), text(0xffe9e6e1), dim(0xff8a8f98), faint(0xff4a4e56),
-                          panelEdge(0xff262930), well(0xff0c0d10);
+static const juce::Colour white(0xfff2f2f0), dim(0xff8a8a8c), dim2(0xff77777a), faint(0xff5e5e61), line(0xff2e2e31),
+                          dark(0xff3a3a3d), screen(0xff050506), chip(0xff141416), chip2(0xff1c1c1f), chipOn(0xff2a2a2d),
+                          card(0xff101012), cardOn(0xff1a1a1d), orange(0xffff5a1f), label(0xffa6a6a8), soft(0xffb0b0b2);
 
-inline juce::Colour padColour(const juce::String& name)
-{
-    if (name.startsWith("KICK"))  return juce::Colour(0xffffb347);
-    if (name.startsWith("SNARE")) return juce::Colour(0xff3da5ff);
-    if (name.startsWith("CLAP"))  return juce::Colour(0xff2ed47a);
-    if (name.startsWith("C-HAT") || name.startsWith("HAT")) return juce::Colour(0xff2ec4d6);
-    if (name.startsWith("O-HAT")) return juce::Colour(0xffa66bff);
-    if (name.startsWith("CRASH") || name.startsWith("RIDE")) return juce::Colour(0xffe8d44d);
-    if (name.startsWith("TOM"))    return juce::Colour(0xffff7a45);
-    if (name.startsWith("RIM"))    return juce::Colour(0xffb6e35a);
-    if (name.startsWith("SHAKER")) return juce::Colour(0xffd9b38c);
-    return juce::Colour(0xffff6b8a);                                  // PERC
-}
-
-inline juce::Font font(float size, bool bold = true, float kerning = 0.f)
-{
-    return juce::Font(juce::FontOptions(size, bold ? juce::Font::bold : juce::Font::plain).withKerningFactor(kerning));
-}
-
-struct Skin
-{
-    juce::Image background, knob, padOff, padOn;
-    std::map<juce::uint32, juce::Image> tinted;
-    Skin()
-    {
 #if HAS_ASSETS
-        auto ld = [](const char* n) { int sz = 0; auto* d = BinaryData::getNamedResource(n, sz);
-                                      return d ? juce::ImageFileFormat::loadFrom(d, (size_t) sz) : juce::Image(); };
-        background = ld("background_png"); knob = ld("knob_png"); padOff = ld("pad_off_png"); padOn = ld("pad_on_png");
-#endif
-    }
-    // lit pad = off + (on - off) * colour   (the glow of pad_on.png is neutral, so any colour works)
-    const juce::Image& litPad(juce::Colour c)
+inline juce::Typeface::Ptr face(int i)
+{
+    static juce::Typeface::Ptr t[6];
+    if (t[i] == nullptr)
     {
-        auto& im = tinted[c.getARGB()];
-        if (im.isNull() && padOn.isValid() && padOff.isValid() && padOn.getBounds() == padOff.getBounds())
+        const void* d = nullptr; int n = 0;
+        switch (i)
         {
-            im = padOff.createCopy().convertedToFormat(juce::Image::ARGB);
-            juce::Image::BitmapData on(padOn, juce::Image::BitmapData::readOnly), out(im, juce::Image::BitmapData::readWrite);
-            for (int y = 0; y < im.getHeight(); ++y)
-                for (int x = 0; x < im.getWidth(); ++x)
-                {
-                    const auto a = out.getPixelColour(x, y), b = on.getPixelColour(x, y);
-                    auto ch = [&](float o, float n, float t) { return juce::jlimit(0.f, 1.f, o + std::max(0.f, n - o) * t * 1.6f); };
-                    out.setPixelColour(x, y, juce::Colour::fromFloatRGBA(ch(a.getFloatRed(), b.getFloatRed(), c.getFloatRed()),
-                                                                         ch(a.getFloatGreen(), b.getFloatGreen(), c.getFloatGreen()),
-                                                                         ch(a.getFloatBlue(), b.getFloatBlue(), c.getFloatBlue()), a.getFloatAlpha()));
-                }
+            case 0: d = BinaryData::InterLight_ttf;       n = BinaryData::InterLight_ttfSize; break;
+            case 1: d = BinaryData::InterRegular_ttf;     n = BinaryData::InterRegular_ttfSize; break;
+            case 2: d = BinaryData::InterMedium_ttf;      n = BinaryData::InterMedium_ttfSize; break;
+            case 3: d = BinaryData::InterSemiBold_ttf;    n = BinaryData::InterSemiBold_ttfSize; break;
+            case 4: d = BinaryData::SpaceMonoRegular_ttf; n = BinaryData::SpaceMonoRegular_ttfSize; break;
+            default: d = BinaryData::SpaceMonoBold_ttf;   n = BinaryData::SpaceMonoBold_ttfSize; break;
         }
-        return im;
+        t[i] = juce::Typeface::createSystemTypefaceFor(d, (size_t) n);
     }
-};
+    return t[i];
+}
+#endif
+// Inter: w 300 / 400 / 500 / 600
+inline juce::Font inter(float px, int w = 400, float kern = 0.f)
+{
+#if HAS_ASSETS
+    const int i = w <= 300 ? 0 : w <= 400 ? 1 : w <= 500 ? 2 : 3;
+    if (auto f = face(i)) return juce::Font(juce::FontOptions(f).withPointHeight(px).withKerningFactor(kern));
+#endif
+    return juce::Font(juce::FontOptions(px * 1.2f, w >= 500 ? juce::Font::bold : juce::Font::plain).withKerningFactor(kern));
+}
+inline juce::Font mono(float px, bool bold = false)
+{
+#if HAS_ASSETS
+    if (auto f = face(bold ? 5 : 4)) return juce::Font(juce::FontOptions(f).withPointHeight(px));
+#endif
+    return juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), px * 1.2f, bold ? juce::Font::bold : juce::Font::plain));
+}
+inline float textW(const juce::Font& f, const juce::String& s) { return juce::GlyphArrangement::getStringWidth(f, s); }
+inline juce::String lower(const juce::String& s) { return s.toLowerCase(); }
+inline juce::String nice(juce::String s) { return s.replaceCharacter('_', ' ').trim(); }
+
+// the sign of each sound (lanes, pads): kick = filled dot, snare = ring + dot, c-hat = two dots, o-hat = ring,
+// rim = triangle, tom = square, clap = x, shaker = lines, crash = ring + slash, ride = ring + dot filled, perc = diamond
+inline void glyph(juce::Graphics& g, const juce::String& name, juce::Rectangle<float> r, juce::Colour c)
+{
+    const float s = r.getWidth() / 14.f;
+    auto P = [&](float x, float y) { return juce::Point<float>(r.getX() + x * s, r.getY() + y * s); };
+    juce::Path p; const float lw = 1.4f * s;
+    g.setColour(c);
+    auto ring = [&](float rad) { const auto c0 = P(7, 7); p.addEllipse(c0.x - rad * s, c0.y - rad * s, 2 * rad * s, 2 * rad * s); };
+    if (name.startsWith("KICK")) { ring(5.5f); g.fillPath(p); return; }
+    if (name.startsWith("SNARE")) { ring(5.2f); g.strokePath(p, juce::PathStrokeType(lw)); const auto c0 = P(7, 7); g.fillEllipse(c0.x - 1.4f * s, c0.y - 1.4f * s, 2.8f * s, 2.8f * s); return; }
+    if (name.startsWith("C-HAT") || name.startsWith("HAT")) { for (float x : { 4.f, 10.f }) { const auto c0 = P(x, 7); g.fillEllipse(c0.x - 1.8f * s, c0.y - 1.8f * s, 3.6f * s, 3.6f * s); } return; }
+    if (name.startsWith("O-HAT")) { ring(5.f); g.strokePath(p, juce::PathStrokeType(lw)); return; }
+    if (name.startsWith("RIM")) { p.addTriangle(P(7, 2), P(12.5f, 12), P(1.5f, 12)); g.strokePath(p, juce::PathStrokeType(lw)); return; }
+    if (name.startsWith("TOM")) { g.fillRect(juce::Rectangle<float>(P(2, 2), P(12, 12))); return; }
+    if (name.startsWith("CLAP")) { p.startNewSubPath(P(2.5f, 2.5f)); p.lineTo(P(11.5f, 11.5f)); p.startNewSubPath(P(11.5f, 2.5f)); p.lineTo(P(2.5f, 11.5f)); g.strokePath(p, juce::PathStrokeType(lw)); return; }
+    if (name.startsWith("SHAKER")) { for (float y : { 4.f, 7.f, 10.f }) { p.startNewSubPath(P(2, y)); p.lineTo(P(12, y)); } g.strokePath(p, juce::PathStrokeType(lw)); return; }
+    if (name.startsWith("CRASH")) { ring(5.f); p.startNewSubPath(P(3.5f, 10.5f)); p.lineTo(P(10.5f, 3.5f)); g.strokePath(p, juce::PathStrokeType(lw)); return; }
+    if (name.startsWith("RIDE")) { ring(5.f); g.strokePath(p, juce::PathStrokeType(lw)); const auto c0 = P(7, 7); g.fillEllipse(c0.x - 2.4f * s, c0.y - 2.4f * s, 4.8f * s, 4.8f * s); return; }
+    if (name == "-" || name.isEmpty()) { p.addEllipse(P(5.5f, 5.5f).x, P(5.5f, 5.5f).y, 3 * s, 3 * s); g.strokePath(p, juce::PathStrokeType(lw)); return; }
+    p.startNewSubPath(P(7, 1.5f)); p.lineTo(P(12.5f, 7)); p.lineTo(P(7, 12.5f)); p.lineTo(P(1.5f, 7)); p.closeSubPath();   // PERC
+    g.strokePath(p, juce::PathStrokeType(lw));
+}
+inline void lockIcon(juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c, bool shut)
+{
+    const float s = r.getWidth() / 24.f;
+    juce::Path body; body.addRoundedRectangle(r.getX() + 5 * s, r.getY() + 11 * s, 14 * s, 10 * s, 2 * s);
+    juce::Path sh; sh.startNewSubPath(r.getX() + 8 * s, r.getY() + 11 * s); sh.lineTo(r.getX() + 8 * s, r.getY() + 7 * s);
+    sh.addCentredArc(r.getX() + 12 * s, r.getY() + 7 * s, 4 * s, 4 * s, 0.f, -juce::MathConstants<float>::halfPi, shut ? juce::MathConstants<float>::halfPi : 0.35f, false);
+    if (shut) sh.lineTo(r.getX() + 16 * s, r.getY() + 11 * s);
+    g.setColour(c); g.strokePath(body, juce::PathStrokeType(2.4f * s)); g.strokePath(sh, juce::PathStrokeType(2.4f * s));
+}
+// a soft shadow without a blur: a few wider, fainter shapes (cheap enough to draw 30 times a second)
+inline void shadow(juce::Graphics& g, juce::Rectangle<float> r, float rad, float alpha, float dy, float spread, bool round = false)
+{
+    for (int i = 4; i >= 1; --i)
+    {
+        const float e = spread * i / 4.f;
+        const auto q = r.translated(0, dy * i / 4.f).expanded(e);
+        g.setColour(juce::Colours::black.withAlpha(alpha * 0.22f));
+        if (round) g.fillEllipse(q); else g.fillRoundedRectangle(q, rad + e);
+    }
+}
+inline void glow(juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c, float alpha, float dy, float spread)
+{
+    for (int i = 4; i >= 1; --i) { const float e = spread * i / 4.f; g.setColour(c.withAlpha(alpha * 0.2f)); g.fillEllipse(r.translated(0, dy * i / 4.f).expanded(e)); }
+}
+inline void dashed(juce::Graphics& g, juce::Rectangle<float> r, float rad, juce::Colour c)
+{
+    juce::Path p, d; p.addRoundedRectangle(r, rad);
+    const float dl[] = { 3.f, 3.f };
+    juce::PathStrokeType(1.f).createDashedStroke(d, p, dl, 2);
+    g.setColour(c); g.fillPath(d);
+}
 
 struct Look : juce::LookAndFeel_V4
 {
-    juce::Image knobImg;
     Look()
     {
-        setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b1d22));
-        setColour(juce::TextButton::textColourOffId, text);
-        setColour(juce::TextButton::textColourOnId, juce::Colours::black);
-        setColour(juce::TooltipWindow::backgroundColourId, juce::Colour(0xff1b1d22));
-        setColour(juce::TooltipWindow::textColourId, text);
-        setColour(juce::TooltipWindow::outlineColourId, panelEdge);
+        setColour(juce::TextButton::buttonColourId, chip2);
+        setColour(juce::TextButton::textColourOffId, white);
+        setColour(juce::TooltipWindow::backgroundColourId, chip2);
+        setColour(juce::TooltipWindow::textColourId, white);
+        setColour(juce::TooltipWindow::outlineColourId, line);
+        setColour(juce::TextEditor::backgroundColourId, chip);
+        setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+        setColour(juce::TextEditor::focusedOutlineColourId, line);
+        setColour(juce::TextEditor::textColourId, white);
+        setColour(juce::TextEditor::highlightColourId, white.withAlpha(0.2f));
+        setColour(juce::CaretComponent::caretColourId, orange);
+        setColour(juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
+        setColour(juce::ScrollBar::thumbColourId, line);
     }
+    // knobs: a dark (or the one orange) cap with a soft shadow and a white mark
     void drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider& s) override
     {
-        auto b = juce::Rectangle<float>((float) x, (float) y, (float) w, (float) h);
-        const float d = std::min(b.getWidth(), b.getHeight()) - 2.f;
+        const auto b = juce::Rectangle<float>((float) x, (float) y, (float) w, (float) h);
+        const float d = std::min(b.getWidth(), b.getHeight()) - 26.f, r = d * 0.5f;
         const auto c = b.getCentre();
-        const float r = d * 0.5f, kd = d * 0.80f;
-        const bool bipolar = s.getMinimum() < 0 && s.getMaximum() > 0;
-        const float ang = a0 + pos * (a1 - a0), from = bipolar ? (a0 + a1) * 0.5f : a0;
-        juce::Path bg, val;
-        bg.addCentredArc(c.x, c.y, r - 1.5f, r - 1.5f, 0.f, a0, a1, true);
-        val.addCentredArc(c.x, c.y, r - 1.5f, r - 1.5f, 0.f, std::min(from, ang), std::max(from, ang), true);
-        g.setColour(juce::Colour(0xff26292f)); g.strokePath(bg, juce::PathStrokeType(2.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-        g.setColour(amber.withAlpha(0.25f));   g.strokePath(val, juce::PathStrokeType(6.f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-        g.setColour(amber);                    g.strokePath(val, juce::PathStrokeType(2.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-        if (knobImg.isValid())
-        {
-            const float iw = (float) knobImg.getWidth();
-            g.drawImageTransformed(knobImg, juce::AffineTransform::translation(-iw * 0.5f, -iw * 0.5f).scaled(kd / iw).rotated(ang).translated(c.x, c.y), false);
-            return;
-        }
-        g.setColour(juce::Colours::black.withAlpha(0.5f)); g.fillEllipse(c.x - kd / 2, c.y - kd / 2 + 2, kd, kd);
-        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff3a3d44), c.x - kd * 0.3f, c.y - kd * 0.4f, juce::Colour(0xff15161a), c.x + kd * 0.4f, c.y + kd * 0.5f, true));
-        g.fillEllipse(c.x - kd / 2, c.y - kd / 2, kd, kd);
-        g.setColour(juce::Colour(0xff0c0d10)); g.drawEllipse(c.x - kd / 2, c.y - kd / 2, kd, kd, 1.2f);
-        juce::Path p; p.addRoundedRectangle(-1.f, -kd * 0.44f, 2.f, kd * 0.26f, 1.f);
-        g.setColour(text); g.fillPath(p, juce::AffineTransform::rotation(ang).translated(c.x, c.y));
+        const bool hero = s.getProperties()["hero"] && s.isEnabled();
+        const float ang = a0 + pos * (a1 - a0);
+        juce::Path cap; cap.addEllipse(c.x - r, c.y - r, d, d);
+        if (hero) glow(g, cap.getBounds(), orange, 0.5f, r * 0.2f, r * 0.22f);
+        else shadow(g, cap.getBounds(), r, 0.7f, r * 0.2f, r * 0.12f, true);
+        juce::ColourGradient gr(hero ? juce::Colour(0xffff7b47) : juce::Colour(0xff3c3c3f), c.x - r * 0.28f, c.y - r * 0.44f,
+                                hero ? juce::Colour(0xffd8440e) : juce::Colour(0xff19191b), c.x + r * 0.7f, c.y + r * 0.9f, true);
+        gr.addColour(0.55, hero ? juce::Colour(0xfff2541a) : juce::Colour(0xff242427));
+        g.setGradientFill(gr); g.fillPath(cap);
+        g.setColour(juce::Colours::white.withAlpha(hero ? 0.25f : 0.07f)); g.drawEllipse(c.x - r + 1.f, c.y - r + 1.f, d - 2.f, d - 2.f, 1.f);
+        juce::Path m; m.addRoundedRectangle(-2.f, -r + 9.f, 4.f, r * 0.38f, 2.f);
+        g.setColour(s.isEnabled() ? white : faint); g.fillPath(m, juce::AffineTransform::rotation(ang).translated(c.x, c.y));
     }
-    void drawButtonBackground(juce::Graphics& g, juce::Button& b, const juce::Colour& bg, bool over, bool down) override
+    // buttons used on the pages: chips. property "kind": primary (white), accent (orange), ghost (outline)
+    void drawButtonBackground(juce::Graphics& g, juce::Button& b, const juce::Colour&, bool over, bool down) override
     {
         auto r = b.getLocalBounds().toFloat().reduced(0.5f);
-        const bool primary = b.getProperties()["primary"];
-        const bool on = b.getToggleState();
-        if (primary)
-        {
-            g.setGradientFill(juce::ColourGradient(amber.brighter(0.15f), 0, r.getY(), amber.darker(0.25f), 0, r.getBottom(), false));
-            g.fillRoundedRectangle(r, 8.f);
-            if (over) { g.setColour(juce::Colours::white.withAlpha(down ? 0.18f : 0.10f)); g.fillRoundedRectangle(r, 8.f); }
-            return;
-        }
-        g.setColour(on ? amber.withAlpha(0.14f) : bg.brighter(over ? 0.06f : 0.f)); g.fillRoundedRectangle(r, 6.f);
-        g.setColour(on ? amber.withAlpha(0.8f) : panelEdge.brighter(0.15f)); g.drawRoundedRectangle(r, 6.f, 1.f);
+        const auto kind = b.getProperties()["kind"].toString();
+        const float rad = std::min(9.f, r.getHeight() * 0.5f);
+        juce::Colour bg = b.getToggleState() ? chipOn : chip2;
+        if (kind == "primary") bg = white;
+        else if (kind == "accent") bg = orange;
+        else if (kind == "ghost") bg = juce::Colours::transparentBlack;
+        if (!b.isEnabled()) bg = bg.withMultipliedAlpha(0.4f);
+        g.setColour(bg.brighter(over && b.isEnabled() ? (down ? 0.15f : 0.07f) : 0.f)); g.fillRoundedRectangle(r, rad);
+        if (kind == "ghost") { g.setColour(dark); g.drawRoundedRectangle(r, rad, 1.f); }
     }
     void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool, bool) override
     {
-        const bool primary = b.getProperties()["primary"];
-        const bool compact = b.getProperties()["compact"];
-        g.setFont(font(primary ? (compact ? 11.5f : 13.f) : 10.5f, true, primary ? (compact ? 0.06f : 0.18f) : 0.12f));
-        g.setColour(primary ? juce::Colour(0xff1a1206) : (b.getToggleState() ? amber : text.withAlpha(b.isEnabled() ? 0.85f : 0.3f)));
+        const auto kind = b.getProperties()["kind"].toString();
+        g.setFont(inter(12.f, b.getToggleState() || kind == "primary" || kind == "accent" ? 600 : 400));
+        juce::Colour c = kind == "primary" ? juce::Colour(0xff0b0b0c) : kind == "accent" ? juce::Colours::white : b.getToggleState() ? white : soft;
+        g.setColour(c.withMultipliedAlpha(b.isEnabled() ? 1.f : 0.4f));
         g.drawText(b.getButtonText(), b.getLocalBounds(), juce::Justification::centred);
     }
-};
-
-// a small square play / stop button
-struct PlayButton : juce::Button
-{
-    PlayButton() : juce::Button("play") {}
-    void paintButton(juce::Graphics& g, bool over, bool) override
+    juce::Font getTextButtonFont(juce::TextButton&, int) override { return inter(12.f); }
+    void fillTextEditorBackground(juce::Graphics& g, int w, int h, juce::TextEditor&) override
+    { g.setColour(chip); g.fillRoundedRectangle(juce::Rectangle<float>(0, 0, (float) w, (float) h), 8.f); }
+    void drawTextEditorOutline(juce::Graphics& g, int w, int h, juce::TextEditor& t) override
+    { if (t.hasKeyboardFocus(true)) { g.setColour(line); g.drawRoundedRectangle(juce::Rectangle<float>(0.5f, 0.5f, (float) w - 1, (float) h - 1), 8.f, 1.f); } }
+    void drawScrollbar(juce::Graphics& g, juce::ScrollBar&, int x, int y, int w, int h, bool vertical, int thumbStart, int thumbSize, bool over, bool) override
     {
-        auto r = getLocalBounds().toFloat().reduced(0.5f);
-        const bool on = getToggleState();
-        g.setColour(on ? amber.withAlpha(0.18f) : juce::Colour(0xff1c1e23).brighter(over ? 0.08f : 0.f)); g.fillRoundedRectangle(r, 8.f);
-        g.setColour(on ? amber : panelEdge.brighter(0.3f)); g.drawRoundedRectangle(r, 8.f, 1.f);
-        g.setColour(!isEnabled() ? faint : on ? amber : ui::text);
-        const auto c = r.getCentre();
-        if (on) g.fillRoundedRectangle(juce::Rectangle<float>(10.f, 10.f).withCentre(c), 1.5f);
-        else { juce::Path t; t.addTriangle(c.x - 4.5f, c.y - 7.f, c.x - 4.5f, c.y + 7.f, c.x + 7.f, c.y); g.fillPath(t); }
+        const auto t = vertical ? juce::Rectangle<float>((float) x + w * 0.5f - 1.5f, (float) thumbStart, 3.f, (float) thumbSize)
+                                : juce::Rectangle<float>((float) thumbStart, (float) y + h * 0.5f - 1.5f, (float) thumbSize, 3.f);
+        g.setColour(over ? dark : line); g.fillRoundedRectangle(t, 1.5f);
     }
-};
-
-struct DragButton : juce::TextButton
-{
-    std::function<void()> onDrag;
-    bool started = false;
-    void mouseDown(const juce::MouseEvent& e) override { started = false; juce::TextButton::mouseDown(e); }
-    void mouseDrag(const juce::MouseEvent& e) override { if (!started && e.getDistanceFromDragStart() > 6) { started = true; if (onDrag) onDrag(); } }
 };
 } // namespace ui
 
 // -----------------------------------------------------------------------------------------------------
-// bottom editor: the selected pad's sound with start / end trim and an attack - hold - decay envelope
-// -----------------------------------------------------------------------------------------------------
-// sound editor of the selected pad: START / END flags, FADE IN / FADE OUT squares.
+// the selected pad's sound (pad page): START / END flags, FADE IN / FADE OUT squares, GAIN.
 // Drag a square sideways = fade length, up / down = its curve. Double-click a handle = reset it.
-// Click the sound = listen.  Right-click = reset menu.  FIT / FULL (top right) = zoom to the used part.
+// Click the sound = listen. FIT / FULL = zoom to the used part. ("reset" on the page resets the whole shape)
+// -----------------------------------------------------------------------------------------------------
 class ShapeView : public juce::Component, public juce::SettableTooltipClient
 {
 public:
@@ -175,94 +202,71 @@ public:
 
     void paint(juce::Graphics& g) override
     {
-        auto r = getLocalBounds().toFloat();
-        g.setColour(ui::well); g.fillRoundedRectangle(r, 8.f);
-        g.setColour(ui::panelEdge); g.drawRoundedRectangle(r.reduced(0.5f), 8.f, 1.f);
         auto res = proc.getResult();
-        if (!res || !res->pads[(size_t) pad].valid)
-        {
-            g.setColour(ui::faint); g.setFont(ui::font(11.f, true, 0.2f));
-            g.drawText("SELECT A PAD", getLocalBounds(), juce::Justification::centred);
-            return;
-        }
+        if (!res || !res->pads[(size_t) pad].valid) return;
         const auto sp = proc.shapeParams(pad);
         refreshPeaks(*res, sp.best, sp.user);
-        const auto col = ui::padColour(res->pads[(size_t) pad].name);
         const auto w = wave(); const float mid = w.getCentreY(), hh = w.getHeight() * 0.47f;
         const float endMs = std::min(sp.end, totalMs);
         const float xs = msToX(sp.start), xe = msToX(endMs);
-        // the sound: as heard (shaped) in colour, the untouched take faint behind it
-        for (int i = 0; i < (int) peaks.size(); ++i)
+        // the sound as heard: white bars (every 3 px, like the display's own dots); the untouched take dark behind
+        for (int i = 0; i < (int) peaks.size(); i += 3)
         {
             const float x = w.getX() + (float) i, ms = xToMs(x + 0.5f);
             const auto pk = peaks[(size_t) i];
-            g.setColour(ui::faint.withAlpha(0.55f));
-            g.drawVerticalLine((int) x, mid - pk.second * hh, mid - pk.first * hh + 1.f);
-            if (ms < sp.start || ms > endMs) continue;
-            const float e = std::min(1.f / std::max(0.05f, std::max(std::abs(pk.first), std::abs(pk.second))), level(sp, ms) * gainLin(sp));   // GAIN shows on the wave
-            g.setColour(col.withAlpha(0.95f));
-            g.drawVerticalLine((int) x, mid - pk.second * hh * e, mid - pk.first * hh * e + 1.f);
+            const float a = std::max(std::abs(pk.first), std::abs(pk.second));
+            const bool in = ms >= sp.start && ms <= endMs;
+            const float e = in ? std::min(1.f / std::max(0.05f, a), level(sp, ms) * gainLin(sp)) : 1.f;
+            const float bh = std::max(1.5f, a * hh * e);
+            g.setColour(in ? (e * a > 0.08f ? ui::white : ui::line) : juce::Colour(0xff1c1c1f));
+            g.fillRoundedRectangle(x - 1.f, mid - bh, 2.f, 2.f * bh, 1.f);
         }
-        // envelope: filled + line
+        // envelope line
         const float top = w.getY() + 2.f, bot = w.getBottom() - 1.f;
-        juce::Path env, fill;
-        fill.startNewSubPath(xs, bot);
+        juce::Path env;
         for (float x = xs; x <= xe + 0.5f; x += 1.f)
         {
             const float y = bot - (bot - top) * level(sp, xToMs(std::min(x, xe)));
             if (x == xs) env.startNewSubPath(x, y); else env.lineTo(x, y);
-            fill.lineTo(x, y);
         }
-        fill.lineTo(xe, bot); fill.closeSubPath();
-        g.setColour(col.withAlpha(0.10f)); g.fillPath(fill);
-        g.setColour(ui::text.withAlpha(0.85f)); g.strokePath(env, juce::PathStrokeType(1.4f));
+        g.setColour(ui::white.withAlpha(0.35f)); g.strokePath(env, juce::PathStrokeType(1.f));
         // START / END flags
         const bool hs = hot == 1 || drag == 1, he = hot == 5 || drag == 5;
-        g.setColour((hs ? ui::amber : ui::text).withAlpha(0.9f)); g.drawLine(xs, w.getY(), xs, w.getBottom(), hs ? 2.f : 1.4f);
-        juce::Path fs; fs.addTriangle(xs, w.getY(), xs + 11.f, w.getY() + 6.f, xs, w.getY() + 12.f); g.fillPath(fs);
-        g.setColour((he ? ui::amber : ui::text).withAlpha(0.9f)); g.drawLine(xe, w.getY(), xe, w.getBottom(), he ? 2.f : 1.4f);
-        juce::Path fe; fe.addTriangle(xe, w.getBottom(), xe - 11.f, w.getBottom() - 6.f, xe, w.getBottom() - 12.f); g.fillPath(fe);
-        // fade squares
-        auto square = [&](juce::Point<float> c, bool on, bool rising)
-        {
-            const auto q = juce::Rectangle<float>(13.f, 13.f).withCentre(c);
-            g.setColour(on ? ui::amber : ui::text.withAlpha(0.9f)); g.fillRoundedRectangle(q, 2.f);
-            g.setColour(ui::well); g.drawLine(q.getX() + 3, rising ? q.getBottom() - 3 : q.getY() + 3, q.getRight() - 3, rising ? q.getY() + 3 : q.getBottom() - 3, 1.4f);
-        };
-        square(fadeInHandle(sp), hot == 2 || drag == 2, true);
-        square(fadeOutHandle(sp), hot == 6 || drag == 6, false);
-        // values
-        g.setFont(ui::font(8.5f, true, 0.15f));
-        auto label = [&](int id, const juce::String& t, juce::Rectangle<float> rr, juce::Justification j)
-        { g.setColour(drag == id || hot == id ? ui::amber : ui::dim); g.drawText(t, rr, j); };
-        const float ly = (float) getHeight() - 15.f, lw = ((float) getWidth() - 20.f) / 4.f;
-        label(1, "START  " + ms(sp.start), { 10.f, ly, lw, 12.f }, juce::Justification::centredLeft);
-        label(2, "FADE IN  " + ms(sp.attack) + curveText(sp.attackCurve), { 10.f + lw, ly, lw, 12.f }, juce::Justification::centred);
-        label(6, "FADE OUT  " + ms(sp.fadeOut) + curveText(sp.fadeOutCurve), { 10.f + 2 * lw, ly, lw, 12.f }, juce::Justification::centred);
-        label(5, "END  " + ms(endMs), { 10.f + 3 * lw, ly, lw, 12.f }, juce::Justification::centredRight);
-        g.setColour(ui::dim); g.setFont(ui::font(9.f, false, 0.1f));
-        g.drawText(ms(endMs - sp.start), juce::Rectangle<float>(w.getCentreX() - 40, w.getY() + 1, 80, 12).toNearestInt(), juce::Justification::centred);
-        // GAIN fader (this source's own level), right edge
+        g.setColour(hs ? ui::orange : ui::dim); g.drawLine(xs, w.getY(), xs, w.getBottom(), hs ? 2.f : 1.2f);
+        juce::Path fs; fs.addTriangle(xs, w.getY(), xs + 9.f, w.getY() + 5.f, xs, w.getY() + 10.f); g.fillPath(fs);
+        g.setColour(he ? ui::orange : ui::dim); g.drawLine(xe, w.getY(), xe, w.getBottom(), he ? 2.f : 1.2f);
+        juce::Path fe; fe.addTriangle(xe, w.getBottom(), xe - 9.f, w.getBottom() - 5.f, xe, w.getBottom() - 10.f); g.fillPath(fe);
+        auto square = [&](juce::Point<float> c, bool on)
+        { g.setColour(on ? ui::orange : ui::white); g.fillEllipse(juce::Rectangle<float>(9.f, 9.f).withCentre(c)); };
+        square(fadeInHandle(sp), hot == 2 || drag == 2);
+        square(fadeOutHandle(sp), hot == 6 || drag == 6);
+        // GAIN fader, right edge
         {
             const auto fr = gainRect();
             const bool on = hot == 7 || drag == 7;
-            g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(fr, 4.f);
-            g.setColour(ui::panelEdge.brighter(0.2f)); g.drawRoundedRectangle(fr, 4.f, 1.f);
-            const float y0 = gainToY(0.f);
-            g.setColour(ui::dim); g.drawHorizontalLine((int) y0, fr.getX() + 2.f, fr.getRight() - 2.f);
-            const float y = gainToY(sp.gainDb);
-            g.setColour((on ? ui::amber : col).withAlpha(0.35f));
-            g.fillRect(juce::Rectangle<float>(fr.getX() + 3.f, std::min(y, y0), fr.getWidth() - 6.f, std::abs(y0 - y)));
-            g.setColour(on ? ui::amber : ui::text); g.fillRoundedRectangle(juce::Rectangle<float>(fr.getWidth() + 4.f, 6.f).withCentre({ fr.getCentreX(), y }), 2.f);
-            g.setFont(ui::font(8.f, true, 0.1f)); g.setColour(on ? ui::amber : ui::dim);
-            g.drawText("GAIN", juce::Rectangle<float>(fr.getX() - 8.f, fr.getBottom() + 2.f, fr.getWidth() + 16.f, 10.f), juce::Justification::centred);
+            g.setColour(ui::chip); g.fillRoundedRectangle(fr, 3.f);
+            const float y0 = gainToY(0.f), y = gainToY(sp.gainDb);
+            g.setColour(ui::line); g.drawHorizontalLine((int) y0, fr.getX(), fr.getRight());
+            g.setColour(on ? ui::orange : ui::white); g.fillRoundedRectangle(juce::Rectangle<float>(fr.getWidth() + 4.f, 4.f).withCentre({ fr.getCentreX(), y }), 2.f);
             if (on || std::abs(sp.gainDb) > 0.05f)
-                g.drawText((sp.gainDb > 0 ? "+" : "") + juce::String(sp.gainDb, 1) + " dB", juce::Rectangle<float>(fr.getX() - 62.f, y - 6.f, 58.f, 12.f), juce::Justification::centredRight);
+            {
+                g.setFont(ui::mono(9.f)); g.setColour(on ? ui::orange : ui::dim2);
+                g.drawText((sp.gainDb > 0 ? "+" : "") + juce::String(sp.gainDb, 1) + " db", juce::Rectangle<float>(fr.getX() - 56.f, y - 6.f, 52.f, 12.f), juce::Justification::centredRight);
+            }
         }
-        // zoom
+        // values (only while you touch a handle) + zoom
+        g.setFont(ui::mono(9.f));
+        if (drag || hot)
+        {
+            const juce::String t = (drag ? drag : hot) == 1 ? "start " + ms(sp.start) : (drag ? drag : hot) == 5 ? "end " + ms(endMs)
+                                 : (drag ? drag : hot) == 2 ? "fade in " + ms(sp.attack) + curveText(sp.attackCurve)
+                                 : (drag ? drag : hot) == 6 ? "fade out " + ms(sp.fadeOut) + curveText(sp.fadeOutCurve) : juce::String();
+            g.setColour(ui::orange); g.drawText(t, juce::Rectangle<float>(w.getX(), 0, w.getWidth(), 11.f), juce::Justification::centredLeft);
+        }
+        else { g.setColour(ui::faint); g.drawText(ms(endMs - sp.start), juce::Rectangle<float>(w.getX(), 0, w.getWidth(), 11.f), juce::Justification::centredLeft); }
         const auto zb = zoomRect();
-        g.setColour(zoomFit ? ui::amber : ui::dim); g.setFont(ui::font(8.5f, true, 0.25f));
-        g.drawRoundedRectangle(zb, 6.f, 1.f); g.drawText(zoomFit ? "FULL" : "FIT", zb, juce::Justification::centred);
+        g.setColour(zoomFit ? ui::white : ui::faint);
+        g.drawText(zoomFit ? "full" : "fit", zb, juce::Justification::centredRight);
     }
 
     void mouseMove(const juce::MouseEvent& e) override { const int h = hit(e.position); if (h != hot) { hot = h; repaint(); } }
@@ -271,11 +275,10 @@ public:
     {
         auto res = proc.getResult(); if (!res || !res->pads[(size_t) pad].valid) return;
         if (zoomRect().contains(e.position)) { zoomFit = !zoomFit; peakKey = -1; repaint(); return; }
-        if (e.mods.isPopupMenu()) { resetMenu(); return; }
         drag = hit(e.position);
-        if (drag && e.getNumberOfClicks() > 1) { resetHandle(drag); drag = 0; }
-        else if (drag) { beginGesture(); startSp = proc.shapeParams(pad); startPos = e.position; }
-        else proc.audition(pad);            // click on the sound = listen
+        if (drag && e.getNumberOfClicks() > 1) { proc.undo.beginNewTransaction(); resetHandle(drag); drag = 0; }
+        else if (drag) { proc.undo.beginNewTransaction(); beginGesture(); startSp = proc.shapeParams(pad); startPos = e.position; }
+        else proc.audition(pad);
         repaint();
     }
     void mouseDrag(const juce::MouseEvent& e) override
@@ -284,9 +287,8 @@ public:
         const auto sp = proc.shapeParams(pad);
         const float m = juce::jlimit(0.f, totalMs, xToMs(e.position.x)), endMs = std::min(sp.end, totalMs), len = endMs - sp.start;
         const auto w = wave(); const float top = w.getY() + 2.f, bot = w.getBottom() - 1.f;
-        // moves are relative to where the drag started: grabbing a square never makes it jump
         const float m0 = juce::jlimit(0.f, totalMs, xToMs(startPos.x)), dy = e.position.y - startPos.y;
-        auto curveFrom = [&](float c0) {                    // the square sits on the curve's middle: its height sets the curve
+        auto curveFrom = [&](float c0) {
             const float L0 = (float) std::pow(0.5, std::pow(2.0, -3.0 * c0));
             const float L = juce::jlimit(0.03f, 0.97f, L0 - dy / (bot - top));
             const float pw = std::log(L) / std::log(0.5f);
@@ -301,8 +303,8 @@ public:
             case 6: set("fo", juce::jlimit(0.f, std::max(0.f, len - sp.attack), startSp.fadeOut - 2.f * (m - m0)));
                     if (std::abs(dy) > 1.f) set("foc", curveFrom(startSp.fadeOutCurve));
                     break;
-            case 7: { float gdb = yToGain(gainToY(startSp.gainDb) + dy * (e.mods.isShiftDown() ? 0.25f : 1.f));   // SHIFT: fine
-                      if (std::abs(gdb) < 0.25f) gdb = 0.f;                                   // 0 dB clicks in
+            case 7: { float gdb = yToGain(gainToY(startSp.gainDb) + dy * (e.mods.isShiftDown() ? 0.25f : 1.f));
+                      if (std::abs(gdb) < 0.25f) gdb = 0.f;
                       set("gain", std::round(gdb * 10.f) / 10.f); break; }
             default: break;
         }
@@ -310,21 +312,28 @@ public:
     }
     void mouseUp(const juce::MouseEvent&) override { if (drag) { endGesture(); proc.audition(pad); } drag = 0; repaint(); }
     void invalidate() { peakKey = -1; repaint(); }
+    void resetAll() { proc.undo.beginNewTransaction(); resetIds({ "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy", "gain" }); }
 
 private:
-    // gain of the shaped sound at a time (ms in the take) - the same maths as shapeShot()
     float fadeOutLevel(const ShapeParams& sp, float msIn) const
     {
         const float endMs = std::min(sp.end, totalMs);
         if (sp.fadeOut <= 0 || msIn < endMs - sp.fadeOut) return 1.f;
         return (float) std::pow(std::max(0.0, (double) (endMs - msIn) / sp.fadeOut), std::pow(2.0, -3.0 * sp.fadeOutCurve));
     }
-    float level(const ShapeParams& sp, float msIn) const;
+    float level(const ShapeParams& sp, float msIn) const
+    {
+        const float t = msIn - sp.start;
+        double env = 1.0;
+        if (t < sp.attack) env = std::pow(std::max(0.f, t) / std::max(0.001f, sp.attack), std::pow(2.0, -3.0 * sp.attackCurve));
+        else if (t > sp.attack + sp.hold) env = std::pow(10.0, -3.0 * (t - sp.attack - sp.hold) / std::max(1.f, sp.decay));
+        return (float) juce::jlimit(0.0, 1.0, env * fadeOutLevel(sp, msIn));
+    }
     juce::Point<float> fadeInHandle(const ShapeParams& sp) const
     {
         const auto w = wave(); const float top = w.getY() + 2.f, bot = w.getBottom() - 1.f;
         const float L = (float) std::pow(0.5, std::pow(2.0, -3.0 * sp.attackCurve));
-        return { std::max(msToX(sp.start) + 10.f, msToX(sp.start + 0.5f * sp.attack)), bot - (bot - top) * L };   // never under the flag
+        return { std::max(msToX(sp.start) + 10.f, msToX(sp.start + 0.5f * sp.attack)), bot - (bot - top) * L };
     }
     juce::Point<float> fadeOutHandle(const ShapeParams& sp) const
     {
@@ -336,21 +345,20 @@ private:
     {
         auto res = proc.getResult(); if (!res || !res->pads[(size_t) pad].valid) return 0;
         const auto sp = proc.shapeParams(pad); const auto w = wave();
-        if (gainRect().expanded(4.f, 4.f).contains(p)) return 7;
-        if (p.getDistanceFrom(fadeInHandle(sp)) < 10.f) return 2;
-        if (p.getDistanceFrom(fadeOutHandle(sp)) < 10.f) return 6;
+        if (gainRect().expanded(5.f, 4.f).contains(p)) return 7;
+        if (p.getDistanceFrom(fadeInHandle(sp)) < 9.f) return 2;
+        if (p.getDistanceFrom(fadeOutHandle(sp)) < 9.f) return 6;
         const float xs = msToX(sp.start), xe = msToX(std::min(sp.end, totalMs));
         const float ds = std::abs(p.x - xs), de = std::abs(p.x - xe);
         if (std::min(ds, de) < 7.f && p.y >= w.getY() - 4 && p.y <= w.getBottom() + 4) return ds <= de ? 1 : 5;
         return 0;
     }
-    juce::Rectangle<float> wave() const { return getLocalBounds().toFloat().reduced(10.f, 0).withTrimmedTop(8.f).withTrimmedBottom(20.f).withTrimmedRight(26.f); }
-    // GAIN: -24 .. +12 dB, 0 dB at 2/3 of the way down... a dB scale so small moves near 0 are easy
-    juce::Rectangle<float> gainRect() const { const auto w = wave(); return { (float) getWidth() - 24.f, w.getY() + 10.f, 12.f, w.getHeight() - 14.f }; }
+    juce::Rectangle<float> wave() const { return getLocalBounds().toFloat().withTrimmedTop(14.f).withTrimmedRight(22.f).withTrimmedLeft(4.f); }
+    juce::Rectangle<float> gainRect() const { const auto w = wave(); return { (float) getWidth() - 10.f, w.getY() + 4.f, 6.f, w.getHeight() - 8.f }; }
     float gainToY(float db) const { const auto r = gainRect(); return r.getY() + (12.f - juce::jlimit(-24.f, 12.f, db)) / 36.f * r.getHeight(); }
     float yToGain(float y) const { const auto r = gainRect(); return juce::jlimit(-24.f, 12.f, 12.f - (y - r.getY()) / r.getHeight() * 36.f); }
     static float gainLin(const ShapeParams& sp) { return juce::Decibels::decibelsToGain(sp.gainDb); }
-    juce::Rectangle<float> zoomRect() const { return { (float) getWidth() - 76.f, 4.f, 40.f, 14.f }; }
+    juce::Rectangle<float> zoomRect() const { return { (float) getWidth() - 60.f, 0.f, 36.f, 11.f }; }
     float viewMs() const
     {
         if (!zoomFit) return totalMs;
@@ -374,19 +382,6 @@ private:
     void endGesture() { for (auto* id : idsOf(drag)) if (auto* p = prm(id)) p->endChangeGesture(); }
     void resetIds(std::initializer_list<const char*> ids) { for (auto* id : ids) if (auto* p = prm(id)) p->setValueNotifyingHost(p->getDefaultValue()); repaint(); }
     void resetHandle(int d) { for (auto* id : idsOf(d)) if (auto* p = prm(id)) p->setValueNotifyingHost(p->getDefaultValue()); }
-    void resetMenu()
-    {
-        juce::PopupMenu m;
-        m.addItem(1, "RESET FADES"); m.addItem(2, "RESET START / END"); m.addItem(4, "RESET GAIN"); m.addItem(3, "RESET THE WHOLE SHAPE");
-        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this), [this, sp = juce::Component::SafePointer<ShapeView>(this)](int id)
-        {
-            if (sp == nullptr) return;
-            if (id == 1) resetIds({ "atk", "fic", "fo", "foc", "hold", "dcy" });
-            if (id == 2) resetIds({ "st", "en" });
-            if (id == 3) resetIds({ "st", "en", "atk", "fic", "fo", "foc", "hold", "dcy", "gain" });
-            if (id == 4) resetIds({ "gain" });
-        });
-    }
     void refreshPeaks(const ds::Result& r, bool best, bool user)
     {
         const auto& a = r.pads[(size_t) pad].get(best, user);
@@ -397,12 +392,12 @@ private:
         if (key == peakKey && (int) peaks.size() == W && vm == peakView) return;
         peakKey = key; peakView = vm; peaks.clear();
         const int nv = std::min(n, (int) (vm * 0.001 * r.sr) + 1);
-        float mx = 1e-6f; for (int c = 0; c < 2; ++c) mx = std::max(mx, a.getMagnitude(c, 0, n));
+        float mx = 1e-6f; for (int c = 0; c < a.getNumChannels(); ++c) mx = std::max(mx, a.getMagnitude(c, 0, n));
         for (int x = 0; x < W; ++x)
         {
-            const int s0 = (int) ((juce::int64) x * nv / W), s1 = std::max(s0 + 1, (int) ((juce::int64) (x + 1) * nv / W));
+            const int s0 = (int) ((juce::int64) x * nv / W), s1 = std::max(s0 + 1, (int) ((juce::int64) (x + 3) * nv / W));
             float lo = 0, hi = 0;
-            for (int s = s0; s < std::min(n, s1); ++s) { const float v = 0.5f * (a.getSample(0, s) + a.getSample(1, s)) / mx; lo = std::min(lo, v); hi = std::max(hi, v); }
+            for (int s = s0; s < std::min(n, s1); ++s) { const float v = 0.5f * (a.getSample(0, s) + a.getSample(a.getNumChannels() > 1 ? 1 : 0, s)) / mx; lo = std::min(lo, v); hi = std::max(hi, v); }
             peaks.push_back({ lo, hi });
         }
     }
@@ -410,41 +405,61 @@ private:
     std::vector<std::pair<float, float>> peaks;
     int peakKey = -1, drag = 0, hot = 0;
     float totalMs = 800.f, peakView = -1.f;
-    bool zoomFit = false;
+    bool zoomFit = true;
     ShapeParams startSp; juce::Point<float> startPos;
 };
-inline float ShapeView::level(const ShapeParams& sp, float msIn) const
-{
-    const float t = msIn - sp.start;
-    double env = 1.0;
-    if (t < sp.attack) env = std::pow(std::max(0.f, t) / std::max(0.001f, sp.attack), std::pow(2.0, -3.0 * sp.attackCurve));
-    else if (t > sp.attack + sp.hold) env = std::pow(10.0, -3.0 * (t - sp.attack - sp.hold) / std::max(1.f, sp.decay));
-    return (float) juce::jlimit(0.0, 1.0, env * fadeOutLevel(sp, msIn));
-}
 
 // -----------------------------------------------------------------------------------------------------
-// the whole UI at its design size 1000 x 600; the editor scales it (resizable window)
-// ---------------------------------------------------------------- kit browser (overlay)
-class KitBrowser : public juce::Component, private juce::ListBoxModel, private juce::Timer
+// a "hold" chip: press and keep pressing ~0.9 s (the fill shows it) - instead of an "are you sure?" window
+// -----------------------------------------------------------------------------------------------------
+struct HoldButton : juce::Component, private juce::Timer
+{
+    juce::String text; std::function<void()> onHold;
+    void paint(juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced(0.5f);
+        g.setColour(ui::orange); g.drawRoundedRectangle(r, 9.f, 1.f);
+        if (frac > 0) { g.setColour(ui::orange.withAlpha(0.35f)); g.fillRoundedRectangle(r.withWidth(r.getWidth() * frac), 9.f); }
+        g.setFont(ui::inter(12.f)); g.setColour(ui::orange);
+        g.drawText(text, getLocalBounds(), juce::Justification::centred);
+    }
+    void mouseDown(const juce::MouseEvent&) override { t0 = juce::Time::getMillisecondCounterHiRes(); frac = 0; startTimerHz(60); }
+    void mouseUp(const juce::MouseEvent&) override { stopTimer(); frac = 0; repaint(); }
+    void timerCallback() override
+    {
+        frac = (float) ((juce::Time::getMillisecondCounterHiRes() - t0) / 900.0);
+        if (frac >= 1.f) { stopTimer(); frac = 0; repaint(); if (onHold) onHold(); return; }
+        repaint();
+    }
+    double t0 = 0; float frac = 0;
+};
+
+// -----------------------------------------------------------------------------------------------------
+// page: KITS (save, open, export all, delete)
+// -----------------------------------------------------------------------------------------------------
+class KitsPage : public juce::Component, private juce::Timer
 {
 public:
     std::function<void(const juce::File&)> onLoad;
-    std::function<void()> onSave, onClose;
+    std::function<void(const juce::String&)> onToast;
 
-    explicit KitBrowser(DrumSlicerProcessor& p) : proc(p)
+    explicit KitsPage(DrumSlicerProcessor& p) : proc(p)
     {
-        addAndMakeVisible(list);
-        list.setModel(this); list.setRowHeight(40); list.setOutlineThickness(0);
-        list.setColour(juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
-        for (auto* b : { &saveBtn, &folderBtn, &deleteBtn, &closeBtn }) addAndMakeVisible(b);
-        saveBtn.setButtonText("SAVE CURRENT KIT"); saveBtn.getProperties().set("primary", true);
-        folderBtn.setButtonText("OPEN FOLDER"); deleteBtn.setButtonText("DELETE"); closeBtn.setButtonText("CLOSE");
-        saveBtn.onClick = [this] { if (onSave) onSave(); };
+        addAndMakeVisible(name);
+        name.setFont(ui::inter(13.f)); name.setIndents(10, 6);
+        name.setTextToShowWhenEmpty("kit name", ui::faint);
+        name.onReturnKey = [this] { save(); };
+        for (auto* b : { &saveBtn, &exportBtn, &folderBtn }) addAndMakeVisible(b);
+        saveBtn.setButtonText("save this kit"); saveBtn.getProperties().set("kind", "primary");
+        exportBtn.setButtonText("export all  wav + midi");
+        folderBtn.setButtonText("open folder");
+        saveBtn.onClick = [this] { save(); };
+        exportBtn.onClick = [this] { auto d = proc.exportFinal(); if (d.exists()) { d.revealToUser(); if (onToast) onToast("exported  " + d.getParentDirectory().getFileName()); } };
+        exportBtn.setTooltip("The one-shots as you hear them + the MIDI, into Documents/ReKit/<loop>/EXPORT");
         folderBtn.onClick = [] { ds::kitsRoot().createDirectory(); ds::kitsRoot().startAsProcess(); };
-        closeBtn.onClick = [this] { if (onClose) onClose(); };
-        deleteBtn.onClick = [this] { deleteSelected(); };
-        saveBtn.setTooltip("Save the sounds, settings and MIDI you have now as a kit");
-        deleteBtn.setTooltip("Move the selected kit to the Recycle Bin");
+        addChildComponent(del);
+        del.text = "hold to delete";
+        del.onHold = [this] { deleteKit(hoverKit); };
     }
     void refresh()
     {
@@ -453,302 +468,338 @@ public:
             if (ds::isKit(d) && !d.getFileName().startsWithChar('.')) kits.add(d);
         std::sort(kits.begin(), kits.end(), [](const juce::File& a, const juce::File& b) {
             return ds::kitData(a).getChildFile("kit.txt").getLastModificationTime() > ds::kitData(b).getChildFile("kit.txt").getLastModificationTime(); });
+        if (name.getText().isEmpty() || !name.hasKeyboardFocus(true)) name.setText(proc.baseName(), false);
         saveBtn.setEnabled(proc.getResult() != nullptr && !proc.isBusy());
-        list.updateContent(); list.deselectAllRows();
-        const int cur = kits.indexOf(proc.getKitDir()); if (cur >= 0) list.selectRow(cur);
+        exportBtn.setEnabled(proc.getResult() != nullptr);
+        scroll = juce::jlimit(0, std::max(0, rows() - 2), scroll);
+        confirmUntil = 0; saveBtn.setButtonText("save this kit");
         repaint();
     }
-    void visibilityChanged() override { if (isVisible()) startTimerHz(10); else { stopTimer(); proc.stopPreview(); } }
-
-    const juce::Rectangle<int> card { 230, 64, 540, 480 };
-    void paint(juce::Graphics& g) override
-    {
-        g.fillAll(juce::Colours::black.withAlpha(0.62f));
-        const auto c = card.toFloat();
-        g.setColour(juce::Colour(0xff15161a)); g.fillRoundedRectangle(c, 12.f);
-        g.setColour(ui::panelEdge.brighter(0.3f)); g.drawRoundedRectangle(c.reduced(0.5f), 12.f, 1.f);
-        g.setColour(ui::text); g.setFont(ui::font(16.f, true, 0.35f));
-        g.drawText("KITS", card.getX() + 22, card.getY() + 16, 200, 22, juce::Justification::centredLeft);
-        g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
-        g.drawText(juce::String(kits.size()) + (kits.size() == 1 ? " KIT" : " KITS") + "   |   DOCUMENTS / REKIT / KITS", card.getX() + 90, card.getY() + 16, 400, 22, juce::Justification::centredLeft);
-        if (kits.isEmpty())
-        {
-            g.setColour(ui::dim); g.setFont(ui::font(11.f, true, 0.25f));
-            g.drawText("NO SAVED KITS YET  -  ANALYSE A LOOP, THEN SAVE CURRENT KIT", list.getBounds(), juce::Justification::centred);
-        }
-    }
+    void visibilityChanged() override { if (isVisible()) { refresh(); startTimerHz(15); } else { stopTimer(); proc.stopPreview(); } }
     void resized() override
     {
-        list.setBounds(card.getX() + 12, card.getY() + 50, card.getWidth() - 24, card.getHeight() - 112);
-        const int y = card.getBottom() - 50;
-        saveBtn.setBounds(card.getX() + 20, y, 170, 32);
-        folderBtn.setBounds(card.getX() + 200, y, 110, 32);
-        deleteBtn.setBounds(card.getX() + 320, y, 90, 32);
-        closeBtn.setBounds(card.getRight() - 110, y, 90, 32);
+        const int w = getWidth();
+        folderBtn.setBounds(w - 104, 4, 104, 30);
+        exportBtn.setBounds(folderBtn.getX() - 168, 4, 160, 30);
+        saveBtn.setBounds(exportBtn.getX() - 124, 4, 116, 30);
+        name.setBounds(saveBtn.getX() - 190, 4, 182, 30);
     }
-    void mouseDown(const juce::MouseEvent& e) override { if (!card.contains(e.getPosition()) && onClose) onClose(); }
+    void paint(juce::Graphics& g) override
+    {
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        g.drawText("Kits", 0, 0, 120, 38, juce::Justification::centredLeft);
+        if (kits.isEmpty())
+        {
+            g.setColour(ui::dim); g.setFont(ui::inter(13.f));
+            g.drawText("no saved kits yet: analyse a loop, then save this kit", getLocalBounds().withTrimmedTop(50), juce::Justification::centred);
+            return;
+        }
+        for (int i = 0; i < kits.size(); ++i)
+        {
+            const auto r = cardRect(i);
+            if (r.isEmpty()) continue;
+            const auto& k = kits[i];
+            const bool loaded = k == proc.getKitDir(), playing = proc.isPreviewing() && proc.previewingKit() == k, hov = i == hoverKit;
+            g.setColour(loaded ? ui::cardOn : ui::card); g.fillRoundedRectangle(r, 12.f);
+            if (loaded || hov) { g.setColour(loaded ? ui::white : ui::dark); g.drawRoundedRectangle(r.reduced(0.5f), 12.f, 1.f); }
+            g.setColour(ui::white); g.setFont(ui::inter(15.f, 500));
+            g.drawText(ui::nice(k.getFileName()), r.reduced(12.f, 0).withHeight(30.f).translated(0, 6.f).toNearestInt(), juce::Justification::centredLeft, true);
+            const auto t = ds::kitData(k).getChildFile("kit.txt").getLastModificationTime();
+            g.setColour(ui::dim2); g.setFont(ui::mono(10.f));
+            g.drawText(lowerDate(t) + (loaded ? "  .  open now" : ""), r.reduced(12.f, 0).withTrimmedTop(36.f).withHeight(14.f).toNearestInt(), juce::Justification::centredLeft);
+            // listen (its pattern with its sounds), shown on hover / while playing
+            if (hov || playing)
+            {
+                const auto pz = playRect(i);
+                g.setColour(playing ? ui::orange : ui::white); g.drawEllipse(pz.reduced(1.f), 1.2f);
+                juce::Path ic;
+                if (playing) ic.addRectangle(pz.withSizeKeepingCentre(7.f, 7.f));
+                else ic.addTriangle(pz.getCentreX() - 2.5f, pz.getCentreY() - 4.f, pz.getCentreX() - 2.5f, pz.getCentreY() + 4.f, pz.getCentreX() + 4.5f, pz.getCentreY());
+                g.fillPath(ic);
+                g.setColour(ui::dim); g.setFont(ui::mono(10.f));
+                g.drawText("folder", folderRect(i).toNearestInt(), juce::Justification::centred);
+            }
+        }
+        if (rows() > 2)
+        {
+            g.setColour(ui::faint); g.setFont(ui::mono(10.f));
+            g.drawText(juce::String(scroll + 1) + "-" + juce::String(std::min(rows(), scroll + 2)) + " / " + juce::String(rows()) + " rows  (wheel)",
+                       getLocalBounds().removeFromBottom(14), juce::Justification::centredRight);
+        }
+        else { g.setColour(ui::faint); g.setFont(ui::mono(10.f)); g.drawText("documents / rekit / kits   .   click = open  .  hover = listen, folder, delete", getLocalBounds().removeFromBottom(14), juce::Justification::centredLeft); }
+    }
+    void mouseMove(const juce::MouseEvent& e) override { setHover(kitAt(e.position)); }
+    void mouseExit(const juce::MouseEvent&) override { if (!del.isMouseButtonDown()) setHover(kitAt(getMouseXYRelative().toFloat())); }
+    void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& w) override
+    { scroll = juce::jlimit(0, std::max(0, rows() - 2), scroll + (w.deltaY < 0 ? 1 : -1)); setHover(-1); repaint(); }
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        const int i = kitAt(e.position);
+        if (i < 0 || e.mouseWasDraggedSinceMouseDown()) return;
+        if (playRect(i).contains(e.position)) { if (proc.isPreviewing() && proc.previewingKit() == kits[i]) proc.stopPreview(); else proc.previewKit(kits[i]); repaint(); return; }
+        if (folderRect(i).contains(e.position)) { kits[i].revealToUser(); return; }
+        if (onLoad) onLoad(kits[i]);
+    }
 
 private:
     DrumSlicerProcessor& proc;
-    juce::ListBox list;
-    juce::TextButton saveBtn, folderBtn, deleteBtn, closeBtn;
+    juce::TextEditor name;
+    juce::TextButton saveBtn, exportBtn, folderBtn;
+    HoldButton del;
     juce::Array<juce::File> kits;
+    int scroll = 0, hoverKit = -1;
+    juce::uint32 confirmUntil = 0;
     bool wasPlaying = false;
 
-    juce::Rectangle<int> playZone(int w, int h) const { return { w - 128, (h - 26) / 2, 26, 26 }; }
-    juce::Rectangle<int> loadZone(int w, int h) const { return { w - 92, (h - 26) / 2, 80, 26 }; }
-
-    int getNumRows() override { return kits.size(); }
-    void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool sel) override
+    static juce::String lowerDate(juce::Time t) { return t.formatted("%d %b %Y").toLowerCase(); }
+    int rows() const { return (kits.size() + 2) / 3; }
+    juce::Rectangle<float> cardRect(int i) const
     {
-        if (row < 0 || row >= kits.size()) return;
-        const auto& k = kits[row];
-        const bool loaded = k == proc.getKitDir(), playing = proc.isPreviewing() && proc.previewingKit() == k;
-        const auto r = juce::Rectangle<float>(2.f, 2.f, (float) w - 4.f, (float) h - 4.f);
-        g.setColour(sel ? juce::Colours::white.withAlpha(0.07f) : juce::Colours::white.withAlpha(0.025f)); g.fillRoundedRectangle(r, 7.f);
-        if (loaded) { g.setColour(ui::amber.withAlpha(0.8f)); g.fillRoundedRectangle(r.withWidth(3.f), 1.5f); }
-        g.setColour(loaded ? ui::amber : ui::text); g.setFont(ui::font(12.5f, true, 0.08f));
-        g.drawText(k.getFileName(), 16, h / 2 - 15, w - 170, 16, juce::Justification::centredLeft);
-        g.setColour(ui::dim); g.setFont(ui::font(9.f, false, 0.1f));
-        const auto t = ds::kitData(k).getChildFile("kit.txt").getLastModificationTime();
-        g.drawText(t.formatted("%d %b %Y  %H:%M") + (loaded ? "   -   LOADED" : ""), 16, h / 2 + 2, w - 170, 12, juce::Justification::centredLeft);
-        // play / stop
-        const auto pz = playZone(w, h).toFloat();
-        g.setColour(playing ? ui::amber : ui::dim.withAlpha(0.9f)); g.drawEllipse(pz.reduced(1.f), 1.2f);
-        juce::Path ic;
-        if (playing) ic.addRectangle(pz.getCentreX() - 4.f, pz.getCentreY() - 4.f, 8.f, 8.f);
-        else ic.addTriangle(pz.getCentreX() - 3.f, pz.getCentreY() - 5.f, pz.getCentreX() - 3.f, pz.getCentreY() + 5.f, pz.getCentreX() + 5.f, pz.getCentreY());
-        g.fillPath(ic);
-        // load
-        const auto lz = loadZone(w, h).toFloat();
-        g.setColour(ui::amber.withAlpha(0.9f)); g.drawRoundedRectangle(lz.reduced(0.5f), 13.f, 1.1f);
-        g.setFont(ui::font(9.5f, true, 0.3f)); g.drawText("LOAD", lz.toNearestInt(), juce::Justification::centred);
+        const int row = i / 3 - scroll, col = i % 3;
+        if (row < 0 || row > 1) return {};
+        const float w = ((float) getWidth() - 20.f) / 3.f;
+        return { col * (w + 10.f), 50.f + row * 108.f, w, 98.f };
     }
-    void listBoxItemClicked(int row, const juce::MouseEvent& e) override
+    juce::Rectangle<float> playRect(int i) const { const auto r = cardRect(i); return { r.getX() + 12.f, r.getBottom() - 34.f, 22.f, 22.f }; }
+    juce::Rectangle<float> folderRect(int i) const { const auto r = cardRect(i); return { r.getX() + 42.f, r.getBottom() - 34.f, 50.f, 22.f }; }
+    juce::Rectangle<int> delRect(int i) const { const auto r = cardRect(i); return juce::Rectangle<float>(r.getRight() - 122.f, r.getBottom() - 36.f, 110.f, 26.f).toNearestInt(); }
+    int kitAt(juce::Point<float> p) const { for (int i = 0; i < kits.size(); ++i) if (cardRect(i).contains(p)) return i; return -1; }
+    void setHover(int i)
     {
-        if (row < 0 || row >= kits.size()) return;
-        // the event comes from the row itself: its own size and position, exactly what paintListBoxItem drew
-        const auto* rc = e.eventComponent;
-        const int w = rc != nullptr ? rc->getWidth() : list.getVisibleRowWidth(), h = rc != nullptr ? rc->getHeight() : list.getRowHeight();
-        const auto pos = e.getPosition();
-        if (playZone(w, h).contains(pos))
-        {
-            if (proc.isPreviewing() && proc.previewingKit() == kits[row]) proc.stopPreview();
-            else proc.previewKit(kits[row]);
-            list.repaint();
+        if (i == hoverKit) return;
+        hoverKit = i;
+        del.setVisible(i >= 0);
+        if (i >= 0) del.setBounds(delRect(i));
+        repaint();
+    }
+    void deleteKit(int i)
+    {
+        if (i < 0 || i >= kits.size()) return;
+        const auto k = kits[i];
+        proc.stopPreview();
+        if (k.moveToTrash() || k.deleteRecursively()) { proc.kitRemoved(k); if (onToast) onToast("kit deleted  " + k.getFileName()); }
+        setHover(-1); refresh();
+    }
+    void save()
+    {
+        const auto nm = juce::File::createLegalFileName(name.getText().trim());
+        if (nm.isEmpty() || proc.getResult() == nullptr) return;
+        const auto dir = ds::kitsRoot().getChildFile(nm);
+        if (ds::isKit(dir) && dir != proc.getKitDir() && juce::Time::getMillisecondCounter() > confirmUntil)
+        {   // a kit with that name exists: the button asks once more (no dialog)
+            confirmUntil = juce::Time::getMillisecondCounter() + 3000;
+            saveBtn.setButtonText("replace it?"); return;
         }
-        else if (loadZone(w, h).contains(pos)) { if (onLoad) onLoad(kits[row]); }
+        confirmUntil = 0; saveBtn.setButtonText("save this kit");
+        const auto k = proc.saveKit(nm);
+        if (onToast) onToast(k.isDirectory() ? "kit saved  " + k.getFileName() : juce::String("could not save the kit"));
+        refresh();
     }
-    void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override { if (row >= 0 && row < kits.size() && onLoad) onLoad(kits[row]); }
-    void timerCallback() override { const bool p = proc.isPreviewing(); if (p || p != wasPlaying) list.repaint(); wasPlaying = p; }
-
-    void deleteSelected()
+    void timerCallback() override
     {
-        const int row = list.getSelectedRow();
-        if (row < 0 || row >= kits.size()) return;
-        const auto k = kits[row];
-        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon, "DELETE KIT", "Move the kit \"" + k.getFileName() + "\" to the Recycle Bin?",
-            "DELETE", "CANCEL", this, juce::ModalCallbackFunction::create([this, k, sp = juce::Component::SafePointer<KitBrowser>(this)](int ok)
-            {
-                if (sp == nullptr || !ok) return;
-                proc.stopPreview();
-                if (k.moveToTrash() || k.deleteRecursively()) proc.kitRemoved(k);
-                refresh();
-            }));
+        const bool p = proc.isPreviewing(); if (p || p != wasPlaying) repaint(); wasPlaying = p;
+        if (confirmUntil && juce::Time::getMillisecondCounter() > confirmUntil) { confirmUntil = 0; saveBtn.setButtonText("save this kit"); }
     }
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(KitBrowser)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(KitsPage)
 };
 
-// ---------------------------------------------------------------- your samples, inside ReKit
+// -----------------------------------------------------------------------------------------------------
+// page: SAMPLES (yours, for the selected pad)
 // FOLDERS: your sample folders (added once, remembered), click = listen as loud as the pad.
-// SIMILAR: the sounds of your archive nearest to the pad's sound (scanned once; loops and long files left out).
-// Double-click / drag onto a pad / USE = it becomes that pad's "C". Arrow keys walk the list and play each file.
+// SIMILAR: the sounds of your archive nearest to the pad's sound, then ranked by how near each gets after a match.
+// Double-click / drag onto a pad / USE ON PAD = it becomes that pad's sound. Arrow keys walk the list and play.
+// -----------------------------------------------------------------------------------------------------
 class SampleBrowser : public juce::Component, private juce::ListBoxModel, private juce::Timer
 {
 public:
-    std::function<void()> onClose;
-    std::function<void(const juce::File&)> onUse;         // set as "C" on the selected pad
-    std::function<void(const juce::File&)> onKept;        // a tried one was kept
+    std::function<void(const juce::File&)> onUse;
+    std::function<void(const juce::File&)> onKept;
     std::function<int()> targetPad;
     std::function<juce::String()> targetName;
+    std::function<void()> onTried;
 
     explicit SampleBrowser(DrumSlicerProcessor& p) : proc(p)
     {
         addAndMakeVisible(list);
-        list.setModel(this); list.setRowHeight(24); list.setOutlineThickness(0);
-        list.setColour(juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
+        list.setModel(this); list.setRowHeight(30); list.setOutlineThickness(0);
         list.setWantsKeyboardFocus(true);
-        for (auto* b : { &addBtn, &remBtn, &upBtn, &useBtn, &revealBtn, &closeBtn, &tabFolders, &tabSimilar, &scanBtn, &limitBtn, &moreBtn }) addAndMakeVisible(b);
+        for (auto* b : { &addBtn, &remBtn, &upBtn, &useBtn, &revealBtn, &tabFolders, &tabSimilar, &scanBtn, &limitBtn, &moreBtn, &tryBtn }) addAndMakeVisible(b);
         addChildComponent(firstBtn);
-        firstBtn.setButtonText("ADD SAMPLE FOLDER"); firstBtn.getProperties().set("primary", true);
+        firstBtn.setButtonText("add your sample folder"); firstBtn.getProperties().set("kind", "primary");
         firstBtn.onClick = [this] { addFolder(); };
-        addBtn.setButtonText("+"); remBtn.setButtonText("-"); upBtn.setButtonText("UP");
-        useBtn.setButtonText("USE ON PAD"); useBtn.getProperties().set("primary", true);
-        revealBtn.setButtonText("OPEN FOLDER"); closeBtn.setButtonText("X");
-        tabFolders.setButtonText("FOLDERS"); tabSimilar.setButtonText("SIMILAR");
+        addBtn.setButtonText("+ folder"); remBtn.setButtonText("remove"); upBtn.setButtonText("up");
+        useBtn.setButtonText("use on pad"); useBtn.getProperties().set("kind", "primary");
+        revealBtn.setButtonText("open folder");
+        tabFolders.setButtonText("folders"); tabSimilar.setButtonText("similar  .  ranked after match");
         tabFolders.onClick = [this] { setMode(0); };
         tabSimilar.onClick = [this] { setMode(1); };
-        scanBtn.setButtonText("RESCAN"); scanBtn.setTooltip("Look for new / changed files in your sample folders (RESCAN ALL with SHIFT)");
+        scanBtn.setButtonText("rescan"); scanBtn.setTooltip("Look for new / changed files in your sample folders (rescan all with SHIFT)");
         scanBtn.onClick = [this] { proc.library->scan(juce::ModifierKeys::currentModifiers.isShiftDown()); repaint(); };
         limitBtn.setTooltip("Files longer than this are loops / long files and left out (click to change)");
         limitBtn.onClick = [this] { const float l = proc.library->maxSeconds(); const float n = l < 6 ? 8.f : l < 9 ? 10.f : l < 11 ? 15.f : 5.f;
                                     proc.library->setMaxSeconds(n); saveSettings(); updateLimit(); proc.library->scan(false); };
-        moreBtn.setButtonText("MORE"); moreBtn.setTooltip("5 more");
-        addAndMakeVisible(tryBtn);
-        tryBtn.setButtonText("TRY IN KIT");
-        tryBtn.setTooltip("On: every file you pick (click / arrow keys) sits on the pad for now and plays in the pattern. USE ON PAD keeps it, off goes back.");
+        moreBtn.setButtonText("5 more");
+        tryBtn.setButtonText("try in kit");
+        tryBtn.setTooltip("On: every file you pick sits on the pad for now and plays in the pattern. use on pad keeps it, off goes back.");
         tryBtn.onClick = [this] { tryMode = !tryMode; tryBtn.setToggleState(tryMode, juce::dontSendNotification); if (!tryMode) proc.endTry(false); };
         for (int k = 0; k < 3; ++k)
-        {   // what to look like: A (the loop's own sound, the default), B, or your C
+        {   // what to look like: the loop's sound (default), the best hit, or your sample on the pad
             addAndMakeVisible(likeBtn[(size_t) k]);
-            likeBtn[(size_t) k].setButtonText(juce::String::charToString((juce::juce_wchar) ('A' + k)));
-            likeBtn[(size_t) k].setTooltip(k == 0 ? "Look for sounds like A: the loop's own sound" : k == 1 ? "Like B: the best real hit" : "Like C: the sample you put on the pad");
+            likeBtn[(size_t) k].setButtonText(k == 0 ? "like the loop's" : k == 1 ? "like the best hit" : "like yours");
             likeBtn[(size_t) k].onClick = [this, k] { likeSrc = k; want = 5; findSimilar(true); };
         }
         moreBtn.onClick = [this] { want += 5; if (want > (int) matches.size()) findSimilar(true); else { list.updateContent(); list.repaint(); } };
-        addBtn.setTooltip("Add a sample folder (remembered)"); remBtn.setTooltip("Remove this folder from the list (files stay)");
-        revealBtn.setTooltip("Show the selected file in Explorer");
-        addAndMakeVisible(roots);
-        roots.onChange = [this] { const int i = roots.getSelectedItemIndex(); if (i >= 0 && i < rootDirs.size()) open(rootDirs[i]); };
+        addBtn.setTooltip("Add a sample folder (remembered)"); remBtn.setTooltip("Take the folder you are in off the list (files stay)");
         addAndMakeVisible(filter);
-        filter.setTextToShowWhenEmpty("FILTER  (kick, 808, snare ...)", ui::dim);
-        filter.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black.withAlpha(0.35f));
-        filter.setColour(juce::TextEditor::outlineColourId, ui::panelEdge.brighter(0.2f));
-        filter.setColour(juce::TextEditor::textColourId, ui::text);
+        filter.setFont(ui::inter(12.f)); filter.setIndents(10, 6);
+        filter.setTextToShowWhenEmpty("filter  (kick, 808, snare ...)", ui::faint);
         filter.onTextChange = [this] { rebuild(); };
         addBtn.onClick = [this] { addFolder(); };
         remBtn.onClick = [this] { removeFolder(); };
         upBtn.onClick = [this] { if (dir.getParentDirectory() != dir && isInsideRoot(dir.getParentDirectory())) open(dir.getParentDirectory()); };
         useBtn.onClick = [this] {
             auto f = selectedFile();
-            if (proc.isTrying() && proc.triedFile() == f) { proc.endTry(true); if (onKept) onKept(f); return; }   // already on the pad: keep it
+            if (proc.isTrying() && proc.triedFile() == f) { proc.endTry(true); if (onKept) onKept(f); return; }
             if (f.existsAsFile() && onUse) onUse(f); };
         revealBtn.onClick = [this] { if (auto f = selectedFile(); f.existsAsFile()) f.revealToUser(); else if (dir.isDirectory()) dir.revealToUser(); };
-        closeBtn.onClick = [this] { if (onClose) onClose(); };
         loadSettings();
         updateLimit();
     }
     ~SampleBrowser() override { if (rank) rank->cancel = true; saveSettings(); }
 
-    void showFor() { refreshRoots(); if (!dir.isDirectory() && !rootDirs.isEmpty()) open(rootDirs[0]); else rebuild(); setMode(mode); list.grabKeyboardFocus(); repaint(); }
+    void showFor() { if (!dir.isDirectory() && !rootDirs.isEmpty()) open(rootDirs[0]); else rebuild(); setMode(mode); list.grabKeyboardFocus(); repaint(); }
     void showSimilar() { setMode(1); }
     void visibilityChanged() override { if (isVisible()) startTimerHz(10); else { stopTimer(); proc.stopPreview(); stopTrying(); saveSettings(); } }
+    bool isTrying() const { return proc.isTrying(); }
+    void stopTrying() { if (tryMode) { tryMode = false; tryBtn.setToggleState(false, juce::dontSendNotification); } proc.endTry(false); }
 
     void paint(juce::Graphics& g) override
     {
-        const auto c = getLocalBounds().toFloat();
-        g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(c.translated(0, 2), 12.f);
-        g.setColour(juce::Colour(0xff15161a)); g.fillRoundedRectangle(c, 12.f);
-        g.setColour(ui::panelEdge.brighter(0.3f)); g.drawRoundedRectangle(c.reduced(0.5f), 12.f, 1.f);
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        g.drawText("Samples", 0, 0, 160, 38, juce::Justification::centredLeft);
         const auto tn = targetName ? targetName() : juce::String();
-        g.setColour(tn.isNotEmpty() ? ui::amber : ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
-        g.drawText(tn.isNotEmpty() ? "FOR " + tn : juce::String("SELECT A PAD"), 176, 10, getWidth() - 220, 22, juce::Justification::centredLeft);
+        g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+        g.drawText(tn.isNotEmpty() ? "for " + ui::lower(tn) : juce::String("choose a pad"), 136, 12, 220, 20, juce::Justification::centredLeft);
         if (rootDirs.isEmpty())
-        {   // first time: say what this is
-            auto r = juce::Rectangle<int>(20, 60, getWidth() - 40, 170);
-            g.setColour(ui::text); g.setFont(ui::font(11.f, true, 0.15f));
-            g.drawFittedText("CHOOSE A SAMPLE OF YOURS FOR A PAD", r.removeFromTop(22), juce::Justification::centredLeft, 1);
-            g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(10.f, false, 0.05f));
-            g.drawFittedText("1.  Add your one-shot folder (once - it is remembered).\n"
-                             "2.  Click a file (or use the arrow keys): you hear it as loud as the pad.\n"
-                             "3.  Double-click it, drag it onto a pad, or press USE ON PAD:\n"
-                             "     it becomes the pad's sound C. The MIDI stays the same.\n"
-                             "4.  SIMILAR: the sounds of your folders nearest to the pad.",
-                             r.withTrimmedTop(6), juce::Justification::topLeft, 8, 1.f);
+        {
+            auto r = juce::Rectangle<int>(0, 60, getWidth(), 120);
+            g.setColour(ui::white); g.setFont(ui::inter(14.f, 500));
+            g.drawText("choose a sample of yours for a pad", r.removeFromTop(24), juce::Justification::centredLeft);
+            g.setColour(ui::dim); g.setFont(ui::inter(12.f));
+            g.drawFittedText("1.  add your one-shot folder (once, it is remembered)\n2.  click a file (or the arrow keys): you hear it as loud as the pad\n"
+                             "3.  double-click it, drag it onto a pad, or use on pad\n4.  similar: the sounds of your folders nearest to the pad",
+                             r.withTrimmedTop(4), juce::Justification::topLeft, 6, 1.f);
             return;
         }
+        // left column: your folders (folders) / what the archive knows (similar)
+        const auto lc = leftCol();
         if (mode == 0)
         {
-            g.setColour(ui::dim); g.setFont(ui::font(9.f, true, 0.1f));
-            g.drawText(dir.isDirectory() ? shortPath(dir) : juce::String(), 16, 94, getWidth() - 32, 14, juce::Justification::centredLeft);
-            if (items.isEmpty()) { g.setColour(ui::dim); g.setFont(ui::font(10.f, true, 0.2f)); g.drawText("NOTHING HERE", list.getBounds(), juce::Justification::centred); }
+            for (int i = 0; i < rootDirs.size(); ++i)
+            {
+                const auto r = rootRect(i);
+                if (r.getBottom() > (float) addBtn.getY() - 4.f) break;
+                const bool on = dir == rootDirs[i] || dir.isAChildOf(rootDirs[i]);
+                if (on) { g.setColour(ui::chip); g.fillRoundedRectangle(r, 7.f); }
+                g.setColour(on ? ui::soft : ui::dim); g.setFont(ui::inter(12.f));
+                g.drawText(rootDirs[i].getFileName(), r.reduced(9.f, 0).toNearestInt(), juce::Justification::centredLeft, true);
+            }
+            g.setColour(ui::faint); g.setFont(ui::mono(10.f));
+            g.drawText(dir.isDirectory() ? shortPath(dir) : juce::String(), juce::Rectangle<int>(listX() + 60, 46, getWidth() - listX() - 60, 14), juce::Justification::centredRight, true);
+            if (items.isEmpty()) { g.setColour(ui::dim); g.setFont(ui::inter(12.f)); g.drawText("nothing here", list.getBounds(), juce::Justification::centred); }
             return;
         }
-        // SIMILAR: what the library knows
         auto& lib = *proc.library;
-        g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(9.f, true, 0.1f));
         {
             const auto st = lib.status();
-            g.setColour(ui::text.withAlpha(0.85f)); g.setFont(ui::font(9.5f, true, 0.1f));
-            g.drawText(st.upToFirstOccurrenceOf("\n", false, false), 14, 36, getWidth() - 150, 14, juce::Justification::centredLeft);
-            g.setColour(ui::dim); g.setFont(ui::font(8.f, true, 0.05f));
-            g.drawFittedText(st.fromFirstOccurrenceOf("\n", false, false), 14, 50, getWidth() - 150, 12, juce::Justification::centredLeft, 1, 0.8f);
+            g.setColour(ui::soft); g.setFont(ui::inter(11.f));
+            g.drawFittedText(ui::lower(st.upToFirstOccurrenceOf("\n", false, false)), lc.withTrimmedTop(116).withHeight(30).toNearestInt(), juce::Justification::topLeft, 2, 1.f);
+            g.setColour(ui::faint); g.setFont(ui::mono(9.f));
+            g.drawFittedText(ui::lower(st.fromFirstOccurrenceOf("\n", false, false)), lc.withTrimmedTop(148).withHeight(40).toNearestInt(), juce::Justification::topLeft, 3, 1.f);
         }
         if (lib.scanning())
         {
-            const auto bar = juce::Rectangle<float>(14.f, 62.f, (float) getWidth() - 28.f, 4.f);
-            g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(bar, 2.f);
-            g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * lib.progress()), 2.f);
+            const auto bar = lc.withTrimmedTop(192).withHeight(3.f);
+            g.setColour(ui::line); g.fillRoundedRectangle(bar, 1.5f);
+            g.setColour(ui::orange); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * lib.progress()), 1.5f);
         }
-        g.setColour(ui::text.withAlpha(0.8f)); g.setFont(ui::font(9.5f, true, 0.15f));
-        g.drawText(queryText, 14, 72, getWidth() - 180, 20, juce::Justification::centredLeft);
         if (rank && !ranked && !matches.empty())
         {
-            g.setColour(ui::amber.withAlpha(0.8f)); g.setFont(ui::font(8.f, true, 0.1f));
-            g.drawText("CHECKING AFTER MATCH  " + juce::String(rank->done.load()) + " / " + juce::String((int) matches.size()), 14, 86, getWidth() - 28, 10, juce::Justification::centredLeft);
+            g.setColour(ui::orange); g.setFont(ui::mono(10.f));
+            g.drawText("checking after match  " + juce::String(rank->done.load()) + " / " + juce::String((int) matches.size()),
+                       juce::Rectangle<int>(listX(), 46, getWidth() - listX(), 14), juce::Justification::centredRight);
         }
         if (matches.empty())
         {
-            g.setColour(ui::dim); g.setFont(ui::font(10.f, true, 0.2f));
+            g.setColour(ui::dim); g.setFont(ui::inter(12.f));
             const auto ix = lib.index();
-            const juce::String why = !havePad ? "SELECT A PAD WITH A SOUND"
-                                   : (!ix || ix->oneShots == 0) ? (lib.scanning() ? "SCANNING YOUR FOLDERS ..." : "PRESS RESCAN TO READ YOUR FOLDERS")
-                                   : "NOTHING FOUND";
+            const juce::String why = !havePad ? "choose a pad with a sound"
+                                   : (!ix || ix->oneShots == 0) ? (lib.scanning() ? "reading your folders ..." : "press rescan to read your folders")
+                                   : "nothing found";
             g.drawText(why, list.getBounds(), juce::Justification::centred);
         }
     }
     void resized() override
     {
         const int w = getWidth(), h = getHeight();
-        tabFolders.setBounds(12, 10, 76, 22); tabSimilar.setBounds(92, 10, 76, 22);
-        closeBtn.setBounds(w - 36, 10, 24, 22);
-
-        roots.setBounds(12, 38, w - 24 - 64, 24);
-        addBtn.setBounds(w - 72, 38, 28, 24); remBtn.setBounds(w - 40, 38, 28, 24);
-        upBtn.setBounds(12, 66, 44, 24);
-        filter.setBounds(62, 66, w - 74, 24);
-        scanBtn.setBounds(w - 132, 38, 64, 22); limitBtn.setBounds(w - 64, 38, 52, 22);
-        moreBtn.setBounds(w - 72, 70, 60, 22);
-        for (int k = 0; k < 3; ++k) likeBtn[(size_t) k].setBounds(w - 162 + k * 28, 70, 26, 22);
-        list.setBounds(8, mode == 0 ? 110 : 96, w - 16, h - (mode == 0 ? 110 : 96) - 46);
-        firstBtn.setBounds(30, 210, w - 60, 40);
-        const int bw = (w - 24 - 12) / 3;
-        useBtn.setBounds(12, h - 40, bw + 16, 30);
-        tryBtn.setBounds(useBtn.getRight() + 6, h - 40, bw - 8, 30);
-        revealBtn.setBounds(tryBtn.getRight() + 6, h - 40, w - 12 - tryBtn.getRight() - 6, 30);
+        tabSimilar.setBounds(w - 196, 4, 196, 30);
+        tabFolders.setBounds(tabSimilar.getX() - 78, 4, 74, 30);
+        const int lx = listX();
+        // left column
+        const int lw = (int) leftCol().getWidth();
+        addBtn.setBounds(0, h - 30, 72, 26); remBtn.setBounds(76, h - 30, 66, 26);
+        for (int k = 0; k < 3; ++k) likeBtn[(size_t) k].setBounds(0, 46 + k * 30, lw, 26);
+        scanBtn.setBounds(0, h - 30, 70, 26); limitBtn.setBounds(76, h - 30, 56, 26);
+        // list + bottom row
+        upBtn.setBounds(lx, 42, 44, 24);
+        filter.setBounds(lx + 50, 42, 200, 24);
+        list.setBounds(lx, mode == 0 ? 72 : 66, w - lx, h - (mode == 0 ? 72 : 66) - 36);
+        firstBtn.setBounds(0, 186, 240, 34);
+        useBtn.setBounds(lx, h - 30, 104, 28);
+        tryBtn.setBounds(useBtn.getRight() + 8, h - 30, 90, 28);
+        revealBtn.setBounds(tryBtn.getRight() + 8, h - 30, 100, 28);
+        moreBtn.setBounds(w - 70, h - 30, 70, 28);
+    }
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (mode != 0) return;
+        for (int i = 0; i < rootDirs.size(); ++i) if (rootRect(i).contains(e.position)) { open(rootDirs[i]); return; }
     }
 
 private:
     DrumSlicerProcessor& proc;
     juce::ListBox list;
-    juce::ComboBox roots;
     juce::TextEditor filter;
-    juce::TextButton addBtn, remBtn, upBtn, useBtn, revealBtn, closeBtn, firstBtn, tabFolders, tabSimilar, scanBtn, limitBtn, moreBtn;
+    juce::TextButton addBtn, remBtn, upBtn, useBtn, revealBtn, firstBtn, tabFolders, tabSimilar, scanBtn, limitBtn, moreBtn;
     std::array<juce::TextButton, 3> likeBtn;
     juce::TextButton tryBtn;
     bool tryMode = false;
     int likeSrc = 0;
     juce::uint32 lastFind = 0;
-    juce::Array<juce::File> rootDirs, items;       // items: folders first, then audio files
+    juce::Array<juce::File> rootDirs, items;
     juce::File dir;
     std::unique_ptr<juce::FileChooser> chooser;
     bool wasPlaying = false;
-    int mode = 0;                                  // 0 = FOLDERS, 1 = SIMILAR
-    // SIMILAR
+    int mode = 0;
     std::vector<ds::Match> matches;
-    std::shared_ptr<const ds::LibIndex> holder;    // the matches point into it
-    std::shared_ptr<DrumSlicerProcessor::RankState> rank;   // each candidate matched in the background
-    std::vector<float> after;                      // score after a match (-1 = not known yet)
+    std::shared_ptr<const ds::LibIndex> holder;
+    std::shared_ptr<DrumSlicerProcessor::RankState> rank;
+    std::vector<float> after;
     bool ranked = false;
-    juce::String queryKey, queryText;
+    juce::String queryKey;
     bool havePad = false;
     int want = 5;
+    juce::uint32 selectedAt = 0;
+    bool scanWas = false;
 
+    int listX() const { return 206; }
+    juce::Rectangle<float> leftCol() const { return { 0.f, 46.f, 190.f, (float) getHeight() - 46.f }; }
+    juce::Rectangle<float> rootRect(int i) const { return { 0.f, 46.f + i * 30.f, 190.f, 26.f }; }
     static juce::File settingsFile() { return ds::root().getChildFile("browser.txt"); }
     static bool isAudio(const juce::File& f) { return f.hasFileExtension("wav;wave;aif;aiff;flac;mp3;ogg"); }
     juce::String shortPath(const juce::File& d) const
     {
-        for (auto& r : rootDirs) if (d == r || d.isAChildOf(r)) return (r.getFileName() + "/" + d.getRelativePathFrom(r)).trimCharactersAtEnd("/.").toUpperCase();
+        for (auto& r : rootDirs) if (d == r || d.isAChildOf(r)) return (r.getFileName() + "/" + d.getRelativePathFrom(r)).trimCharactersAtEnd("/.").toLowerCase();
         return d.getFullPathName();
     }
     bool isInsideRoot(const juce::File& d) const { for (auto& r : rootDirs) if (d == r || d.isAChildOf(r)) return true; return false; }
@@ -774,38 +825,27 @@ private:
         lines.add("mode=" + juce::String(mode));
         ds::writeText(settingsFile(), lines.joinIntoString("\n"));
     }
-    void updateLimit() { limitBtn.setButtonText("< " + juce::String(juce::roundToInt(proc.library->maxSeconds())) + " S"); }
+    void updateLimit() { limitBtn.setButtonText("< " + juce::String(juce::roundToInt(proc.library->maxSeconds())) + " s"); }
     void setMode(int m)
     {
         mode = m;
         tabFolders.setToggleState(mode == 0, juce::dontSendNotification); tabSimilar.setToggleState(mode == 1, juce::dontSendNotification);
-        list.setRowHeight(mode == 0 ? 24 : 40);
+        list.setRowHeight(30);
         updateControls();
         resized();
-        if (mode == 1)
-        {
-            proc.library->scanOnce();                  // new / changed files: checked once per session, quietly
-            want = 5; findSimilar(true);
-        }
+        if (mode == 1) { proc.library->scanOnce(); want = 5; findSimilar(true); }
         else rebuild();
         saveSettings();
         repaint();
     }
-    void refreshRoots()
-    {
-        roots.clear(juce::dontSendNotification);
-        for (int i = 0; i < rootDirs.size(); ++i) roots.addItem(rootDirs[i].getFileName().toUpperCase(), i + 1);
-        for (int i = 0; i < rootDirs.size(); ++i) if (dir == rootDirs[i] || dir.isAChildOf(rootDirs[i])) roots.setSelectedItemIndex(i, juce::dontSendNotification);
-        remBtn.setEnabled(!rootDirs.isEmpty());
-        updateControls();
-    }
     void updateControls()
-    {   // no folder yet: only the explanation and one big button
+    {
         const bool any = !rootDirs.isEmpty(), f = any && mode == 0, sm = any && mode == 1;
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &roots, &remBtn, &upBtn, &filter, &addBtn }) c->setVisible(f);
+        for (juce::Component* c : std::initializer_list<juce::Component*> { &remBtn, &upBtn, &filter, &addBtn }) c->setVisible(f);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &scanBtn, &limitBtn, &moreBtn, &likeBtn[0], &likeBtn[1], &likeBtn[2] }) c->setVisible(sm);
         for (juce::Component* c : std::initializer_list<juce::Component*> { &list, &useBtn, &revealBtn, &tabFolders, &tabSimilar, &tryBtn }) c->setVisible(any);
         firstBtn.setVisible(!any);
+        remBtn.setEnabled(any);
     }
     void addFolder()
     {
@@ -817,25 +857,20 @@ private:
                 const auto d = fc.getResult();
                 if (!d.isDirectory()) return;
                 rootDirs.addIfNotAlreadyThere(d);
-                saveSettings(); open(d);
-                proc.library->scan(false);                 // the archive learns the new folder in the background
+                saveSettings(); updateControls(); open(d);
+                proc.library->scan(false);
             });
     }
     void removeFolder()
     {
-        const int i = roots.getSelectedItemIndex();
-        if (i < 0 || i >= rootDirs.size()) return;
+        int i = -1; for (int k = 0; k < rootDirs.size(); ++k) if (dir == rootDirs[k] || dir.isAChildOf(rootDirs[k])) i = k;
+        if (i < 0) return;
         rootDirs.remove(i);
         dir = rootDirs.isEmpty() ? juce::File() : rootDirs[0];
-        saveSettings(); refreshRoots(); rebuild();
+        saveSettings(); updateControls(); rebuild(); repaint();
         proc.library->scan(false);
     }
-    void open(const juce::File& d)
-    {
-        dir = d; filter.clear();
-        refreshRoots(); rebuild();
-        list.scrollToEnsureRowIsOnscreen(0);
-    }
+    void open(const juce::File& d) { dir = d; filter.clear(); rebuild(); list.scrollToEnsureRowIsOnscreen(0); repaint(); }
     void rebuild()
     {
         if (mode != 0) return;
@@ -857,7 +892,6 @@ private:
         }
         list.updateContent(); list.deselectAllRows(); list.repaint(); repaint();
     }
-    // the pad's sound as it is chosen now (A / B / C) against the library
     void findSimilar(bool force)
     {
         if (mode != 1) return;
@@ -872,7 +906,6 @@ private:
         const juce::String key = havePad ? juce::String(proc.getResultVersion()) + "|" + juce::String(pad) + "|" + juce::String(src) + "|"
                                            + juce::String((juce::pointer_sized_int) ix.get()) : juce::String();
         if (!force && key == queryKey) return;
-        // while the archive is still being read the list would jump every few seconds: at most every 3 s then
         const auto now = juce::Time::getMillisecondCounter();
         const bool onlyIndexChanged = queryKey.upToLastOccurrenceOf("|", false, false) == key.upToLastOccurrenceOf("|", false, false);
         if (!force && onlyIndexChanged && proc.library->scanning() && now - lastFind < 3000) return;
@@ -887,10 +920,8 @@ private:
             matches = proc.library->nearest(pd.get(src == 1, src == 2), r->sr, pd.name, std::max(30, want), holder, pd.userPath);
             after.assign(matches.size(), -1.f);
             std::vector<juce::String> paths; for (auto& m : matches) paths.push_back(m.e->path);
-            if (!paths.empty()) rank = proc.startRank(pad, src, paths);   // then: ranked by how near each gets after a match
-            queryText = "LIKE  " + pd.name;
+            if (!paths.empty()) rank = proc.startRank(pad, src, paths);
         }
-        else queryText.clear();
         moreBtn.setEnabled(!matches.empty());
         list.updateContent(); list.deselectAllRows(); list.repaint(); repaint();
     }
@@ -910,16 +941,10 @@ private:
         if (!f.existsAsFile()) return;
         const int pad = targetPad ? targetPad() : -1;
         auto r = proc.getResult();
-        if (tryMode && r && pad >= 0 && r->pads[(size_t) pad].valid) { proc.tryOnPad(pad, f); if (onTried) onTried(); }   // on the pad, in the pattern
+        if (tryMode && r && pad >= 0 && r->pads[(size_t) pad].valid) { proc.tryOnPad(pad, f); if (onTried) onTried(); }
         else proc.previewSample(f, pad);
         list.repaint();
     }
-public:
-    std::function<void()> onTried;
-    bool isTrying() const { return proc.isTrying(); }
-    void stopTrying() { if (tryMode) { tryMode = false; tryBtn.setToggleState(false, juce::dontSendNotification); } proc.endTry(false); }
-private:
-
     int getNumRows() override { return mode == 1 ? std::min(want, (int) matches.size()) : items.size(); }
     void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool sel) override
     {
@@ -927,50 +952,39 @@ private:
         if (f == juce::File()) return;
         const bool folder = mode == 0 && f.isDirectory();
         const bool playing = !folder && proc.isPreviewing() && proc.previewingKit() == f;
-        const auto r = juce::Rectangle<float>(2.f, 1.f, (float) w - 4.f, (float) h - 2.f);
-        if (sel) { g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(r, 5.f); }
-        if (playing) { g.setColour(ui::amber); g.fillRoundedRectangle(r.withWidth(3.f), 1.5f); }
+        const bool onPad = proc.isTrying() && proc.triedFile() == f;
+        const auto r = juce::Rectangle<float>(1.f, 2.f, (float) w - 2.f, (float) h - 4.f);
+        if (sel) { g.setColour(ui::cardOn); g.fillRoundedRectangle(r, 8.f); g.setColour(ui::white); g.drawRoundedRectangle(r, 8.f, 1.f); }
+        // a play sign, the name, then (similar) how it differs and how near it gets
+        juce::Path ic;
+        if (folder) { g.setColour(ui::dim); g.drawRoundedRectangle(10.f, h * 0.5f - 5.f, 12.f, 10.f, 2.f, 1.2f); }
+        else { ic.addTriangle(12.f, h * 0.5f - 5.f, 12.f, h * 0.5f + 5.f, 20.f, h * 0.5f); g.setColour(playing ? ui::orange : ui::white); g.fillPath(ic); }
+        g.setColour(playing ? ui::orange : folder ? ui::soft : ui::white); g.setFont(ui::inter(12.f, folder ? 500 : 400));
         if (mode == 1)
-        {   // name, how it differs, how near, where it lives
+        {
             const auto& m = matches[(size_t) row];
-            g.setColour(playing ? ui::amber : ui::text); g.setFont(ui::font(10.5f, true, 0.03f));
-            g.drawText(f.getFileNameWithoutExtension(), 12, 3, w - 70, 16, juce::Justification::centredLeft);
-            g.setColour(ui::amber.withAlpha(0.85f)); g.setFont(ui::font(8.5f, true, 0.15f));
-            g.drawText(m.tags.isEmpty() ? juce::String(m.score >= 90.f ? "VERY CLOSE" : m.score >= 75.f ? "CLOSE" : "SIMILAR, NO BIG DIFFERENCE") : m.tags.joinIntoString("  "),
-                       12, 20, w / 2 + 40, 14, juce::Justification::centredLeft);
-            g.setColour(ui::dim); g.setFont(ui::font(8.5f, false, 0.05f));
-            g.drawText(f.getParentDirectory().getFileName(), w / 2, 20, w / 2 - 100, 14, juce::Justification::centredRight);
             const float aft = row < (int) after.size() ? after[(size_t) row] : -1.f;
-            const auto bar = juce::Rectangle<float>((float) w - 52.f, 9.f, 40.f, 4.f);
-            g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(bar, 2.f);
-            g.setColour(ui::amber.withAlpha(0.45f)); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * juce::jlimit(0.f, 1.f, m.score / 100.f)), 2.f);
-            if (aft >= 0) { g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * juce::jlimit(0.f, 1.f, aft / 100.f)), 2.f); }
-            g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(8.5f, true, 0.05f));
-            // as it is -> after MATCH TO A
-            g.drawText(juce::String(juce::roundToInt(m.score)) + "%" + (aft >= 0 ? " > " + juce::String(juce::roundToInt(aft)) + "%" : juce::String()),
-                       w - 96, 18, 86, 14, juce::Justification::centredRight);
+            g.drawText(f.getFileNameWithoutExtension(), 32, 0, w - 330, h, juce::Justification::centredLeft, true);
+            g.setColour(ui::dim2); g.setFont(ui::mono(10.f));
+            g.drawText(m.tags.isEmpty() ? juce::String(m.score >= 90.f ? "very close" : m.score >= 75.f ? "close" : "similar") : m.tags.joinIntoString("  ").toLowerCase(),
+                       w - 300, 0, 180, h, juce::Justification::centredRight, true);
+            g.setColour(ui::white); g.setFont(ui::mono(12.f, true));
+            g.drawText(juce::String(juce::roundToInt(aft >= 0 ? aft : m.score)), w - 112, 0, 34, h, juce::Justification::centredRight);
+            g.setColour(onPad ? ui::orange : ui::soft); g.setFont(ui::inter(10.f));
+            g.drawText(onPad ? "on the pad" : aft >= 0 ? "after match" : "as it is", w - 76, 0, 70, h, juce::Justification::centredRight);
             return;
         }
-        const auto ic = juce::Rectangle<float>(10.f, (float) h / 2.f - 6.f, 14.f, 12.f);
-        if (folder) { g.setColour(ui::dim.brighter(0.2f)); g.drawRoundedRectangle(ic, 2.f, 1.2f); g.fillRect(ic.getX(), ic.getY() - 2.f, 6.f, 2.5f); }
-        else
-        {
-            g.setColour(playing ? ui::amber : ui::dim);
-            for (int k = 0; k < 4; ++k) { const float bh = (k == 1 ? 10.f : k == 2 ? 7.f : 4.f); g.fillRect(ic.getX() + 1.f + k * 3.5f, ic.getCentreY() - bh / 2.f, 2.f, bh); }
-        }
-        g.setColour(playing ? ui::amber : folder ? ui::text.withAlpha(0.8f) : ui::text);
-        g.setFont(ui::font(10.5f, folder, 0.03f));
-        g.drawText(folder ? f.getFileName() : f.getFileNameWithoutExtension(), 32, 0, w - 40, h, juce::Justification::centredLeft);
+        g.drawText(folder ? f.getFileName() : f.getFileNameWithoutExtension(), 32, 0, w - 110, h, juce::Justification::centredLeft, true);
+        if (onPad) { g.setColour(ui::orange); g.setFont(ui::inter(10.f)); g.drawText("on the pad", w - 76, 0, 70, h, juce::Justification::centredRight); }
     }
-    juce::uint32 selectedAt = 0;
-    void selectedRowsChanged(int row) override       // also the arrow keys: each file plays as you walk
+    void selectedRowsChanged(int row) override
     {
         selectedAt = juce::Time::getMillisecondCounter();
         const auto f = rowFile(row);
         if (f.existsAsFile()) play(f);
     }
     void listBoxItemClicked(int row, const juce::MouseEvent&) override
-    {   // a click on the row that was already selected plays it again (a new selection has just played)
+    {
         if (juce::Time::getMillisecondCounter() - selectedAt < 250) return;
         const auto f = rowFile(row);
         if (f.existsAsFile()) play(f);
@@ -984,7 +998,6 @@ private:
     }
     void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override { activate(row); }
     void returnKeyPressed(int row) override { activate(row); }
-    void backgroundClicked(const juce::MouseEvent&) override {}
     juce::var getDragSourceDescription(const juce::SparseSet<int>& rows) override
     {
         if (rows.size() != 1) return {};
@@ -994,7 +1007,6 @@ private:
     bool keyPressed(const juce::KeyPress& k) override
     {
         if (k == juce::KeyPress::backspaceKey && mode == 0 && !filter.hasKeyboardFocus(true)) { upBtn.triggerClick(); return true; }
-        if (k == juce::KeyPress::escapeKey) { if (onClose) onClose(); return true; }
         return false;
     }
     void timerCallback() override
@@ -1005,7 +1017,7 @@ private:
             if (rank && !ranked)
             {
                 if (rank->finished.load())
-                {   // all checked: the list is ranked by how near each one gets after a match
+                {
                     { std::lock_guard<std::mutex> g(rank->lock); after = rank->after; }
                     std::vector<size_t> order(matches.size());
                     for (size_t i = 0; i < order.size(); ++i) order[i] = i;
@@ -1018,157 +1030,88 @@ private:
                 }
                 repaint();
             }
-            findSimilar(false);                    // the pad, its A / B / C or the library changed
+            findSimilar(false);
             if (proc.library->scanning() || scanWas) repaint();
             scanWas = proc.library->scanning();
         }
     }
-    bool scanWas = false;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SampleBrowser)
 };
 
+// =====================================================================================================
+//  THE DEVICE
+// =====================================================================================================
 class DrumSlicerPanel : public juce::Component, public juce::FileDragAndDropTarget, public juce::TextDragAndDropTarget,
                         public juce::DragAndDropContainer, public juce::DragAndDropTarget, private juce::Timer
 {
 public:
-    explicit DrumSlicerPanel(DrumSlicerProcessor& p) : proc(p), shape(p)
-    {
-        setSize(1000, 600);
-        look.knobImg = skin.knob;
-        setLookAndFeel(&look);
+    enum Page { pKit = 0, pSource, pPattern, pPad, pMore, pSamples, pKits };
+    static constexpr int W = 1240, H = 720;
 
-        auto knob = [this](juce::Slider& s, const juce::String& id, std::function<juce::String(double)> fmt)
+    explicit DrumSlicerPanel(DrumSlicerProcessor& p) : proc(p), shape(p), samples(p), kitsPage(p)
+    {
+        setSize(W, H);
+        setLookAndFeel(&look);
+        for (int k = 0; k < 4; ++k)
         {
+            auto& s = knobs[(size_t) k];
             s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
             s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
             s.setRotaryParameters(juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
-            s.setMouseDragSensitivity(180);
-            addChildComponent(s);
-            atts.push_back(std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter(id), s));
-            s.textFromValueFunction = std::move(fmt);
-            s.onValueChange = [this] { repaint(); shape.repaint(); };
-        };
-        auto dB = [](double v) { return v <= 0.0001 ? juce::String("-INF") : juce::String(juce::Decibels::gainToDecibels(v), 1) + " dB"; };
-        auto panTxt = [](double v) { const int p = juce::roundToInt(v * 100); return p == 0 ? juce::String("C") : juce::String(p < 0 ? "L " : "R ") + juce::String(std::abs(p)); };
-        auto sdB = [](double v) { return juce::String(v > 0 ? "+" : "") + juce::String(v, 1) + " dB"; };
-        for (int i = 0; i < ds::kPads; ++i)
-        {
-            const juce::String s(i);
-            knob(vol[(size_t) i], "vol" + s, dB);
-            knob(pan[(size_t) i], "pan" + s, panTxt);
-            knob(punch[(size_t) i], "punch" + s, sdB);
-            knob(sus[(size_t) i], "sus" + s, sdB);
-            knob(pitch[(size_t) i], "pitch" + s, [](double v) { return juce::String(v > 0 ? "+" : "") + juce::String(v, std::abs(v - std::round(v)) < 0.005 ? 0 : 2) + " st"; });
-            knob(mamt[(size_t) i], "mamt" + s, [](double v) { return juce::String(juce::roundToInt(v)) + " %"; });
-            knob(tone[(size_t) i], "tone" + s, [](double v) { return std::abs(v) < 0.05 ? juce::String("0") : juce::String(v > 0 ? "BRIGHT +" : "DARK ") + juce::String(std::abs(v), 1); });
+            s.setMouseDragSensitivity(200);
+            s.onDragStart = [this] { proc.undo.beginNewTransaction(); };
+            s.onValueChange = [this] { repaint(knobArea()); shape.repaint(); };
+            addAndMakeVisible(s);
         }
-        knob(master, "master", dB);
-        knob(sens, "sens", [](double v) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
-        knob(grid, "quant", [](double v) { return juce::String(juce::roundToInt(v * 100)) + "%"; });
-        knob(bpm, "bpm", [](double v) { return juce::String(v, 1); });
-        for (auto* s : { &master, &sens, &grid, &bpm }) s->setVisible(true);
-        sens.onDragEnd = [this] { if (proc.getResult() != nullptr && proc.getSource() != nullptr) proc.reanalyse(); };
-        sens.setTooltip("Hit detection sensitivity (re-analyses the loop when you let go)");
-        grid.setTooltip("TIGHT MIDI: 100% = fully on the grid, lower keeps some of the loop's groove");
-        bpm.setTooltip("Tempo used for the MIDI when the host does not report one");
-
-        for (auto* b : { &loadBtn, &reBtn }) addAndMakeVisible(b);
-        loadBtn.setButtonText("LOAD"); reBtn.setButtonText("ANALYSE");
-        loadBtn.onClick = [this]
-        {
-            chooser = std::make_unique<juce::FileChooser>("Select drum loop", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3");
-            chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                                 [this](const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) proc.loadSource(f); });
-        };
-        addAndMakeVisible(kitsBtn);
-        kitsBtn.setButtonText("KITS");
-        kitsBtn.setTooltip("Save this kit (sounds, settings, MIDI) or open a saved one - Documents/ReKit/Kits");
-        kitsBtn.onClick = [this] { openKits(); };
-        addChildComponent(kitBrowser);
-        kitBrowser.onClose = [this] { kitBrowser.setVisible(false); };
-        kitBrowser.onSave = [this] { askKitName(); };
-        kitBrowser.onLoad = [this](const juce::File& k) { proc.stopPreview(); proc.loadKit(k); toast("KIT  " + k.getFileName()); kitBrowser.setVisible(false); };
-        reBtn.onClick = [this] { proc.reanalyse(); };
-        reBtn.setTooltip("ANALYSE: learn the sounds of the selected part.  RE-ANALYSE: the same part again (ignores the cache)");
-
-        addAndMakeVisible(playMidi);
-        playMidi.setTooltip("Listen to the MIDI (EXACT / SYNC / TIGHT as chosen) with your kit as it is now, at the project tempo, looped");
-        playMidi.onClick = [this] { proc.playMidi(!proc.isMidiPlaying()); };
-        addAndMakeVisible(dragMidi);
-        dragMidi.getProperties().set("primary", true);
-        dragMidi.getProperties().set("compact", true);
-        dragMidi.setButtonText("DRAG MIDI");
-        dragMidi.setTooltip("Drag onto a MIDI / instrument track in your DAW");
-        dragMidi.onDrag = [this]
-        {
-            auto f = proc.makeMidiFile();
-            if (f.existsAsFile()) juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, this);
-        };
-        for (int b = 0; b < 3; ++b)                  // buttons: EXACT | SYNC | TIGHT
-        {
-            const int mode = b == 0 ? ds::kExact : b == 1 ? ds::kSync : ds::kTight;
-            addAndMakeVisible(modeBtn[(size_t) b]);
-            modeBtn[(size_t) b].setButtonText(b == 0 ? "EXACT" : b == 1 ? "SYNC" : "TIGHT");
-            modeBtn[(size_t) b].setTooltip(b == 0 ? "MIDI = the loop as played, at its own speed (under the original audio)"
-                                         : b == 1 ? "MIDI = the loop as played (groove, every hit), following your project tempo"
-                                                  : "MIDI = clean drum-machine pattern on the grid, follows your project tempo");
-            modeBtn[(size_t) b].onClick = [this, mode] { proc.setMidiMode(mode); };
-        }
-        addAndMakeVisible(exportBtn);
-        exportBtn.setButtonText("EXPORT");
-        exportBtn.setTooltip("Shaped one-shots (A or B as chosen) + MIDI into Documents/ReKit/<loop>/EXPORT");
-        exportBtn.onClick = [this] { auto d = proc.exportFinal(); if (d.exists()) d.revealToUser(); };
-
-        for (int b = 0; b < 3; ++b)
-        {
-            addAndMakeVisible(srcBtn[(size_t) b]);
-            srcBtn[(size_t) b].setButtonText(b == 0 ? "A  LEARNED" : b == 1 ? "B  BEST HIT" : "C  YOUR SAMPLE");
-            srcBtn[(size_t) b].setTooltip(b == 0 ? "The sound averaged over all its hits: stem dirt cancels out"
-                                          : b == 1 ? "The cleanest real hits, other drums subtracted"
-                                                   : "A sample of yours: drop a file on the pad (or right-click the pad > LOAD YOUR SAMPLE)");
-            srcBtn[(size_t) b].onClick = [this, b] { setSource(selected, b); };
-        }
-        addAndMakeVisible(buildBtn);
-        buildBtn.setButtonText("BUILD MY KIT"); buildBtn.getProperties().set("primary", true);
-        buildBtn.setTooltip("Every pad that is not locked gets the nearest sample of your folders, matched (layered where it helps). Then < > on a pad steps through its 30 suggestions.");
-        buildBtn.onClick = [this]
-        {
-            if (proc.getResult() == nullptr) { toast("ANALYSE A LOOP FIRST"); return; }
-            proc.buildKit(); toast("BUILDING YOUR KIT ...");
-        };
-        addAndMakeVisible(matchBtn);
-        matchBtn.setButtonText("MATCH TO A");
-        matchBtn.setTooltip("Shape your sample C (pitch, length, tone, punch, sustain, fade in) to come nearest to A - shown first, you decide");
-        matchBtn.onClick = [this] { matchMenu(selected); };
-        addAndMakeVisible(browseBtn);
-        browseBtn.setButtonText("BROWSE");
-        browseBtn.setTooltip("Your sample folders: click = listen (as loud as this pad), double-click or drag onto a pad = YOUR SAMPLE (C)");
-        browseBtn.onClick = [this] { if (samples.isVisible()) samples.setVisible(false); else openSamples(); };
+        knobs[0].getProperties().set("hero", true);
+        addChildComponent(shape);
+        shape.setTooltip("Click: listen.  Flags: start / end.  Dots: drag sideways = fade length, up / down = curve.  Right edge: gain (SHIFT = fine).  Double-click a handle = reset it.");
         addChildComponent(samples);
-        samples.onClose = [this] { samples.setVisible(false); };
         samples.onUse = [this](const juce::File& f) { useSample(selected, f); };
         samples.targetPad = [this] { return selected; };
-        samples.onTried = [this] { updateVisibility(); repaint(); };
-        samples.onKept = [this](const juce::File& f) { toast("C  " + f.getFileNameWithoutExtension()); updateVisibility(); repaint(); };
+        samples.onTried = [this] { repaint(); };
+        samples.onKept = [this](const juce::File& f) { proc.setPadLocked(selected, true); toast("yours  " + f.getFileNameWithoutExtension()); repaint(); };
         samples.targetName = [this] { auto r = proc.getResult(); if (!r) return juce::String();
-                                      return r->pads[(size_t) selected].valid ? r->pads[(size_t) selected].name
-                                                                              : "NEW " + (pendingType.isNotEmpty() ? pendingType : juce::String("SOUND")); };
-        addAndMakeVisible(dragWav);
-        dragWav.setButtonText("DRAG WAV");
-        dragWav.setTooltip("Drag this pad's sound (as you hear it) into the DAW");
-        dragWav.onDrag = [this]
-        {
-            auto f = proc.shotFile(selected);
-            if (f.existsAsFile()) juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, this);
-        };
-        addAndMakeVisible(shape);
-        shape.setTooltip("Click: listen.  Flags: START / END.  Squares: drag sideways = fade length, up / down = curve.  GAIN (right): this sound's level (A, B, C each their own; SHIFT = fine).  Double-click a handle = reset.  Right-click = reset menu.");
-        updateVisibility();
+                                      return r->pads[(size_t) selected].valid ? r->pads[(size_t) selected].name : "new " + (pendingType.isNotEmpty() ? pendingType : juce::String("sound")); };
+        addChildComponent(kitsPage);
+        kitsPage.onLoad = [this](const juce::File& k) { proc.stopPreview(); proc.loadKit(k); toast("kit  " + k.getFileName()); setPage(pKit); };
+        kitsPage.onToast = [this](const juce::String& t) { toast(t); };
+        addChildComponent(delPad);
+        delPad.text = "hold to delete pad + hits";
+        delPad.onHold = [this] {
+            auto r = proc.getResult(); if (!r || !r->pads[(size_t) selected].valid) return;
+            const auto nm = r->pads[(size_t) selected].name;
+            proc.deletePad(selected); toast("deleted  " + nm); setPage(pKit); };
+        page = proc.getSource() ? (proc.getResult() ? pKit : pSource) : pSource;
+        rebindKnobs();
+        updatePage();
         startTimerHz(30);
     }
     ~DrumSlicerPanel() override { setLookAndFeel(nullptr); }
+    // tests / screenshots: show a page as if clicked there
+    void debugShow(int pg, int pad, int bank, int hover)
+    { selected = juce::jlimit(0, ds::kPads - 1, pad); knobBank = bank; hoverPad = hover; page = (Page) pg; updatePage(); timerCallback(); }
 
-    // drops: files from Explorer / MediaBay / Pool, and hosts that hand over a path or file:// URL as text
+    // ------------------------------------------------------------------ layout (design size 1240 x 720)
+    const juce::Rectangle<float> display { 34.f, 64.f, 846.f, 342.f };
+    const juce::Rectangle<float> content { 60.f, 84.f, 794.f, 280.f };          // inside the display, above the page dots
+    juce::Rectangle<int> knobArea() const { return { 900, 60, 316, 350 }; }
+    juce::Rectangle<float> knobRect(int k) const { return { 920.f + (k % 2) * 150.f, 96.f + (k / 2) * 134.f, 110.f, 110.f }; }
+    juce::Rectangle<float> padRect(int i) const { return { 242.f + (i % 4) * 244.f, 426.f + (i / 4) * 140.f, 230.f, 126.f }; }
+    juce::Rectangle<float> buildRect() const { return { 70.f, 450.f, 108.f, 108.f }; }
+    juce::Rectangle<float> keyRect(int k) const { return { 46.f + k * 58.f, 600.f, 48.f, 48.f }; }   // play, undo, midi
+    juce::Rectangle<float> switchRect() const { return { 966.f, 376.f, 66.f, 30.f }; }
+
+    void resized() override
+    {
+        for (int k = 0; k < 4; ++k) knobs[(size_t) k].setBounds(knobRect(k).toNearestInt());
+        shape.setBounds(juce::Rectangle<float>(content.getX(), content.getY() + 128.f, content.getWidth() - 280.f, 92.f).toNearestInt());
+        samples.setBounds(content.withTrimmedBottom(0).toNearestInt());
+        kitsPage.setBounds(content.toNearestInt());
+        delPad.setBounds(juce::Rectangle<float>(content.getX() + 230.f, content.getBottom() - 34.f, 200.f, 30.f).toNearestInt());
+    }
+
+    // ------------------------------------------------------------------ drops: a file over a pad = its sound, else a new loop
     static bool isAudio(const juce::File& f) { return f.existsAsFile() && f.hasFileExtension("wav;wave;aif;aiff;flac;mp3;ogg"); }
     static juce::File fileFromText(const juce::String& t)
     {
@@ -1181,48 +1124,41 @@ public:
         }
         return {};
     }
-    bool isInterestedInFileDrag(const juce::StringArray& f) override { for (auto& p : f) if (isAudio(juce::File(p))) return true; return false; }
-    // a file let go over a pad becomes that pad's "C" (your sample); anywhere else it is a new loop
-    int padAt(int x, int y) const
+    int padAt(juce::Point<float> p) const { for (int i = 0; i < ds::kPads; ++i) if (padRect(i).contains(p)) return i; return -1; }
+    void dropFile(const juce::File& f, juce::Point<float> p)
     {
-        auto res = proc.getResult(); if (!res) return -1;
-        for (int i = 0; i < ds::kPads; ++i) if (padRect(i).contains(x, y)) return i;    // empty pads too: a new sound
-        return -1;
+        const int pad = padAt(p);
+        if (pad >= 0 && proc.getResult()) useSample(pad, f);
+        else { proc.loadSource(f); setPage(pSource); }
     }
-    void dropFile(const juce::File& f, int x, int y)
-    {
-        const int pad = padAt(x, y);
-        if (pad >= 0) useSample(pad, f);
-        else proc.loadSource(f);
-    }
-    void fileDragEnter(const juce::StringArray&, int x, int y) override { hover = true; hoverPad = padAt(x, y); repaint(); }
-    void fileDragMove(const juce::StringArray&, int x, int y) override { const int p = padAt(x, y); if (p != hoverPad) { hoverPad = p; repaint(); } }
-    void fileDragExit(const juce::StringArray&) override { hover = false; hoverPad = -1; repaint(); }
+    bool isInterestedInFileDrag(const juce::StringArray& f) override { for (auto& s : f) if (isAudio(juce::File(s))) return true; return false; }
+    void fileDragEnter(const juce::StringArray&, int x, int y) override { dropping = true; dropPad = padAt({ (float) x, (float) y }); repaint(); }
+    void fileDragMove(const juce::StringArray&, int x, int y) override { const int p = padAt({ (float) x, (float) y }); if (p != dropPad) { dropPad = p; repaint(); } }
+    void fileDragExit(const juce::StringArray&) override { dropping = false; dropPad = -1; repaint(); }
     void filesDropped(const juce::StringArray& f, int x, int y) override
     {
-        hover = false; hoverPad = -1;
-        for (auto& p : f) if (isAudio(juce::File(p))) { dropFile(juce::File(p), x, y); break; }
+        dropping = false; dropPad = -1;
+        for (auto& s : f) if (isAudio(juce::File(s))) { dropFile(juce::File(s), { (float) x, (float) y }); break; }
         repaint();
     }
     bool isInterestedInTextDrag(const juce::String& t) override { return fileFromText(t).existsAsFile(); }
-    void textDragEnter(const juce::String&, int x, int y) override { hover = true; hoverPad = padAt(x, y); repaint(); }
-    void textDragMove(const juce::String&, int x, int y) override { const int p = padAt(x, y); if (p != hoverPad) { hoverPad = p; repaint(); } }
-    void textDragExit(const juce::String&) override { hover = false; hoverPad = -1; repaint(); }
-    void textDropped(const juce::String& t, int x, int y) override { hover = false; hoverPad = -1; auto f = fileFromText(t); if (f.existsAsFile()) dropFile(f, x, y); repaint(); }
-    // a file dragged from the SAMPLES list: only onto a pad
+    void textDragEnter(const juce::String&, int x, int y) override { dropping = true; dropPad = padAt({ (float) x, (float) y }); repaint(); }
+    void textDragMove(const juce::String&, int x, int y) override { const int p = padAt({ (float) x, (float) y }); if (p != dropPad) { dropPad = p; repaint(); } }
+    void textDragExit(const juce::String&) override { dropping = false; dropPad = -1; repaint(); }
+    void textDropped(const juce::String& t, int x, int y) override { dropping = false; dropPad = -1; auto f = fileFromText(t); if (f.existsAsFile()) dropFile(f, { (float) x, (float) y }); repaint(); }
     static juce::File browserFile(const SourceDetails& d)
     {
         const auto t = d.description.toString();
         return t.startsWith("rekit-sample:") ? juce::File(t.fromFirstOccurrenceOf(":", false, false)) : juce::File();
     }
     bool isInterestedInDragSource(const SourceDetails& d) override { return browserFile(d).existsAsFile(); }
-    void itemDragEnter(const SourceDetails& d) override { hoverPad = padAt(d.localPosition.x, d.localPosition.y); repaint(); }
-    void itemDragMove(const SourceDetails& d) override { const int p = padAt(d.localPosition.x, d.localPosition.y); if (p != hoverPad) { hoverPad = p; repaint(); } }
-    void itemDragExit(const SourceDetails&) override { hoverPad = -1; repaint(); }
+    void itemDragEnter(const SourceDetails& d) override { dropPad = padAt(d.localPosition.toFloat()); repaint(); }
+    void itemDragMove(const SourceDetails& d) override { const int p = padAt(d.localPosition.toFloat()); if (p != dropPad) { dropPad = p; repaint(); } }
+    void itemDragExit(const SourceDetails&) override { dropPad = -1; repaint(); }
     void itemDropped(const SourceDetails& d) override
     {
-        const int pad = padAt(d.localPosition.x, d.localPosition.y);
-        hoverPad = -1;
+        const int pad = padAt(d.localPosition.toFloat());
+        dropPad = -1;
         if (pad >= 0) useSample(pad, browserFile(d));
         repaint();
     }
@@ -1231,255 +1167,83 @@ public:
         auto res = proc.getResult();
         if (pad < 0 || !f.existsAsFile() || !res) return;
         selected = pad;
-        if (res->pads[(size_t) pad].valid) { if (proc.setPadSample(pad, f)) toast("C  " + f.getFileNameWithoutExtension()); }
-        else if (proc.addPad(pad, pendingType, f)) toast("NEW  " + proc.getResult()->pads[(size_t) pad].name + "  -  " + f.getFileNameWithoutExtension());
+        if (res->pads[(size_t) pad].valid) { if (proc.setPadSample(pad, f)) toast("yours  " + f.getFileNameWithoutExtension()); }
+        else if (proc.addPad(pad, pendingType, f)) toast("new  " + ui::lower(proc.getResult()->pads[(size_t) pad].name) + "  .  " + f.getFileNameWithoutExtension());
         pendingType.clear();
-        updateVisibility(); repaint();
-    }
-    juce::String pendingType;                        // chosen for an empty pad before its sample
-    void emptyPadMenu(int pad)
-    {
-        juce::PopupMenu types, m;
-        const auto& list = DrumSlicerProcessor::padTypes();
-        for (int t = 0; t < (int) list.size(); ++t) types.addItem(100 + t, list[(size_t) t]);
-        m.addSectionHeader("EMPTY PAD");
-        m.addSubMenu("ADD A SOUND:  THIS PAD IS A ...", types);
-        m.addItem(1, "ADD A SOUND  (TYPE FROM THE FILE NAME) ...");
-        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(localAreaToGlobal(padRect(pad))),
-            [this, pad, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
-            {
-                if (sp == nullptr || id == 0) return;
-                pendingType = id >= 100 ? DrumSlicerProcessor::padTypes()[(size_t) (id - 100)] : juce::String();
-                selected = pad; openSamples();
-            });
+        rebindKnobs(); shape.invalidate(); repaint();
     }
 
-    // ---------------------------------------------------------------- layout (1000 x 600)
-    const juce::Rectangle<int> display { 20, 76, 960, 140 }, padsPanel { 20, 226, 624, 206 }, editPanel { 20, 440, 624, 140 },
-                               rightPanel { 654, 226, 326, 262 }, soundPanel { 654, 496, 326, 84 };
-    juce::Rectangle<int> padRect(int i) const { return { 30 + (i % 4) * 152, 236 + (i / 4) * 100, 146, 92 }; }
-    bool padHasSound(int i) const { auto r = proc.getResult(); return r && i >= 0 && i < ds::kPads && r->pads[(size_t) i].valid; }
-    bool padHasC(int i) const { auto r = proc.getResult(); return r && r->pads[(size_t) i].user.getNumSamples() > 0; }
-    juce::Rectangle<int> suggRect(int i) const { auto r = padRect(i); return { r.getRight() - 82, r.getY() + 20, 72, 18 }; }
-    juce::Rectangle<int> lockRect(int i) const { auto r = padRect(i); return { r.getRight() - 104, r.getY() + 20, 18, 18 }; }
-    bool padHasSugg(int i) const { return proc.suggestionCount(i) > 0; }
-    juce::Rectangle<int> abRect(int i) const { auto r = padRect(i); const int w = padHasC(i) ? 60 : 40; return { r.getRight() - 10 - w, r.getBottom() - 30, w, 20 }; }
-
-    void resized() override
-    {
-        kitsBtn.setBounds(display.getRight() - 238, display.getY() + 10, 60, 22);
-        buildBtn.setBounds(690, 27, 140, 26);
-        loadBtn.setBounds(display.getRight() - 172, display.getY() + 10, 60, 22);
-        reBtn.setBounds(display.getRight() - 106, display.getY() + 10, 94, 22);
-        for (int i = 0; i < ds::kPads; ++i)
-        {
-            vol[(size_t) i].setBounds(712, 266, 64, 64); pan[(size_t) i].setBounds(858, 266, 64, 64);
-            punch[(size_t) i].setBounds(670, 503, 42, 42); sus[(size_t) i].setBounds(730, 503, 42, 42);
-            pitch[(size_t) i].setBounds(790, 503, 42, 42); tone[(size_t) i].setBounds(850, 503, 42, 42); mamt[(size_t) i].setBounds(910, 503, 42, 42);
-        }
-        master.setBounds(669, 362, 42, 42); sens.setBounds(749, 362, 42, 42); grid.setBounds(829, 362, 42, 42); bpm.setBounds(909, 362, 42, 42);
-        playMidi.setBounds(666, 440, 34, 36);
-        dragMidi.setBounds(704, 440, 68, 36);
-        modeBtn[0].setBounds(776, 440, 46, 36); modeBtn[1].setBounds(824, 440, 46, 36); modeBtn[2].setBounds(872, 440, 46, 36);
-        exportBtn.setBounds(922, 440, 48, 36);
-        srcBtn[0].setBounds(32, 450, 102, 22); srcBtn[1].setBounds(133, 450, 102, 22); srcBtn[2].setBounds(234, 450, 122, 22);
-        dragWav.setBounds(552, 450, 80, 22);
-        browseBtn.setBounds(464, 450, 80, 22);
-        matchBtn.setBounds(362, 450, 96, 22);
-        samples.setBounds(rightPanel.getX(), rightPanel.getY(), rightPanel.getWidth(), soundPanel.getBottom() - rightPanel.getY());
-        shape.setBounds(30, 478, 604, 96);
-    }
-
-    // ---------------------------------------------------------------- kits
-    void toast(const juce::String& t) { toastText = t; toastUntil = juce::Time::getMillisecondCounter() + 2500; repaint(); }
-
-    // right-click a pad: what instrument it is (name + MIDI note), or put its hits on another pad
-    void padMenu(int pad)
-    {
-        auto res = proc.getResult(); if (!res) return;
-        juce::PopupMenu types, into, m;
-        const auto& list = DrumSlicerProcessor::padTypes();
-        for (int t = 0; t < (int) list.size(); ++t) types.addItem(100 + t, list[(size_t) t], true, res->pads[(size_t) pad].name.upToFirstOccurrenceOf(" ", false, false) == list[(size_t) t]);
-        for (int q = 0; q < ds::kPads; ++q) if (q != pad && res->pads[(size_t) q].valid) into.addItem(200 + q, res->pads[(size_t) q].name);
-        m.addSectionHeader(res->pads[(size_t) pad].name + "   (MIDI " + juce::MidiMessage::getMidiNoteName(res->pads[(size_t) pad].note, true, true, 3) + ")");
-        m.addSubMenu("THIS PAD IS A ...", types);
-        m.addSubMenu("MOVE ITS HITS TO ...  (THIS PAD GOES)", into, into.getNumItems() > 0);
-        m.addSeparator();
-        m.addItem(300, "CHOOSE YOUR SAMPLE (C) ...  (LISTEN FIRST)");
-        m.addItem(302, "FIND SIMILAR IN YOUR SAMPLES ...");
-        m.addItem(301, "REMOVE YOUR SAMPLE (C)", res->pads[(size_t) pad].user.getNumSamples() > 0);
-        m.addSeparator();
-        m.addItem(310, "CLEAR SOUND  (KEEP ITS HITS: THE PATTERN STAYS)");
-        m.addItem(311, "DELETE PAD AND ITS HITS ...");
-        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(localAreaToGlobal(padRect(pad))),
-            [this, pad, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
-            {
-                if (sp == nullptr || id == 0) return;
-                if (id >= 100 && id < 200) { proc.setPadType(pad, DrumSlicerProcessor::padTypes()[(size_t) (id - 100)]); toast("PAD  " + proc.getResult()->pads[(size_t) pad].name); }
-                else if (id == 300) { selected = pad; openSamples(); }
-                else if (id == 302) { selected = pad; openSamples(); samples.showSimilar(); }   // the SAMPLES panel: listen at the pad's level, then use
-                else if (id == 301) { proc.clearPadSample(pad); toast("BACK TO A"); }
-                else if (id == 310) { proc.clearPadSound(pad); toast("NO SOUND - DROP OR CHOOSE ONE, THE HITS WAIT"); }
-                else if (id == 311)
-                {
-                    const auto nm = proc.getResult()->pads[(size_t) pad].name;
-                    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon, "DELETE PAD",
-                        "Delete " + nm + " and its " + juce::String(proc.getResult()->pads[(size_t) pad].hits) + " hits from the MIDI?", "DELETE", "CANCEL", this,
-                        juce::ModalCallbackFunction::create([this, pad, nm, sp](int ok) { if (sp != nullptr && ok) { proc.deletePad(pad); toast("DELETED  " + nm); updateVisibility(); repaint(); } }));
-                }
-                else if (id >= 200) { const int q = id - 200; proc.mergePad(pad, q); selected = q; toast("HITS MOVED TO  " + proc.getResult()->pads[(size_t) q].name); }
-                updateVisibility(); repaint();
-            });
-    }
-
-    // MATCH TO A: measure + apply (in the background), then each part on / off, the AMOUNT knob, again / remove
-    void matchMenu(int pad)
-    {
-        auto r = proc.getResult();
-        if (!r || !r->pads[(size_t) pad].valid || r->pads[(size_t) pad].user.getNumSamples() == 0) return;
-        const auto m = proc.getMatch(pad);
-        if (!m.on) { proc.startMatch(pad); toast("MATCHING C TO A ..."); return; }
-        juce::PopupMenu menu;
-        menu.addSectionHeader("MATCHED TO A:   " + juce::String(juce::roundToInt(m.before)) + "%   ->   " + juce::String(juce::roundToInt(m.after)) + "%");
-        menu.addItem(1, "EQ  (26 BANDS)", true, m.useEq);
-        menu.addItem(2, "SHAPE  (ATTACK, BODY, DECAY IN 8 BANDS)", true, m.useShape);
-        menu.addItem(3, m.roomMix > 0 ? "ROOM  (A'S SPACE)" : "ROOM  (NOT NEEDED: C HAS AS MUCH)", m.roomMix > 0, m.useRoom && m.roomMix > 0);
-        menu.addItem(4, "PITCH  " + juce::String(m.pitch > 0 ? "+" : "") + juce::String(m.pitch, 1) + " ST", true, m.usePitch);
-        menu.addItem(5, m.en < 1999.f ? "LENGTH  END " + juce::String(juce::roundToInt(m.en)) + " MS" : juce::String("LENGTH  (AS IT IS)"), m.en < 1999.f, m.useLen && m.en < 1999.f);
-        bool glide = false; for (float v : m.glide) glide = glide || std::abs(v) > 0.05f;
-        menu.addItem(6, glide ? "PITCH DROP  (THE FALL OF ITS NOTE, LIKE A'S)" : juce::String("PITCH DROP  (NOT NEEDED / NOT TONAL)"), glide, m.useGlide && glide);
-        menu.addItem(7, m.driveDb > 0.05f ? "SATURATION  " + juce::String(m.driveDb, 1) + " DB DRIVE" : juce::String("SATURATION  (NOT NEEDED)"), m.driveDb > 0.05f, m.useDrive && m.driveDb > 0.05f);
-        menu.addItem(8, std::abs(m.widthDb) > 0.05f ? "WIDTH  " + juce::String(m.widthDb > 0 ? "WIDER " : "NARROWER ") + juce::String(std::abs(m.widthDb), 1) + " DB" : juce::String("WIDTH  (AS IT IS)"), std::abs(m.widthDb) > 0.05f, m.useWidth && std::abs(m.widthDb) > 0.05f);
-        menu.addSeparator();
-        menu.addItem(10, "MATCH AGAIN");
-        menu.addItem(11, "REMOVE MATCH");
-        menu.addSeparator();
-        const bool lay = r->pads[(size_t) pad].layered();
-        menu.addItem(12, lay ? "LAYER AGAIN  (ANOTHER SECOND SAMPLE)" : "LAYER MATCH  (ADD A SECOND SAMPLE OF YOURS)");
-        if (lay) menu.addItem(13, "REMOVE LAYER  (" + r->pads[(size_t) pad].layerName.toUpperCase() + ")");
-        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&matchBtn),
-            [this, pad, m, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int id)
-            {
-                if (sp == nullptr || id == 0) return;
-                if (id >= 1 && id <= 8)
-                {
-                    const bool cur = id == 1 ? m.useEq : id == 2 ? m.useShape : id == 3 ? m.useRoom : id == 4 ? m.usePitch : id == 5 ? m.useLen
-                                   : id == 6 ? m.useGlide : id == 7 ? m.useDrive : m.useWidth;
-                    proc.setMatchPart(pad, id - 1, !cur);
-                }
-                else if (id == 10) { proc.startMatch(pad); toast("MATCHING C TO A ..."); }
-                else if (id == 11) { proc.removeMatch(pad); toast("MATCH REMOVED"); }
-                else if (id == 12) { proc.startLayer(pad); toast("LOOKING FOR A SECOND SAMPLE ..."); }
-                else if (id == 13) { proc.removeLayer(pad); }
-                shape.invalidate(); repaint();
-            });
-    }
-    void openSamples() { updateVisibility(); samples.setVisible(true); samples.toFront(false); samples.showFor(); repaint(); }
-    void openKits() { kitBrowser.setBounds(getLocalBounds()); kitBrowser.refresh(); kitBrowser.setVisible(true); kitBrowser.toFront(false); }
-
-    void askKitName()
-    {
-        auto* w = new juce::AlertWindow("SAVE KIT", "Name of the kit (a folder in Documents/ReKit/Kits):", juce::MessageBoxIconType::NoIcon, this);
-        w->addTextEditor("name", proc.baseName());
-        w->addButton("SAVE", 1, juce::KeyPress(juce::KeyPress::returnKey));
-        w->addButton("CANCEL", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-        w->enterModalState(true, juce::ModalCallbackFunction::create(
-            [this, w, sp = juce::Component::SafePointer<DrumSlicerPanel>(this)](int r)
-            {
-                if (sp == nullptr || r != 1) return;
-                const auto name = juce::File::createLegalFileName(w->getTextEditorContents("name").trim());
-                if (name.isEmpty()) return;
-                const auto dir = ds::kitsRoot().getChildFile(name);
-                if (ds::isKit(dir) && dir != proc.getKitDir())
-                {
-                    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "SAVE KIT", "A kit called \"" + name + "\" exists. Replace it?",
-                        "REPLACE", "CANCEL", this, juce::ModalCallbackFunction::create([this, name, sp](int ok) { if (sp != nullptr && ok) doSaveKit(name); }));
-                    return;
-                }
-                doSaveKit(name);
-            }), true);
-    }
-
-    void doSaveKit(const juce::String& name)
-    {
-        const auto k = proc.saveKit(name);
-        toast(k.isDirectory() ? "KIT SAVED  " + k.getFileName() : juce::String("COULD NOT SAVE THE KIT"));
-        if (kitBrowser.isVisible()) kitBrowser.refresh();
-    }
-
-    void mouseDown(const juce::MouseEvent& e) override
-    {
-        auto res = proc.getResult();
-        for (int i = 0; i < ds::kPads; ++i)
-        {
-            if (!padRect(i).contains(e.getPosition())) continue;
-            if (proc.isTrying() && i != selected) proc.endTry(false);     // trying on another pad: that one goes back
-            selected = i;
-            if (e.mods.isPopupMenu())
-            {
-                if (res && res->pads[(size_t) i].valid) padMenu(i);
-                else if (res) emptyPadMenu(i);
-                else toast("ANALYSE A LOOP FIRST");
-                updateVisibility(); repaint(); return;
-            }
-            if (res && res->pads[(size_t) i].valid && padHasSugg(i) && suggRect(i).contains(e.getPosition()))
-            {   // < > : the pad's suggestions, each already matched
-                const auto sr = suggRect(i);
-                const int x = e.getPosition().x - sr.getX();
-                if (x < 20) proc.stepSuggestion(i, -1); else if (x > sr.getWidth() - 20) proc.stepSuggestion(i, 1);
-                updateVisibility(); repaint(); return;
-            }
-            if (res && res->pads[(size_t) i].valid && (padHasSugg(i) || proc.padLocked(i)) && lockRect(i).contains(e.getPosition()))
-            {
-                proc.setPadLocked(i, !proc.padLocked(i));
-                toast(proc.padLocked(i) ? "LOCKED: BUILD MY KIT KEEPS THIS PAD" : "UNLOCKED: BUILD MY KIT MAY CHANGE THIS PAD");
-                repaint(); return;
-            }
-            if (res && res->pads[(size_t) i].valid && abRect(i).contains(e.getPosition()))
-            {
-                const auto ab = abRect(i); const int n = padHasC(i) ? 3 : 2;
-                setSource(i, juce::jlimit(0, n - 1, (e.getPosition().x - ab.getX()) * n / ab.getWidth()));
-            }
-            else if (!res || !res->pads[(size_t) i].valid || proc.padIsSilent(i))
-            {   // nothing to hear: give it a sound
-                if (samples.isTrying()) samples.stopTrying();
-                if (res) { pendingType.clear(); openSamples(); }
-            }
-            else proc.audition(i);
-            updateVisibility(); repaint();
-        }
-        if (display.contains(e.getPosition())) displayDown(e);
-    }
-    void mouseDrag(const juce::MouseEvent& e) override { displayDrag(e); }
-    void mouseUp(const juce::MouseEvent&) override { dragWhat = 0; }
+    // ------------------------------------------------------------------ mouse: zones drawn by the pages, pads, keys
     void mouseMove(const juce::MouseEvent& e) override
     {
-        const int h = display.contains(e.getPosition()) ? handleAt(e.position.x, e.position.y) : 0;
-        setMouseCursor(h != 0 ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+        const int hp = padAt(e.position);
+        const int hz = zoneAt(e.position);
+        const auto hr = hz >= 0 ? zones[(size_t) hz].r : juce::Rectangle<float>();
+        if (hp != hoverPad || hr != hotRect) { hoverPad = hp; hotRect = hr; repaint(); }
+        const int h = page == pSource ? handleAt(e.position.x, e.position.y) : 0;
+        setMouseCursor(h != 0 ? juce::MouseCursor::LeftRightResizeCursor : hz >= 0 && zones[(size_t) hz].click ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+    }
+    void mouseExit(const juce::MouseEvent&) override { if (hoverPad >= 0 || !hotRect.isEmpty()) { hoverPad = -1; hotRect = {}; repaint(); } }
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        const int dz = zoneAt(e.position); dragStarted = false; downPad = -1; hasDown = dz >= 0;
+        if (hasDown) { downZone = zones[(size_t) dz]; return; }   // a zone acts on mouse up (or on a drag)
+        const int pad = padAt(e.position);
+        if (pad >= 0)
+        {
+            if (proc.isTrying() && pad != selected) proc.endTry(false);
+            if (e.mods.isPopupMenu()) { selectPad(pad); setPage(pMore); return; }
+            downPad = pad; return;
+        }
+        if (page == pSource && display.contains(e.position)) sourceDown(e);
+        if (page == pPattern && tightRect().contains(e.position)) { proc.undo.beginNewTransaction(); dragTight = true; setTight(e.position.x); }
+    }
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (dragTight) { setTight(e.position.x); return; }
+        if (!dragStarted && e.getDistanceFromDragStart() > 6)
+        {
+            if (hasDown && downZone.drag) { dragStarted = true; auto fn = downZone.drag; fn(); return; }
+            if (downPad >= 0 && padHasSound(downPad))
+            {   // a pad dragged out: its sound as you hear it, as a WAV
+                dragStarted = true;
+                auto f = proc.shotFile(downPad);
+                if (f.existsAsFile()) juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, this);
+                return;
+            }
+        }
+        if (page == pSource) sourceDrag(e);
+    }
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        const bool wasDragTight = dragTight; dragTight = false; dragWhat = 0;
+        if (wasDragTight || dragStarted) return;
+        if (hasDown) { hasDown = false; if (downZone.r.contains(e.position) && downZone.click) { auto fn = downZone.click; fn(); repaint(); } return; }
+        if (downPad >= 0 && downPad == padAt(e.position)) padClick(downPad, e.position);
     }
     void mouseDoubleClick(const juce::MouseEvent& e) override
     {
         auto src = proc.getSource();
-        if (!src || !display.contains(e.getPosition()) || proc.isBusy()) return;
+        if (page != pSource || !src || !display.contains(e.position) || proc.isBusy()) return;
         const int h = handleAt(e.position.x, e.position.y);
-        if (h == 1) proc.setSelection(0, proc.selEnd());                       // double-click a handle: back to the file's edge
+        if (h == 1) proc.setSelection(0, proc.selEnd());
         else if (h == 2) proc.setSelection(proc.selStart(), src->length());
-        else if (waveZone().contains(e.position)) { v0 = 0; v1 = src->length(); }   // elsewhere: whole file
+        else if (waveZone().contains(e.position)) { v0 = 0; v1 = src->length(); }
         repaint();
     }
     void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
         auto src = proc.getSource();
-        if (!src || !display.contains(e.getPosition())) return;
+        if (page != pSource || !src || !display.contains(e.position)) return;
         fixView(*src);
         const double span = (double) (v1 - v0), n = (double) src->length();
-        if (e.mods.isShiftDown() || std::abs(w.deltaX) > std::abs(w.deltaY))     // shift + wheel: move along
+        if (e.mods.isShiftDown() || std::abs(w.deltaX) > std::abs(w.deltaY))
         {
             const double d = -(std::abs(w.deltaX) > std::abs(w.deltaY) ? w.deltaX : w.deltaY) * span * 0.25;
             const double a = juce::jlimit(0.0, n - span, (double) v0 + d);
             v0 = (juce::int64) a; v1 = (juce::int64) (a + span);
         }
-        else                                                                     // wheel: zoom where the mouse is
+        else
         {
             const double at = (double) sampleAt(e.position.x);
             const double ns = juce::jlimit(std::min(n, 0.05 * src->sr), n, span * std::pow(0.8, w.deltaY * 4.0));
@@ -1489,144 +1253,499 @@ public:
         }
         repaint();
     }
-
-    void timerCallback() override
+    bool keyPressed(const juce::KeyPress& k) override
     {
-        if (proc.getResultVersion() != shownVersion) { shownVersion = proc.getResultVersion(); shape.invalidate(); repaint(); }
-        const int mm = proc.midiMode();
-        modeBtn[0].setToggleState(mm == ds::kExact, juce::dontSendNotification);
-        modeBtn[1].setToggleState(mm == ds::kSync, juce::dontSendNotification);
-        modeBtn[2].setToggleState(mm == ds::kTight, juce::dontSendNotification);
-        const int src = proc.padSource(selected);
-        for (int k = 0; k < 3; ++k) srcBtn[(size_t) k].setToggleState(src == k, juce::dontSendNotification);
-        bool lit = false;
-        for (size_t i = 0; i < 8; ++i) { levels[i] = std::max(proc.padLevel[i].exchange(0.f) > 0.f ? 1.f : 0.f, levels[i] * 0.85f); lit |= levels[i] > 0.01f; }
-        auto res = proc.getResult();
-        const bool hasPad = res && res->pads[(size_t) selected].valid;
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &dragMidi, &exportBtn, &modeBtn[0], &modeBtn[1], &modeBtn[2] }) c->setEnabled(res != nullptr);
-        for (juce::Component* c : std::initializer_list<juce::Component*> { &srcBtn[0], &srcBtn[1], &dragWav }) c->setEnabled(hasPad);
-        const bool hasC = hasPad && res->pads[(size_t) selected].user.getNumSamples() > 0;
-        srcBtn[2].setEnabled(hasC);
-        srcBtn[2].setTooltip(hasC ? "Your sample: " + res->pads[(size_t) selected].userName + (res->pads[(size_t) selected].layered() ? " + " + res->pads[(size_t) selected].layerName + " (layered)" : juce::String())
-                                  : juce::String("A sample of yours: drop a file on the pad (or right-click the pad > LOAD YOUR SAMPLE)"));
-        {
-            const bool hasSrc = proc.getSource() != nullptr, done = proc.selectionAnalysed();
-            reBtn.setEnabled(hasSrc && !proc.isBusy());
-            reBtn.setButtonText(done ? "RE-ANALYSE" : "ANALYSE");
-            reBtn.setToggleState(hasSrc && !done && !proc.isBusy(), juce::dontSendNotification);   // lit = waiting for you
-            if (proc.isSourcePlaying() || wasPlaying) repaint(display);
-            wasPlaying = proc.isSourcePlaying();
-        }
-        browseBtn.setToggleState(samples.isVisible(), juce::dontSendNotification);
-        {
-            const bool canMatch = hasPad && res->pads[(size_t) selected].user.getNumSamples() > 0 && proc.padSource(selected) == 2
-                               && res->pads[(size_t) selected].audio.getMagnitude(0, res->pads[(size_t) selected].audio.getNumSamples()) > 1.0e-6f;   // a cleared pad has no A
-            const auto md = proc.getMatch(selected);
-            matchBtn.setEnabled(canMatch && !proc.isMatching());
-            matchBtn.setButtonText(proc.isMatching() ? (proc.matchMessage().startsWith("LAYERING") ? proc.matchMessage().replace("LAYERING  ", "LAYER ") : juce::String("MATCHING...")) : (canMatch && md.on) ? "MATCH " + juce::String(juce::roundToInt(md.after)) + "%" : juce::String("MATCH TO A"));
-            matchBtn.setToggleState(canMatch && md.on, juce::dontSendNotification);
-            for (int i = 0; i < ds::kPads; ++i) mamt[(size_t) i].setEnabled(i == selected && canMatch && md.on);
-            const auto msg = proc.matchMessage();
-            if (msg != lastMatchMsg) { lastMatchMsg = msg; if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY") || msg.startsWith("LAYERED") || msg.startsWith("NO LAYER") || msg.startsWith("LAYER REMOVED")
-                                                                     || msg.startsWith("KIT BUILT") || msg.startsWith("BUILD MY KIT") || msg.startsWith("SUGGESTION")) toast(msg); }
-        }
-        {   // a file that could not be read keeps the loop you had: said out loud, not only in the status line
-            const auto st = proc.getStatus();
-            if (st != lastStatus) { lastStatus = st; if (st.startsWith("COULD NOT")) toast(st + "  -  THE LOOP YOU HAD STAYS"); }
-        }
-        buildBtn.setEnabled(res != nullptr && !proc.isMatching());
-        buildBtn.setButtonText(proc.isBuilding() ? proc.matchMessage().replace("BUILDING KIT  ", "BUILDING ").replace("BUILDING KIT ...", "BUILDING ...") : juce::String("BUILD MY KIT"));
-        playMidi.setToggleState(proc.isMidiPlaying(), juce::dontSendNotification);
-        playMidi.setEnabled(res != nullptr);
-        if (!res && proc.isMidiPlaying()) proc.playMidi(false);
-        if (samples.isVisible() && selected != browsedPad) { browsedPad = selected; samples.repaint(); }
-        const bool toasting = juce::Time::getMillisecondCounter() < toastUntil;
-        if (lit || proc.isBusy() || wasBusy || toasting || wasToasting) repaint();
-        wasToasting = toasting;
-        wasBusy = proc.isBusy();
-        shape.repaint();
+        if (k == juce::KeyPress::escapeKey) { setPage(proc.getResult() ? pKit : pSource); return true; }
+        return false;
     }
 
-    // ---------------------------------------------------------------- drawing
+    // ------------------------------------------------------------------ timer: follow the processor
+    void timerCallback() override
+    {
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        auto res = proc.getResult();
+        // a new analysis (or kit) arrived
+        if (proc.getResultVersion() != shownVersion)
+        {
+            const bool fresh = res && res.get() != lastRes;
+            shownVersion = proc.getResultVersion(); lastRes = res.get();
+            if (fresh && analysing) { settleStart = now; setPage(pKit); }
+            if (res && !res->pads[(size_t) selected].valid) for (int i = 0; i < ds::kPads; ++i) if (res->pads[(size_t) i].valid) { selected = i; break; }
+            shape.invalidate(); rebindKnobs(); repaint();
+        }
+        const bool busy = proc.isBusy();
+        if (busy && !analysing) { analysing = true; analyseStart = now; }
+        if (!busy && analysing) { analysing = false; if (!res) setPage(pSource); }
+        // build my kit: the display follows it on the kit page
+        const bool building = proc.isBuilding();
+        if (building && !wasBuilding) { buildStart = now; scoreFrom = kitScore(); setPage(pKit); }
+        if (!building && wasBuilding) { buildEnd = now; scoreFrom = shownScore; }
+        wasBuilding = building;
+        // the sounds changed (a sample, a match, a suggestion): undo steps of the knobs before it would not fit any more
+        {
+            juce::String sig;
+            if (res) for (int i = 0; i < ds::kPads; ++i) { const auto& pd = res->pads[(size_t) i]; const auto md = proc.getMatch(i);
+                sig << pd.userPath << pd.layerPath << (int) md.on << juce::roundToInt(md.after) << proc.suggestionIndex(i) << "|"; }
+            sig << proc.getResultVersion();
+            if (sig != soundSig) { soundSig = sig; proc.undo.clearUndoHistory(); }
+        }
+        // messages of the processor -> toast
+        {
+            const auto msg = proc.matchMessage();
+            if (msg != lastMatchMsg)
+            {
+                lastMatchMsg = msg;
+                if (msg.startsWith("MATCHED") || msg.startsWith("A HAS") || msg.startsWith("ALREADY") || msg.startsWith("LAYERED") || msg.startsWith("NO LAYER")
+                    || msg.startsWith("LAYER REMOVED") || msg.startsWith("KIT BUILT") || msg.startsWith("BUILD MY KIT") || msg.startsWith("SUGGESTION") || msg.startsWith("COULD NOT"))
+                    toast(ui::lower(msg));
+                rebindKnobs();
+            }
+            const auto st = proc.getStatus();
+            if (st != lastStatus) { lastStatus = st; if (st.startsWith("COULD NOT")) toast(ui::lower(st) + "  .  the loop you had stays"); }
+        }
+        // pads light up as they sound
+        for (size_t i = 0; i < 8; ++i) levels[i] = std::max(proc.padLevel[i].exchange(0.f) > 0.f ? 1.f : 0.f, levels[i] * 0.86f);
+        if (page == pSamples && selected != browsedPad) { browsedPad = selected; samples.repaint(); }
+        rebindKnobs();
+        bool lit = false; for (float l : levels) lit = lit || l > 0.01f;
+        const bool moving = lit || busy || building || proc.isMatching() || proc.isMidiPlaying() || proc.isSourcePlaying() || proc.isPreviewing()
+                         || now - settleStart < 1000 || now - buildEnd < 1000 || juce::Time::getMillisecondCounter() < toastUntil + 100
+                         || std::abs(tightShown - (proc.midiMode() == ds::kTight ? proc.apvts.getRawParameterValue("quant")->load() : 0.f)) > 0.001f;
+        if (moving || ++idle >= 6) { idle = 0; repaint(); }      // otherwise 5 times a second is enough to follow changes
+    }
+
+    // ------------------------------------------------------------------ drawing
     void paint(juce::Graphics& g) override
     {
-        if (skin.background.isValid()) g.drawImage(skin.background, getLocalBounds().toFloat(), juce::RectanglePlacement::stretchToFit);
-        else
-        {
-            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff15161a), 500, 250, juce::Colour(0xff0d0e11), 0, 600, true));
-            g.fillAll();
-        }
+        zones.clear();
+        const auto now = juce::Time::getMillisecondCounterHiRes();
         auto res = proc.getResult();
+        // the body
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff232326), 0, 0, juce::Colour(0xff17171a), 0, (float) H, false));
+        g.fillAll();
+        g.setColour(juce::Colours::white.withAlpha(0.06f)); g.drawHorizontalLine(0, 0, (float) W);
         drawHeader(g, res);
-        for (auto r : { display, padsPanel, editPanel, rightPanel, soundPanel }) drawPanel(g, r);
-        drawDisplay(g, res);
-        if (juce::Time::getMillisecondCounter() < toastUntil && toastText.isNotEmpty())
+        // the display
         {
-            const auto t = juce::Rectangle<float>(0, 0, 320, 26).withCentre({ (float) display.getCentreX(), (float) display.getY() + 22.f });
-            g.setColour(ui::well.withAlpha(0.95f)); g.fillRoundedRectangle(t, 13.f);
-            g.setColour(ui::amber); g.drawRoundedRectangle(t, 13.f, 1.2f);
-            g.setFont(ui::font(10.f, true, 0.3f)); g.drawText(toastText, t.toNearestInt(), juce::Justification::centred);
+            juce::Path p; p.addRoundedRectangle(display, 20.f);
+            g.setColour(ui::screen); g.fillPath(p);
+            g.setGradientFill(juce::ColourGradient(juce::Colours::black.withAlpha(0.8f), 0, display.getY(), juce::Colours::transparentBlack, 0, display.getY() + 14.f, false));
+            g.fillPath(p);
+            g.setColour(juce::Colour(0xff2a2a2c)); g.strokePath(p, juce::PathStrokeType(1.f));
+            if (dropping && dropPad < 0) { g.setColour(ui::orange); g.strokePath(p, juce::PathStrokeType(1.5f)); }
         }
-        drawPads(g, res);
-        drawRight(g, res);
+        {
+            juce::Graphics::ScopedSaveState ss(g);
+            g.reduceClipRegion(display.reduced(2.f).toNearestInt());
+            if (proc.isBusy()) drawAnalysing(g, now);
+            else
+                switch (page)
+                {
+                    case pKit:     drawKit(g, res, now); break;
+                    case pSource:  drawSource(g, res); break;
+                    case pPattern: drawPattern(g, res, now); break;
+                    case pPad:     drawPad(g, res); break;
+                    case pMore:    drawMore(g, res); break;
+                    default: break;
+                }
+            drawTabs(g, res);
+        }
+        drawToast(g);
+        drawKnobs(g, res);
+        drawKeys(g, res);
+        drawPads(g, res, now);
     }
 
 private:
-    void setSource(int pad, int src)
+    // ---------------------------------------------------------------- zones (clickable parts of the drawing)
+    struct Zone { juce::Rectangle<float> r; std::function<void()> click, drag; };
+    std::vector<Zone> zones;
+    Zone downZone; bool hasDown = false;
+    juce::Rectangle<float> hotRect;
+    int downPad = -1;
+    bool dragStarted = false, dragTight = false;
+    int zone(juce::Rectangle<float> r, std::function<void()> click, std::function<void()> drag = {})
+    { zones.push_back({ r, std::move(click), std::move(drag) }); return (int) zones.size() - 1; }
+    int zoneAt(juce::Point<float> p) const { for (int i = (int) zones.size() - 1; i >= 0; --i) if (zones[(size_t) i].r.contains(p)) return i; return -1; }
+    bool hot(juce::Rectangle<float> r) const { return !hotRect.isEmpty() && hotRect == r; }
+
+    // a chip (a small rounded button drawn on the display); returns its rectangle
+    enum ChipKind { cNormal, cOn, cOutline, cDashed, cPrimary, cAccent, cGhostAccent };
+    juce::Rectangle<float> chip(juce::Graphics& g, float x, float y, const juce::String& t, ChipKind k, std::function<void()> click, float h = 24.f, float fs = 11.f, bool right = false)
     {
-        proc.setPadSource(pad, src);
-        proc.audition(pad); shape.invalidate(); repaint();
+        const auto f = ui::inter(fs, k == cPrimary || k == cAccent || k == cOn ? 600 : 400);
+        const float w = ui::textW(f, t) + 20.f;
+        const auto r = juce::Rectangle<float>(right ? x - w : x, y, w, h);
+        const bool over = click && hot(r);
+        juce::Colour bg = juce::Colours::transparentBlack, fg = ui::soft;
+        switch (k)
+        {
+            case cNormal: bg = ui::chip2; fg = ui::soft; break;
+            case cOn: bg = ui::white; fg = juce::Colour(0xff0b0b0c); break;
+            case cOutline: fg = ui::soft; break;
+            case cDashed: fg = ui::faint; break;
+            case cPrimary: bg = ui::white; fg = juce::Colour(0xff0b0b0c); break;
+            case cAccent: bg = ui::orange; fg = juce::Colours::white; break;
+            case cGhostAccent: fg = ui::orange; break;
+        }
+        if (!bg.isTransparent()) { g.setColour(bg.brighter(over ? 0.08f : 0.f)); g.fillRoundedRectangle(r, h * 0.5f); }
+        if (k == cOutline) { g.setColour(over ? ui::soft : ui::dark); g.drawRoundedRectangle(r.reduced(0.5f), h * 0.5f, 1.f); }
+        if (k == cGhostAccent) { g.setColour(ui::orange); g.drawRoundedRectangle(r.reduced(0.5f), h * 0.5f, 1.f); }
+        if (k == cDashed) ui::dashed(g, r.reduced(0.5f), h * 0.5f, ui::line);
+        if (over && bg.isTransparent()) { g.setColour(juce::Colours::white.withAlpha(0.05f)); g.fillRoundedRectangle(r, h * 0.5f); }
+        g.setColour(fg); g.setFont(f); g.drawText(t, r, juce::Justification::centred);
+        if (click) zone(r, std::move(click));
+        return r;
+    }
+    // a segmented switch: returns nothing, each part is a zone
+    void segmented(juce::Graphics& g, juce::Rectangle<float> r, const juce::StringArray& parts, int on, std::function<void(int)> pick, float fs = 11.f)
+    {
+        g.setColour(ui::chip); g.fillRoundedRectangle(r, 9.f);
+        float total = 0; for (auto& s : parts) total += ui::textW(ui::inter(fs, 600), s) + 24.f;
+        float x = r.getX() + 3.f;
+        const float scale = (r.getWidth() - 6.f) / std::max(1.f, total);
+        for (int i = 0; i < parts.size(); ++i)
+        {
+            const float w = (ui::textW(ui::inter(fs, 600), parts[i]) + 24.f) * scale;
+            const auto pr = juce::Rectangle<float>(x, r.getY() + 3.f, w, r.getHeight() - 6.f);
+            if (i == on) { g.setColour(ui::chipOn); g.fillRoundedRectangle(pr, 7.f); }
+            else if (hot(pr)) { g.setColour(juce::Colours::white.withAlpha(0.04f)); g.fillRoundedRectangle(pr, 7.f); }
+            g.setColour(i == on ? ui::white : ui::dim); g.setFont(ui::inter(fs, i == on ? 600 : 400));
+            g.drawText(parts[i], pr, juce::Justification::centred);
+            zone(pr, [pick, i] { pick(i); });
+            x += w;
+        }
     }
 
-    void drawPanel(juce::Graphics& g, juce::Rectangle<int> r)
+    // ---------------------------------------------------------------- pages
+    void setPage(Page p) { if (p == page) { updatePage(); return; } page = p; updatePage(); repaint(); }
+    void updatePage()
     {
-        auto f = r.toFloat();
-        g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(f.translated(0, 2), 12.f);
-        g.setGradientFill(juce::ColourGradient(juce::Colour(0xf0181a1f), 0, f.getY(), juce::Colour(0xf0121317), 0, f.getBottom(), false));
-        g.fillRoundedRectangle(f, 12.f);
-        g.setColour(ui::panelEdge); g.drawRoundedRectangle(f.reduced(0.5f), 12.f, 1.f);
+        auto res = proc.getResult();
+        shape.setVisible(page == pPad && res && res->pads[(size_t) selected].valid && !proc.isBusy());
+        shape.pad = selected; shape.invalidate();
+        const bool showSamples = page == pSamples && !proc.isBusy();
+        if (showSamples != samples.isVisible()) { samples.setVisible(showSamples); if (showSamples) samples.showFor(); }
+        kitsPage.setVisible(page == pKits && !proc.isBusy());
+        delPad.setVisible(page == pMore && res && res->pads[(size_t) selected].valid && !proc.isBusy());
+        rebindKnobs();
+    }
+    void selectPad(int i) { selected = i; shape.pad = i; shape.invalidate(); rebindKnobs(); repaint(); }
+    void padClick(int i, juce::Point<float>)
+    {
+        auto res = proc.getResult();
+        selectPad(i);
+        if (!res) { toast("analyse a loop first"); return; }
+        if (!res->pads[(size_t) i].valid || proc.padIsSilent(i))
+        {   // nothing to hear: give it a sound
+            if (samples.isTrying()) samples.stopTrying();
+            pendingType.clear(); setPage(pSamples); return;
+        }
+        proc.audition(i);
+        if (page != pSamples && page != pKits) setPage(pPad);
+        updatePage();
     }
 
+    // ---------------------------------------------------------------- header
     void drawHeader(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
     {
-        g.setColour(ui::text); g.setFont(ui::font(25.f, true, 0.32f));
-        g.drawText("REKIT", 32, 18, 400, 30, juce::Justification::centredLeft);
-        {   // version, small, next to the name
-           #ifdef JucePlugin_VersionString
-            const juce::String ver = "v" JucePlugin_VersionString;
-           #else
-            const juce::String ver = "v1.14.0";
-           #endif
-            const float tw = juce::GlyphArrangement::getStringWidth(ui::font(25.f, true, 0.32f), "REKIT");
-            g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.2f));
-            g.drawText(ver, juce::Rectangle<float>(32.f + tw + 8.f, 30.f, 60.f, 12.f).toNearestInt(), juce::Justification::centredLeft);
+        g.setColour(ui::white); g.setFont(ui::mono(16.f, true));
+        g.drawText("rekit", 34, 24, 80, 22, juce::Justification::centredLeft);
+       #ifdef JucePlugin_VersionString
+        const juce::String ver = JucePlugin_VersionString;
+       #else
+        const juce::String ver = "2.0.0";
+       #endif
+        g.setColour(ui::faint); g.setFont(ui::mono(10.f));
+        g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
+        juce::String st;
+        const bool busy = proc.isBusy() || proc.isMatching();
+        if (proc.isBusy()) st = ui::lower(proc.getStatus());
+        else if (proc.isMatching()) st = ui::lower(proc.matchMessage());
+        else if (res) st = "ready  .  " + juce::String(res->bpm, 1).trimCharactersAtEnd("0").trimCharactersAtEnd(".") + " bpm  .  " + juce::String(bars(*res)) + (bars(*res) == 1 ? " bar" : " bars");
+        else if (proc.getSource()) st = "loaded  .  choose the part";
+        else st = "drop a drum loop";
+        g.setFont(ui::mono(12.f));
+        const float tw = ui::textW(ui::mono(12.f), st);
+        g.setColour(juce::Colour(0xff9a9a98));
+        g.drawText(st, juce::Rectangle<float>(1206.f - tw, 24.f, tw, 22.f), juce::Justification::centredRight);
+        const float pulse = busy ? 0.55f + 0.45f * std::sin((float) juce::Time::getMillisecondCounterHiRes() * 0.008f) : 1.f;
+        const auto dot = juce::Rectangle<float>(8.f, 8.f).withCentre({ 1206.f - tw - 16.f, 35.f });
+        g.setColour(ui::orange.withAlpha(0.35f * pulse)); g.fillEllipse(dot.expanded(4.f));
+        g.setColour(res || busy ? ui::orange.withAlpha(pulse) : ui::faint); g.fillEllipse(dot);
+    }
+    static int bars(const ds::Result& r) { return std::max(1, (int) std::lround(r.loop.getNumSamples() / r.sr * r.bpm / 240.0)); }
+
+    // ---------------------------------------------------------------- page dots (bottom of the display)
+    void drawTabs(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
+    {
+        static const char* names[] = { "kit", "source", "pattern", "pad", "samples", "kits" };
+        static const Page pages[] = { pKit, pSource, pPattern, pPad, pSamples, pKits };
+        const Page cur = page == pMore ? pPad : page;
+        float x = content.getX();
+        const float y = display.getBottom() - 30.f;
+        g.setFont(ui::mono(11.f));
+        for (int i = 0; i < 6; ++i)
+        {
+            const bool on = pages[i] == cur, can = res != nullptr || pages[i] == pSource || pages[i] == pKits;
+            const juce::String t = juce::String(on ? juce::CharPointer_UTF8("\xe2\x97\x8f ") : juce::CharPointer_UTF8("\xe2\x97\x8b ")) + names[i];
+            const float w = ui::textW(ui::mono(11.f), t);
+            const auto r = juce::Rectangle<float>(x - 4.f, y - 2.f, w + 8.f, 18.f);
+            g.setColour(on ? ui::white : (can ? (hot(r) ? ui::soft : ui::faint) : ui::line));
+            g.drawText(t, juce::Rectangle<float>(x, y, w + 2.f, 14.f), juce::Justification::centredLeft);
+            if (can) { const Page pg = pages[i]; zone(r, [this, pg] { setPage(pg); }); }
+            x += w + 20.f;
         }
-        g.setColour(ui::dim); g.setFont(ui::font(9.f, true, 0.55f));
-        g.drawText("BY POURIA MOTABEAN", 34, 50, 400, 12, juce::Justification::centredLeft);
-        const juce::Rectangle<float> pill(842.f, 27.f, 138.f, 26.f);
-        const bool has = res != nullptr;
-        const double m = has ? res->minHearing() : 0;
-        const auto c = !has ? ui::faint : (m >= 0.9 ? ui::amber : juce::Colour(0xffff7a59));
-        g.setColour(c.withAlpha(0.9f)); g.drawRoundedRectangle(pill, 13.f, 1.2f);
-        g.setFont(ui::font(9.5f, true, 0.4f)); g.setColour(c.withAlpha(0.75f));
-        g.drawText("REPLAYS", pill.withTrimmedLeft(16).toNearestInt(), juce::Justification::centredLeft);
-        g.setFont(ui::font(14.f, true, 0.05f)); g.setColour(c);
-        g.drawText(has ? juce::String(juce::roundToInt(100.0 * m)) + "%" : juce::String("--"), pill.withTrimmedRight(16).toNearestInt(), juce::Justification::centredRight);
+        if (res)
+        {
+            g.setColour(juce::Colour(0xff5e5e61)); g.setFont(ui::mono(11.f));
+            g.drawText("extraction [" + juce::String(juce::roundToInt(100.0 * res->minHearing())) + "]", juce::Rectangle<float>(content.getRight() - 200.f, y, 200.f, 14.f), juce::Justification::centredRight);
+        }
+    }
+    void toast(const juce::String& t) { toastText = t; toastUntil = juce::Time::getMillisecondCounter() + 2600; repaint(); }
+    void drawToast(juce::Graphics& g)
+    {
+        if (juce::Time::getMillisecondCounter() >= toastUntil || toastText.isEmpty()) return;
+        const auto f = ui::mono(11.f);
+        const float w = std::min(display.getWidth() - 60.f, ui::textW(f, toastText) + 36.f);
+        const auto t = juce::Rectangle<float>(std::min(w, 640.f), 26.f).withCentre({ 600.f, 35.f });
+        g.setColour(ui::screen); g.fillRoundedRectangle(t, 13.f);
+        g.setColour(ui::orange); g.drawRoundedRectangle(t, 13.f, 1.f);
+        g.setFont(f); g.drawText(toastText, t, juce::Justification::centred, true);
     }
 
-    // ---------------------------------------------------------------- top display: the loaded file
-    // player (cursor), selection START / END (snap to the attacks), wheel = zoom, shift + wheel = move
-    float wx0() const { return (float) display.getX() + 19.f; }
-    float ww() const { return (float) display.getWidth() - 38.f; }
-    juce::Rectangle<int> playRect() const { return { (int) wx0(), display.getY() + 11, 26, 22 }; }
-    juce::Rectangle<int> snapRect() const { return { (int) wx0() + 32, display.getY() + 11, 64, 22 }; }
-    juce::Rectangle<float> waveZone() const { return { wx0() - 6.f, (float) display.getY() + 36.f, ww() + 12.f, 80.f }; }
-    float waveMid() const { return (float) display.getY() + 68.f; }
-    static constexpr float waveH = 30.f;
-    void fixView(const ds::Source& s)
+    // ---------------------------------------------------------------- the lanes: every hit a dot at its real time
+    juce::Rectangle<float> lanesRect() const { return { content.getX() + 26.f, content.getY() + 92.f, content.getWidth() - 26.f, 176.f }; }
+    static float laneY(juce::Rectangle<float> L, int k) { return L.getY() + 8.f + k * (L.getHeight() - 16.f) / 7.f; }
+    float kitScore() const
     {
-        if (s.id != viewId || v1 <= v0 || v1 > s.length()) { v0 = 0; v1 = s.length(); viewId = s.id; }
+        auto r = proc.getResult(); if (!r) return -1.f;
+        float s = 0; int n = 0;
+        for (int i = 0; i < ds::kPads; ++i)
+        {
+            if (!r->pads[(size_t) i].valid || r->pads[(size_t) i].hits == 0) continue;
+            const auto md = proc.getMatch(i);
+            if (proc.padSource(i) == 2 && md.on) { s += md.after; ++n; }
+        }
+        return n ? s / n : -1.f;
     }
+    void drawKit(juce::Graphics& g, const std::shared_ptr<ds::Result>& res, double now)
+    {
+        if (!res) { drawDropHere(g); return; }
+        const auto C = content;
+        // name of the loop / kit
+        g.setColour(ui::dim2); g.setFont(ui::mono(11.f));
+        const auto kd = proc.getKitDir();
+        g.drawText(kd != juce::File() ? "kit  .  " + kd.getFileName() : proc.getLoopFile().getFileName().toLowerCase(), juce::Rectangle<float>(C.getX(), C.getY(), 500.f, 14.f), juce::Justification::centredLeft, true);
+        const auto titleR = juce::Rectangle<float>(C.getX(), C.getY() + 14.f, 520.f, 52.f);
+        g.setColour(ui::white); g.setFont(ui::inter(42.f, 300, -0.02f));
+        g.drawText(ui::nice(proc.baseName()), titleR, juce::Justification::centredLeft, true);
+        zone(titleR, [this] { setPage(pKits); });
+        // the score ring: your kit against the loop
+        {
+            float target = kitScore();
+            const double since = now - buildEnd;
+            if (buildEnd > 0 && since < 700) target = scoreFrom + (std::max(0.f, target) - scoreFrom) * (float) juce::jlimit(0.0, 1.0, since / 700.0);
+            shownScore = target;
+            const auto rc = juce::Rectangle<float>(C.getRight() - 236.f, C.getY() + 2.f, 62.f, 62.f);
+            g.setColour(juce::Colour(0xff232325)); g.drawEllipse(rc.reduced(2.f), 4.f);
+            if (target > 0)
+            {
+                juce::Path a; a.addCentredArc(rc.getCentreX(), rc.getCentreY(), rc.getWidth() * 0.5f - 2.f, rc.getHeight() * 0.5f - 2.f, 0.f, 0.f,
+                                              juce::MathConstants<float>::twoPi * juce::jlimit(0.f, 1.f, target / 100.f), true);
+                g.setColour(ui::white); g.strokePath(a, juce::PathStrokeType(4.f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            }
+            g.setColour(ui::white); g.setFont(ui::mono(24.f, true));
+            g.drawText(target > 0 ? "[" + juce::String(juce::roundToInt(target)) + "]" : juce::String("[--]"), juce::Rectangle<float>(rc.getRight() + 12.f, rc.getY() + 6.f, 160.f, 30.f), juce::Justification::centredLeft);
+            g.setColour(ui::dim); g.setFont(ui::inter(11.f));
+            g.drawText(target > 0 ? "your kit vs the loop" : "build my kit, or choose samples", juce::Rectangle<float>(rc.getRight() + 12.f, rc.getY() + 36.f, 200.f, 16.f), juce::Justification::centredLeft);
+        }
+        drawLanes(g, *res, lanesRect(), now, false);
+    }
+    void drawLanes(juce::Graphics& g, const ds::Result& r, juce::Rectangle<float> L, double now, bool zoom)
+    {
+        const double len = std::max(1, r.loop.getNumSamples());
+        const double barLen = 240.0 / std::max(1.0, r.bpm) * r.sr;
+        const int nb = bars(r);
+        const double from = zoom ? patBar * barLen : 0.0, span = zoom ? barLen : len;
+        auto xOfT = [&](double t) { return L.getX() + (float) ((t - from) / span) * L.getWidth(); };
+        // bar / beat lines
+        if (zoom) for (int j = 0; j <= 16; ++j) { const float x = L.getX() + L.getWidth() * j / 16.f; g.setColour(j % 4 == 0 ? juce::Colour(0xff2a2a2d) : juce::Colour(0xff161618)); g.drawVerticalLine((int) x, L.getY() - 4.f, L.getBottom() + 4.f); }
+        else for (int b = 0; b <= nb; ++b) { const float x = xOfT(b * barLen); if (x > L.getRight() + 1) break; g.setColour(juce::Colour(0xff161618)); g.drawVerticalLine((int) x, L.getY() - 4.f, L.getBottom() + 4.f); }
+        // the glyphs
+        for (int k = 0; k < ds::kPads; ++k)
+        {
+            const auto& pd = r.pads[(size_t) k];
+            const float y = laneY(L, k);
+            const auto gr = juce::Rectangle<float>(13.f, 13.f).withCentre({ L.getX() - 20.f, y });
+            ui::glyph(g, pd.valid ? pd.name : "-", gr, pd.valid ? (k == selected ? ui::white : ui::soft) : ui::line);
+            if (pd.valid) zone(gr.expanded(6.f), [this, k] { selectPad(k); proc.audition(k); });
+        }
+        // building: every lane looks for its sound (the real %, the rows lock in at the end)
+        const bool building = proc.isBuilding();
+        const double sinceEnd = now - buildEnd;
+        const bool locking = !building && buildEnd > 0 && sinceEnd < 700;
+        const double sinceSettle = now - settleStart;
+        const bool settling = settleStart > 0 && sinceSettle < 900;
+        const float playX = proc.isMidiPlaying() ? L.getX() + proc.midiPlayFrac() * L.getWidth() : -1.f;
+        const int mm = proc.midiMode();
+        const float tightNow = zoom ? tightShown : 0.f;
+        for (size_t h = 0; h < r.hits.size(); ++h)
+        {
+            const auto& hit = r.hits[h];
+            if (hit.pad < 0 || hit.pad >= ds::kPads || !r.pads[(size_t) hit.pad].valid) continue;
+            if (zoom && (hit.time < from || hit.time >= from + span)) continue;
+            const float v = juce::jlimit(0.f, 1.f, hit.velocity / 127.f);
+            const double gridT = from + std::round((hit.time - from) / (barLen / 16.0)) * (barLen / 16.0);
+            const double t = hit.time + (gridT - hit.time) * tightNow;
+            float x = xOfT(t), y = laneY(L, hit.pad);
+            float w = zoom ? 6.f + 7.f * v : 5.f + 3.f * v;
+            juce::Colour c = ui::white.withAlpha(0.55f + 0.45f * v);
+            if (settling)
+            {   // the dots fly from the wave's middle into their rows
+                const float f = (float) juce::jlimit(0.0, 1.0, (sinceSettle - 400.0 * (double) (h % 23) / 23.0) / 500.0);
+                const float e = 1.f - (1.f - f) * (1.f - f);
+                y = L.getCentreY() + (y - L.getCentreY()) * e;
+                c = c.withMultipliedAlpha(0.4f + 0.6f * e);
+            }
+            if (building || locking)
+            {
+                const bool done = locking && sinceEnd > 80.0 * hit.pad;
+                c = done ? c : ui::dark; w = done ? w : 3.f;
+            }
+            if (!proc.padAudible(hit.pad)) c = c.withMultipliedAlpha(0.3f);
+            const bool now_ = playX >= 0 && x <= playX && playX - x < 14.f;
+            if (now_) { g.setColour(ui::orange.withAlpha(0.35f)); g.fillEllipse(juce::Rectangle<float>(w + 8.f, w + 8.f).withCentre({ x, y })); c = ui::orange; }
+            else if (hit.pad == selected && page == pKit && !building) c = ui::white;
+            g.setColour(c); g.fillEllipse(juce::Rectangle<float>(w, w).withCentre({ x, y }));
+            if (zoom && mm == ds::kTight && tightNow < 0.999f)
+            {   // where the grid would put it
+                g.setColour(ui::dark); g.drawEllipse(juce::Rectangle<float>(w + 4.f, w + 4.f).withCentre({ xOfT(gridT), y }), 1.f);
+            }
+            else if (zoom && mm != ds::kTight && std::abs(xOfT(gridT) - x) > 2.f)
+            { g.setColour(ui::dark); g.drawEllipse(juce::Rectangle<float>(w + 4.f, w + 4.f).withCentre({ xOfT(gridT), y }), 1.f); }
+        }
+        if (building)
+            for (int k = 0; k < ds::kPads; ++k)
+            {
+                if (!r.pads[(size_t) k].valid || r.pads[(size_t) k].hits == 0 || proc.padLocked(k)) continue;
+                const float ph = (float) std::fmod((now - buildStart) / 1400.0 + k * 0.137, 1.0);
+                const float x = L.getX() + ph * L.getWidth(), y = laneY(L, k);
+                g.setColour(ui::orange.withAlpha(0.3f)); g.fillRoundedRectangle(x - 10.f, y - 3.f, 20.f, 6.f, 3.f);
+                g.setColour(ui::orange); g.fillRoundedRectangle(x - 7.f, y - 1.5f, 14.f, 3.f, 1.5f);
+            }
+        if (playX >= 0 && !zoom) { g.setColour(ui::orange.withAlpha(0.3f)); g.fillRect(playX - 1.5f, L.getY() - 8.f, 3.f, L.getHeight() + 16.f); g.setColour(ui::orange); g.fillRect(playX - 0.5f, L.getY() - 8.f, 1.f, L.getHeight() + 16.f); }
+        if (building)
+        {   // what is being done, honestly: the real progress of the build
+            const auto m = proc.matchMessage().toLowerCase().replace("building kit", "").trim();
+            g.setColour(ui::orange); g.setFont(ui::mono(11.f));
+            g.drawText("building your kit  " + m, juce::Rectangle<float>(L.getX(), L.getY() - 22.f, L.getWidth(), 14.f), juce::Justification::centredRight);
+        }
+    }
+
+    // ---------------------------------------------------------------- analysing (the wait, shown with the real stages)
+    void drawAnalysing(juce::Graphics& g, double now)
+    {
+        const auto C = content;
+        auto src = proc.getSource();
+        const auto st = proc.getStatus();
+        const bool loading = st.startsWith("LOADING") || st.startsWith("OPENING");
+        const float p = loading ? 0.f : juce::jlimit(0.f, 1.f, proc.getProgress());
+        g.setColour(ui::white); g.setFont(ui::inter(p < 0.55f ? 22.f : 22.f, 300));
+        g.drawText(loading ? juce::String("opening") : p < 0.55f ? (src ? proc.getLoopFile().getFileName() : juce::String("reading")) : juce::String("learning the sounds"),
+                   juce::Rectangle<float>(C.getX(), C.getY(), C.getWidth() - 220.f, 30.f), juce::Justification::centredLeft, true);
+        g.setColour(ui::orange); g.setFont(ui::mono(11.f));
+        g.drawText(ui::lower(st), juce::Rectangle<float>(C.getRight() - 320.f, C.getY() + 8.f, 320.f, 14.f), juce::Justification::centredRight, true);
+        const auto wr = juce::Rectangle<float>(C.getX(), C.getY() + 60.f, C.getWidth(), 150.f);
+        if (src && !loading)
+        {
+            const juce::int64 a = proc.selStart(), b = std::max(a + 1, proc.selEnd());
+            const auto& pk = rangePeaks(*src, a, b, (int) (wr.getWidth() / 4.f));
+            const float sweep = juce::jlimit(0.f, 1.f, p / 0.55f);
+            for (size_t i = 0; i < pk.size(); ++i)
+            {
+                const float x = wr.getX() + i * 4.f, f = (float) i / (float) pk.size();
+                const float h = std::max(2.f, pk[i] * wr.getHeight() * 0.48f);
+                if (p < 0.55f) { g.setColour(f < sweep ? ui::white : ui::dark); g.fillRoundedRectangle(x - 1.5f, wr.getCentreY() - h, 3.f, 2.f * h, 1.5f); }
+                else
+                {   // the wave breaks into dots that drift to rows (the rows are known when it is done)
+                    const float q = juce::jlimit(0.f, 1.f, (p - 0.55f) / 0.45f);
+                    const float lane = (float) ((i * 7919) % 8);
+                    const float ty = wr.getY() + 8.f + lane * (wr.getHeight() - 16.f) / 7.f;
+                    const float y = wr.getCentreY() + (ty - wr.getCentreY()) * q * (0.6f + 0.4f * std::sin((float) now * 0.004f + (float) i));
+                    if (pk[i] > 0.25f) { g.setColour(ui::white.withAlpha(0.4f + 0.6f * q)); g.fillEllipse(juce::Rectangle<float>(5.f, 5.f).withCentre({ x, y })); }
+                }
+            }
+            if (p < 0.55f)
+            {   // each hit found gets an orange tick
+                int n = 0;
+                for (auto& o : src->onsets)
+                {
+                    if (o.pos < a || o.pos >= b) continue;
+                    const float f = (float) ((double) (o.pos - a) / (double) (b - a));
+                    if (f > sweep) break;
+                    ++n;
+                    const float x = wr.getX() + f * wr.getWidth();
+                    g.setColour(ui::orange); g.fillRoundedRectangle(x - 1.f, wr.getY() - 14.f, 2.f, 8.f, 1.f);
+                }
+                g.setColour(ui::orange); g.setFont(ui::mono(11.f));
+                g.drawText("finding hits  .  " + juce::String(n), juce::Rectangle<float>(C.getX(), C.getY() + 30.f, 300.f, 14.f), juce::Justification::centredLeft);
+            }
+        }
+        else
+        {   // opening: a light that runs along
+            const float ph = (float) std::fmod(now / 900.0, 1.0);
+            for (int i = 0; i < 60; ++i) { const float x = wr.getX() + i * wr.getWidth() / 60.f; g.setColour(std::abs(i / 60.f - ph) < 0.06f ? ui::white : ui::line); g.fillEllipse(juce::Rectangle<float>(4.f, 4.f).withCentre({ x, wr.getCentreY() })); }
+        }
+        const auto bar = juce::Rectangle<float>(C.getX(), C.getBottom() - 34.f, C.getWidth(), 3.f);
+        g.setColour(juce::Colour(0xff1c1c1f)); g.fillRoundedRectangle(bar, 1.5f);
+        g.setColour(ui::orange); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * (loading ? (float) std::fmod(now / 1500.0, 1.0) : p)), 1.5f);
+    }
+    std::vector<float> rp; juce::int64 rpA = -1, rpB = -1; juce::uint64 rpId = 0; int rpN = 0;
+    const std::vector<float>& rangePeaks(const ds::Source& s, juce::int64 a, juce::int64 b, int n)
+    {
+        if (s.id == rpId && a == rpA && b == rpB && n == rpN) return rp;
+        rpId = s.id; rpA = a; rpB = b; rpN = n; rp.assign((size_t) std::max(0, n), 0.f);
+        const int ch = s.audio.getNumChannels(); if (ch == 0 || n <= 0) return rp;
+        float mx = 1e-6f;
+        for (int i = 0; i < n; ++i)
+        {
+            const juce::int64 s0 = a + (b - a) * i / n, s1 = std::max(s0 + 1, a + (b - a) * (i + 1) / n);
+            const juce::int64 step = std::max<juce::int64>(1, (s1 - s0) / 64);
+            float m = 0; for (juce::int64 k = s0; k < std::min<juce::int64>(s1, s.length()); k += step) m = std::max(m, std::abs(s.audio.getSample(0, (int) k)));
+            rp[(size_t) i] = m; mx = std::max(mx, m);
+        }
+        for (auto& v : rp) v /= mx;
+        return rp;
+    }
+
+    // ---------------------------------------------------------------- no loop yet
+    void drawDropHere(juce::Graphics& g)
+    {
+        const auto C = content;
+        const auto st = proc.getStatus();
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        g.drawText(st.startsWith("COULD NOT") ? ui::lower(st) : juce::String("drop a drum loop"), C.withTrimmedBottom(60.f), juce::Justification::centred, true);
+        g.setColour(ui::dim); g.setFont(ui::inter(12.f));
+        g.drawText("from the pool, mediabay or explorer  .  or click to choose a file", C.withTrimmedTop(70.f).withTrimmedBottom(20.f), juce::Justification::centred);
+        // a quiet row of dots
+        for (int i = 0; i < 32; ++i) { const float x = C.getCentreX() - 155.f + i * 10.f; g.setColour(i % 4 == 0 ? ui::dark : ui::line); g.fillEllipse(juce::Rectangle<float>(4.f, 4.f).withCentre({ x, C.getCentreY() + 60.f })); }
+        zone(C, [this] { chooseLoop(); });
+    }
+    void chooseLoop()
+    {
+        chooser = std::make_unique<juce::FileChooser>("Select drum loop", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3");
+        chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                             [this](const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) { proc.loadSource(f); setPage(pSource); } });
+    }
+
+    // ---------------------------------------------------------------- page: SOURCE (the loaded file, the part to learn)
+    float wx0() const { return content.getX(); }
+    float ww() const { return content.getWidth(); }
+    juce::Rectangle<float> waveZone() const { return { content.getX() - 6.f, content.getY() + 52.f, content.getWidth() + 12.f, 150.f }; }
+    float waveMid() const { return content.getY() + 120.f; }
+    static constexpr float waveH = 60.f;
+    void fixView(const ds::Source& s) { if (s.id != viewId || v1 <= v0 || v1 > s.length()) { v0 = 0; v1 = s.length(); viewId = s.id; } }
     float xOf(juce::int64 smp) const { return wx0() + (float) ((double) (smp - v0) / (double) std::max<juce::int64>(1, v1 - v0)) * ww(); }
     juce::int64 sampleAt(float x) const { return v0 + (juce::int64) std::llround((double) (x - wx0()) / ww() * (double) (v1 - v0)); }
     int handleAt(float x, float y) const
@@ -1634,27 +1753,26 @@ private:
         auto src = proc.getSource();
         if (!src || !waveZone().contains(x, y)) return 0;
         const float xs = xOf(proc.selStart()), xe = xOf(proc.selEnd());
-        const float ds_ = std::abs(x - xs), de = std::abs(x - xe);
-        if (std::min(ds_, de) > 7.f) return 0;
-        return ds_ <= de ? 1 : 2;
+        const float a = std::abs(x - xs), b = std::abs(x - xe);
+        if (std::min(a, b) > 8.f) return 0;
+        return a <= b ? 1 : 2;
     }
-    // the strongest attack near the mouse (10 px), else the nearest one (40 px), else where the mouse is
     juce::int64 snapped(const ds::Source& s, juce::int64 pos) const
     {
         const double spp = (double) (v1 - v0) / ww();
-        const juce::int64 near = (juce::int64) (10 * spp), far = (juce::int64) (40 * spp);
+        const juce::int64 nr = (juce::int64) (10 * spp), fr = (juce::int64) (40 * spp);
         const auto& on = s.onsets;
-        auto it = std::lower_bound(on.begin(), on.end(), pos - far, [](const ds::Onset& o, juce::int64 p) { return o.pos < p; });
+        auto it = std::lower_bound(on.begin(), on.end(), pos - fr, [](const ds::Onset& o, juce::int64 p) { return o.pos < p; });
         float top = 0; std::vector<ds::Onset> cand;
-        juce::int64 nearest = -1, nd = far + 1;
-        for (; it != on.end() && it->pos <= pos + far; ++it)
+        juce::int64 nearest = -1, nd = fr + 1;
+        for (; it != on.end() && it->pos <= pos + fr; ++it)
         {
             const juce::int64 d = std::abs(it->pos - pos);
             if (d < nd) { nd = d; nearest = it->pos; }
-            if (d <= near) { cand.push_back(*it); top = std::max(top, it->strength); }
+            if (d <= nr) { cand.push_back(*it); top = std::max(top, it->strength); }
         }
-        for (juce::int64 edge : { (juce::int64) 0, s.length() })                // the file's own start and end
-            if (std::abs(edge - pos) <= near) { cand.push_back({ edge, 1.f }); top = 1.f; }
+        for (juce::int64 edge : { (juce::int64) 0, s.length() })
+            if (std::abs(edge - pos) <= nr) { cand.push_back({ edge, 1.f }); top = 1.f; }
         if (!cand.empty())
         {
             juce::int64 best = cand.front().pos, bd = std::numeric_limits<juce::int64>::max();
@@ -1663,45 +1781,36 @@ private:
         }
         return nearest >= 0 ? nearest : pos;
     }
-    void displayDown(const juce::MouseEvent& e)
+    void sourceDown(const juce::MouseEvent& e)
     {
         auto src = proc.getSource();
-        if (!src) { if (!proc.isBusy()) loadBtn.triggerClick(); return; }
-        if (proc.isBusy() || e.mods.isPopupMenu()) return;
+        if (!src || proc.isBusy() || e.mods.isPopupMenu()) return;
         fixView(*src);
-        if (playRect().contains(e.getPosition())) { proc.playSource(!proc.isSourcePlaying()); repaint(); return; }
-        if (snapRect().contains(e.getPosition())) { proc.snap = !proc.snap.load(); repaint(); return; }
         if (!waveZone().contains(e.position)) return;
         dragWhat = handleAt(e.position.x, e.position.y);
         if (dragWhat == 0)
-        {   // click on the wave: play from there (inside the selection)
+        {
             const auto p = juce::jlimit(proc.selStart(), std::max(proc.selStart(), proc.selEnd() - 1), sampleAt(e.position.x));
-            proc.seekSource(p);
-            proc.playSource(true);
-            repaint();
+            proc.seekSource(p); proc.playSource(true); repaint();
         }
     }
-    void displayDrag(const juce::MouseEvent& e)
+    void sourceDrag(const juce::MouseEvent& e)
     {
         if (dragWhat == 0) return;
         auto src = proc.getSource(); if (!src) return;
         auto p = juce::jlimit<juce::int64>(0, src->length(), sampleAt(e.position.x));
-        if (proc.snap.load() != e.mods.isAltDown()) p = snapped(*src, p);              // ALT: the other way round
+        if (proc.snap.load() != e.mods.isAltDown()) p = snapped(*src, p);
         if (dragWhat == 1) proc.setSelection(std::min(p, proc.selEnd() - 1), proc.selEnd());
         else proc.setSelection(proc.selStart(), std::max(p, proc.selStart() + 1));
-        repaint(display);
+        repaint();
     }
-    static juce::String clock(double sec)
-    {
-        const int m = (int) (sec / 60.0);
-        return juce::String(m) + ":" + juce::String(sec - 60.0 * m, 2).paddedLeft('0', 5);
-    }
+    static juce::String clock(double sec) { const int m = (int) (sec / 60.0); return juce::String(m) + ":" + juce::String(sec - 60.0 * m, 1).paddedLeft('0', 4); }
     void computePeaks(const ds::Source& s)
     {
         if (s.id == peaksId && v0 == pk0 && v1 == pk1) return;
         peaksId = s.id; pk0 = v0; pk1 = v1;
         peaks.clear();
-        const int w = (int) ww(), n = (int) s.length();
+        const int w = (int) (ww() / 4.f), n = (int) s.length();
         if (w <= 0 || n <= 0) return;
         if (s.id != gmaxId) { gmax = 1e-6f; for (int c = 0; c < s.audio.getNumChannels(); ++c) gmax = std::max(gmax, s.audio.getMagnitude(c, 0, n)); gmaxId = s.id; }
         const float* L = s.audio.getReadPointer(0); const float* R = s.audio.getReadPointer(s.audio.getNumChannels() > 1 ? 1 : 0);
@@ -1709,303 +1818,734 @@ private:
         {
             const juce::int64 a = juce::jlimit<juce::int64>(0, n - 1, v0 + (v1 - v0) * x / w), b = juce::jlimit<juce::int64>(a + 1, n, v0 + (v1 - v0) * (x + 1) / w);
             const juce::int64 step = std::max<juce::int64>(1, (b - a) / 64);
-            float mn = 0.f, mxv = 0.f;
-            for (juce::int64 i = a; i < b; i += step) { const float v = 0.5f * (L[i] + R[i]) / gmax; mn = std::min(mn, v); mxv = std::max(mxv, v); }
-            peaks.push_back({ mn, mxv });
+            float m = 0.f;
+            for (juce::int64 i = a; i < b; i += step) m = std::max(m, std::abs(0.5f * (L[i] + R[i]) / gmax));
+            peaks.push_back(m);
         }
     }
-
-    void drawDisplay(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
+    void drawSource(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
     {
-        auto d = display.toFloat().reduced(1.f);
-        g.setColour(ui::well.withAlpha(0.7f)); g.fillRoundedRectangle(d.reduced(6.f), 8.f);
-        if (hover) { g.setColour(ui::amber.withAlpha(0.8f)); g.drawRoundedRectangle(d.reduced(4.f), 10.f, 1.5f); }
-        if (proc.isBusy())
-        {
-            const bool loading = proc.getStatus().startsWith("LOADING") || proc.getStatus().startsWith("OPENING");
-            const auto bar = juce::Rectangle<float>(d.getX() + 120, d.getCentreY() + 8, d.getWidth() - 240, 6);
-            g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillRoundedRectangle(bar, 3.f);
-            g.setColour(ui::amber); g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * (loading ? 0.5f : juce::jlimit(0.f, 1.f, proc.getProgress()))), 3.f);
-            g.setFont(ui::font(13.f, true, 0.3f));
-            g.drawText(loading ? juce::String("LOADING") : "LEARNING THE SOUNDS   " + juce::String(juce::roundToInt(100.f * proc.getProgress())) + "%", d.withTrimmedBottom(40).toNearestInt(), juce::Justification::centred);
-            g.setColour(ui::dim); g.setFont(ui::font(9.5f, false, 0.05f));
-            g.drawText(proc.getStatus(), d.withTrimmedTop(84).reduced(24, 0).toNearestInt(), juce::Justification::centred);
-            return;
-        }
         auto src = proc.getSource();
-        if (!src)
+        if (!src) { drawDropHere(g); return; }
+        const auto C = content;
+        fixView(*src); computePeaks(*src);
+        const juce::int64 sa = proc.selStart(), sb = proc.selEnd(), n = src->length();
+        const bool mine = res && res->sourceId == src->id;
+        // header: the file, its length, the tempo
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        const auto fname = proc.getLoopFile().getFileName();
+        const float fw = std::min(430.f, ui::textW(ui::inter(30.f, 300), fname));
+        g.drawText(fname, juce::Rectangle<float>(C.getX(), C.getY(), fw, 38.f), juce::Justification::centredLeft, true);
+        g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+        g.drawText(clock((double) n / src->sr) + "  .  " + juce::String(src->sr / 1000.0, 1).trimCharactersAtEnd("0").trimCharactersAtEnd(".") + " khz",
+                   juce::Rectangle<float>(C.getX() + fw + 14.f, C.getY() + 12.f, 200.f, 18.f), juce::Justification::centredLeft);
+        if (mine)
         {
-            const auto st = proc.getStatus();
-            g.setColour(ui::amber.withAlpha(0.9f)); g.setFont(ui::font(14.f, true, 0.3f));
-            g.drawText(st.startsWith("COULD NOT") ? st : juce::String("DROP A DRUM LOOP HERE"), d.withTrimmedBottom(16).toNearestInt(), juce::Justification::centred);
-            g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.3f));
-            g.drawText("DRAG A FILE FROM THE POOL / MEDIABAY / EXPLORER  -  OR CLICK TO BROWSE", d.withTrimmedTop(36).toNearestInt(), juce::Justification::centred);
-            return;
+            g.setColour(ui::white); g.setFont(ui::mono(20.f, true));
+            g.drawText(juce::String(res->bpm, 1), juce::Rectangle<float>(C.getRight() - 90.f, C.getY() + 6.f, 90.f, 26.f), juce::Justification::centredRight);
+            g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+            g.drawText("tempo", juce::Rectangle<float>(C.getRight() - 150.f, C.getY() + 10.f, 54.f, 20.f), juce::Justification::centredRight);
         }
-        fixView(*src);
-        computePeaks(*src);
-        const juce::int64 sa = proc.selStart(), sb = proc.selEnd();
-        const float x0 = wx0(), w = ww(), mid = waveMid(), hh = waveH;
-        const float xs = juce::jlimit(x0, x0 + w, xOf(sa)), xe = juce::jlimit(x0, x0 + w, xOf(sb));
-
-        // play / stop
+        // the wave: white inside the part, dark outside
+        const float mid = waveMid(), hh = waveH;
+        const float xs = juce::jlimit(wx0(), wx0() + ww(), xOf(sa)), xe = juce::jlimit(wx0(), wx0() + ww(), xOf(sb));
+        for (size_t i = 0; i < peaks.size(); ++i)
         {
-            const auto pr = playRect().toFloat();
-            const bool on = proc.isSourcePlaying();
-            g.setColour(on ? ui::amber : ui::text.withAlpha(0.85f));
-            g.drawRoundedRectangle(pr.reduced(0.5f), 5.f, 1.f);
-            if (on) g.fillRect(pr.withSizeKeepingCentre(8.f, 8.f));
-            else { juce::Path t; const auto c = pr.getCentre(); t.addTriangle(c.x - 3.5f, c.y - 5.f, c.x - 3.5f, c.y + 5.f, c.x + 5.f, c.y); g.fillPath(t); }
+            const float x = wx0() + i * 4.f + 2.f;
+            const float h = std::max(1.5f, peaks[i] * hh);
+            g.setColour(x >= xs && x <= xe ? ui::white : ui::dark);
+            g.fillRoundedRectangle(x - 1.5f, mid - h, 3.f, 2.f * h, 1.5f);
         }
-        // snap: hollow circle = off, filled = on
-        {
-            const auto sr = snapRect().toFloat();
-            const bool on = proc.snap.load();
-            const auto c = juce::Rectangle<float>(sr.getX() + 4.f, sr.getCentreY() - 5.5f, 11.f, 11.f);
-            g.setColour(on ? ui::amber : ui::dim);
-            g.drawEllipse(c, 1.4f);
-            if (on) g.fillEllipse(c.reduced(2.6f));
-            g.setFont(ui::font(9.5f, true, 0.25f));
-            g.drawText("SNAP", sr.withTrimmedLeft(21).toNearestInt(), juce::Justification::centredLeft);
-        }
-        // selection text
-        {
-            const double secs = (double) (sb - sa) / src->sr;
-            juce::String t = "SELECTION   " + clock((double) sa / src->sr) + "  -  " + clock((double) sb / src->sr) + "    " + juce::String(secs, 2) + " s";
-            if (res && res->sourceId == src->id && res->bpm > 0) t << "   ~" << juce::String(secs * res->bpm / 240.0, 2) << " BARS @ " << juce::String(res->bpm, 1);
-            if (v0 > 0 || v1 < src->length()) t << "    ZOOM";
-            g.setColour(ui::dim.brighter(0.25f)); g.setFont(ui::font(9.5f, true, 0.18f));
-            g.drawText(t, juce::Rectangle<float>(x0 + 106.f, (float) display.getY() + 11.f, 560.f, 22.f).toNearestInt(), juce::Justification::centredLeft);
-        }
-        // wave: bright inside the selection, dim outside
-        {
-            juce::Path wav; wav.startNewSubPath(x0, mid);
-            for (int x = 0; x < (int) peaks.size(); ++x) wav.lineTo(x0 + (float) x, mid - peaks[(size_t) x].second * hh);
-            for (int x = (int) peaks.size() - 1; x >= 0; --x) wav.lineTo(x0 + (float) x, mid - peaks[(size_t) x].first * hh);
-            wav.closeSubPath();
-            g.setColour(ui::faint.brighter(0.15f)); g.fillPath(wav);
-            {
-                juce::Graphics::ScopedSaveState ss(g);
-                g.reduceClipRegion(juce::Rectangle<float>(xs, mid - hh - 4.f, std::max(0.f, xe - xs), 2.f * hh + 8.f).toNearestInt());
-                g.setColour(ui::amber.withAlpha(0.18f)); g.strokePath(wav, juce::PathStrokeType(3.f));
-                g.setColour(ui::amber); g.fillPath(wav);
-            }
-        }
-        // hits of the analysed part
-        const juce::int64 n = src->length();
-        if (res && res->sourceId == src->id)
-            for (auto& h : res->hits)
-            {
-                const juce::int64 t = (juce::int64) h.time + res->regionStart;
-                if (t < v0 || t > v1) continue;
-                const float x = xOf(t);
-                const auto c = ui::padColour(res->pads[(size_t) h.pad].name);
-                g.setColour(c.withAlpha(h.pad == selected ? 1.f : 0.55f));
-                g.fillRoundedRectangle(x - 1.f, mid + hh + 5.f, 2.f, h.pad == selected ? 10.f : 7.f, 1.f);
-            }
-        // START / END handles (flags like the sound editor)
+        // the part: orange edges
         for (int k = 0; k < 2; ++k)
         {
             const juce::int64 at = k == 0 ? sa : sb;
             if (at < v0 || at > v1) continue;
             const float x = xOf(at);
-            g.setColour(ui::text);
-            g.fillRect(x - 0.75f, mid - hh - 2.f, 1.5f, 2.f * hh + 4.f);
-            juce::Path f;
-            const float fy = mid - hh - 2.f;
-            if (k == 0) f.addTriangle(x, fy, x + 9.f, fy + 5.f, x, fy + 10.f);
-            else        f.addTriangle(x, fy, x - 9.f, fy + 5.f, x, fy + 10.f);
-            g.fillPath(f);
+            g.setColour(ui::orange); g.fillRect(x - 1.f, mid - hh - 8.f, 2.f, 2.f * hh + 16.f);
+            g.fillEllipse(juce::Rectangle<float>(9.f, 9.f).withCentre({ x, mid - hh - 8.f }));
+            g.setFont(ui::mono(10.f));
+            g.drawText(clock((double) at / src->sr), juce::Rectangle<float>(k == 0 ? x + 4.f : x - 84.f, mid + hh + 10.f, 80.f, 12.f), k == 0 ? juce::Justification::centredLeft : juce::Justification::centredRight);
         }
+        if (xe > xs) { g.setColour(ui::orange.withAlpha(0.035f)); g.fillRect(juce::Rectangle<float>(xs, mid - hh - 8.f, xe - xs, 2.f * hh + 16.f)); }
+        // the hits that were found (the selected pad's in orange)
+        if (mine)
+            for (auto& h : res->hits)
+            {
+                const juce::int64 t = (juce::int64) h.time + res->regionStart;
+                if (t < v0 || t > v1) continue;
+                const float x = xOf(t);
+                g.setColour(h.pad == selected ? ui::orange : ui::faint);
+                g.fillRoundedRectangle(x - 1.f, mid + hh + 26.f, 2.f, h.pad == selected ? 9.f : 5.f, 1.f);
+            }
         // the cursor
         {
             const double p = proc.sourcePos();
-            if (p >= (double) v0 && p <= (double) v1 && (proc.isSourcePlaying() || (p > (double) sa && p < (double) sb)))
-            {
-                const float x = xOf((juce::int64) p);
-                g.setColour(juce::Colours::white.withAlpha(proc.isSourcePlaying() ? 0.9f : 0.4f));
-                g.fillRect(x - 0.5f, mid - hh - 4.f, 1.f, 2.f * hh + 8.f);
-            }
+            if (p >= (double) v0 && p <= (double) v1 && proc.isSourcePlaying()) { g.setColour(ui::white); g.fillRect(xOf((juce::int64) p) - 0.5f, mid - hh - 4.f, 1.f, 2.f * hh + 8.f); }
         }
-        juce::String info;
-        if (res && res->sourceId == src->id)
+        // bottom row: listen, snap, the part's length, analyse
+        const float y = C.getBottom() - 46.f;
+        const auto pr = juce::Rectangle<float>(C.getX(), y, 28.f, 28.f);
+        g.setColour(hot(pr) ? ui::chipOn : ui::chip2); g.fillEllipse(pr);
+        g.setColour(proc.isSourcePlaying() ? ui::orange : ui::white);
+        if (proc.isSourcePlaying()) g.fillRect(pr.withSizeKeepingCentre(8.f, 8.f));
+        else { juce::Path t; const auto c = pr.getCentre(); t.addTriangle(c.x - 3.f, c.y - 5.f, c.x - 3.f, c.y + 5.f, c.x + 5.f, c.y); g.fillPath(t); }
+        zone(pr, [this] { proc.playSource(!proc.isSourcePlaying()); });
         {
-            const double hb = proc.getHostBpm();
-            info = juce::String(res->bpm, 2) + " BPM   |   " + juce::String(res->sr / 1000.0, 1) + " kHz   |   " + juce::String((int) res->hits.size())
-                 + " HITS   |   " + (proc.midiMode() != ds::kExact ? juce::String("MIDI FOLLOWS THE PROJECT TEMPO")
-                                    : "MIDI @ " + (hb > 0 ? "HOST " + juce::String(hb, 2) : juce::String(proc.midiBpm(), 2) + " BPM"));
-            if (!proc.selectionAnalysed()) info << "   |   SELECTION CHANGED: PRESS ANALYSE";
+            const bool on = proc.snap.load();
+            const auto sr = juce::Rectangle<float>(pr.getRight() + 14.f, y + 2.f, 110.f, 24.f);
+            g.setColour(on ? ui::white : ui::dim); g.drawEllipse(juce::Rectangle<float>(10.f, 10.f).withCentre({ sr.getX() + 8.f, sr.getCentreY() }), 1.2f);
+            if (on) g.fillEllipse(juce::Rectangle<float>(5.f, 5.f).withCentre({ sr.getX() + 8.f, sr.getCentreY() }));
+            g.setFont(ui::inter(11.f)); g.setColour(ui::dim);
+            g.drawText("snap to hits", sr.withTrimmedLeft(20.f), juce::Justification::centredLeft);
+            zone(sr, [this] { proc.snap = !proc.snap.load(); });
         }
-        else info = "FILE  " + clock((double) n / src->sr) + "   |   " + juce::String(src->sr / 1000.0, 1) + " kHz   |   SELECT THE PART (DRAG THE FLAGS), THEN ANALYSE";
-        g.setColour(ui::dim.brighter(0.2f)); g.setFont(ui::font(9.f, true, 0.2f));
-        g.drawText(info, juce::Rectangle<float>(x0, d.getBottom() - 22, w, 12).toNearestInt(), juce::Justification::centredLeft);
-        g.drawText(proc.displayName(), juce::Rectangle<float>(x0, d.getBottom() - 22, w, 12).toNearestInt(), juce::Justification::centredRight);
+        {
+            const double secs = (double) (sb - sa) / src->sr;
+            juce::String t = juce::String(secs, 2) + " s";
+            if (mine && res->bpm > 0) t << "  .  " << juce::String(secs * res->bpm / 240.0, 1) << " bars";
+            if (v0 > 0 || v1 < n) t << "  .  zoom (wheel)";
+            g.setColour(ui::dim2); g.setFont(ui::mono(11.f));
+            g.drawText(t, juce::Rectangle<float>(pr.getRight() + 140.f, y + 7.f, 260.f, 14.f), juce::Justification::centredLeft);
+        }
+        const bool done = proc.selectionAnalysed();
+        const auto ab = chip(g, C.getRight(), y, done ? "re-analyse" : "analyse this part", done ? cNormal : cAccent, [this] { proc.reanalyse(); }, 30.f, 12.f, true);
+        chip(g, ab.getX() - 10.f, y, "load another loop", cNormal, [this] { chooseLoop(); }, 30.f, 12.f, true);
+        if (mine && !done) { g.setColour(ui::orange); g.setFont(ui::mono(10.f)); g.drawText("the part changed: analyse it", juce::Rectangle<float>(ab.getX() - 400.f, y - 18.f, 400.f + ab.getWidth(), 12.f), juce::Justification::centredRight); }
     }
 
-    void drawPads(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
+    // ---------------------------------------------------------------- page: PATTERN (one bar, the MIDI you will drag)
+    juce::Rectangle<float> tightRect() const { return { content.getRight() - 160.f, content.getBottom() - 32.f, 120.f, 16.f }; }
+    void setTight(float x)
     {
-        for (int i = 0; i < ds::kPads; ++i)
+        const auto r = tightRect();
+        if (auto* p = proc.apvts.getParameter("quant")) p->setValueNotifyingHost(juce::jlimit(0.f, 1.f, (x - r.getX()) / r.getWidth()));
+    }
+    void drawPattern(juce::Graphics& g, const std::shared_ptr<ds::Result>& res, double now)
+    {
+        if (!res) { drawDropHere(g); return; }
+        const auto C = content;
+        const int nb = bars(*res);
+        patBar = juce::jlimit(0, nb - 1, patBar);
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        g.drawText("Pattern", juce::Rectangle<float>(C.getX(), C.getY(), 130.f, 38.f), juce::Justification::centredLeft);
+        // bar ‹ n of N ›
         {
-            const auto r = padRect(i).toFloat();
-            const bool has = res && res->pads[(size_t) i].valid;
-            const auto c = has ? ui::padColour(res->pads[(size_t) i].name) : ui::faint;
-            const float lv = levels[(size_t) i];
-            if (skin.padOff.isValid())
+            const float x = C.getX() + 140.f, y = C.getY() + 12.f;
+            const auto l = juce::Rectangle<float>(x, y - 2.f, 18.f, 20.f), r = juce::Rectangle<float>(x + 118.f, y - 2.f, 18.f, 20.f);
+            g.setFont(ui::mono(13.f)); g.setColour(patBar > 0 ? ui::white : ui::line); g.drawText(juce::CharPointer_UTF8("\xe2\x80\xb9"), l, juce::Justification::centred);
+            g.setColour(patBar + 1 < nb ? ui::white : ui::line); g.drawText(juce::CharPointer_UTF8("\xe2\x80\xba"), r, juce::Justification::centred);
+            g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+            g.drawText("bar " + juce::String(patBar + 1) + " of " + juce::String(nb), juce::Rectangle<float>(x + 18.f, y, 100.f, 16.f), juce::Justification::centred);
+            zone(l, [this] { patBar = std::max(0, patBar - 1); });
+            zone(r, [this, nb] { patBar = std::min(nb - 1, patBar + 1); });
+        }
+        const int mm = proc.midiMode();
+        segmented(g, juce::Rectangle<float>(C.getRight() - 430.f, C.getY() + 4.f, 430.f, 32.f),
+                  { "exact . as played", "sync . follows the song tempo", "tight . on the grid" }, mm == ds::kExact ? 0 : mm == ds::kSync ? 1 : 2,
+                  [this](int i) { proc.setMidiMode(i == 0 ? ds::kExact : i == 1 ? ds::kSync : ds::kTight); });
+        // the dots slide to where the MIDI will put them (tight: as far as "how tight")
+        const float q = proc.apvts.getRawParameterValue("quant")->load();
+        const float target = mm == ds::kTight ? q : 0.f;
+        tightShown += (target - tightShown) * 0.25f;
+        if (std::abs(target - tightShown) < 0.002f) tightShown = target;
+        drawLanes(g, *res, juce::Rectangle<float>(C.getX() + 26.f, C.getY() + 56.f, C.getWidth() - 26.f, 176.f), now, true);
+        const float y = C.getBottom() - 32.f;
+        g.setColour(ui::dim); g.setFont(ui::inter(11.f));
+        g.drawText(juce::CharPointer_UTF8("\xe2\x97\x8b = where the grid would put it   .   size = how hard"), juce::Rectangle<float>(C.getX(), y, 400.f, 16.f), juce::Justification::centredLeft);
+        const auto tr = tightRect();
+        g.setColour(mm == ds::kTight ? ui::dim : ui::line); g.drawText("how tight", juce::Rectangle<float>(tr.getX() - 80.f, y, 72.f, 16.f), juce::Justification::centredRight);
+        g.setColour(juce::Colour(0xff232325)); g.fillRoundedRectangle(tr.withSizeKeepingCentre(tr.getWidth(), 4.f), 2.f);
+        g.setColour(mm == ds::kTight ? ui::white : ui::dark); g.fillRoundedRectangle(tr.withSizeKeepingCentre(tr.getWidth(), 4.f).withWidth(tr.getWidth() * q), 2.f);
+        g.fillEllipse(juce::Rectangle<float>(12.f, 12.f).withCentre({ tr.getX() + tr.getWidth() * q, tr.getCentreY() }));
+        g.setFont(ui::mono(11.f)); g.setColour(ui::white);
+        g.drawText(juce::String(juce::roundToInt(q * 100)), juce::Rectangle<float>(tr.getRight() + 8.f, y, 32.f, 16.f), juce::Justification::centredLeft);
+    }
+
+    // ---------------------------------------------------------------- page: PAD (where its sound comes from, the match)
+    void drawPad(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
+    {
+        if (!res) { drawDropHere(g); return; }
+        const auto C = content;
+        const auto& pd = res->pads[(size_t) selected];
+        if (!pd.valid) { drawEmptyPad(g); return; }
+        const int src = proc.padSource(selected);
+        const bool hasC = pd.user.getNumSamples() > 0;
+        const auto md = proc.getMatch(selected);
+        const bool matched = hasC && md.on;
+        // header
+        ui::glyph(g, pd.name, juce::Rectangle<float>(16.f, 16.f).withCentre({ C.getX() + 8.f, C.getY() + 20.f }), ui::white);
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        const auto nm = juce::String(pd.name.substring(0, 1)) + pd.name.substring(1).toLowerCase();
+        const float nw = ui::textW(ui::inter(30.f, 300), nm);
+        g.drawText(nm, juce::Rectangle<float>(C.getX() + 28.f, C.getY(), nw + 4.f, 38.f), juce::Justification::centredLeft);
+        g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+        g.drawText(juce::MidiMessage::getMidiNoteName(pd.note, true, true, 3).toLowerCase() + "  .  " + juce::String(pd.hits) + " hits",
+                   juce::Rectangle<float>(C.getX() + 40.f + nw, C.getY() + 12.f, 160.f, 18.f), juce::Justification::centredLeft);
+        // right of the header: ···, lock, the match number
+        float hx = C.getRight();
+        const auto more = chip(g, hx, C.getY() + 6.f, juce::CharPointer_UTF8("\xc2\xb7\xc2\xb7\xc2\xb7"), cNormal, [this] { setPage(pMore); }, 26.f, 13.f, true);
+        hx = more.getX() - 10.f;
+        {
+            const bool lk = proc.padLocked(selected);
+            const auto lr = juce::Rectangle<float>(hx - 26.f, C.getY() + 6.f, 26.f, 26.f);
+            g.setColour(hot(lr) ? ui::chipOn : ui::chip2); g.fillEllipse(lr);
+            ui::lockIcon(g, lr.reduced(6.f), lk ? ui::orange : ui::soft, lk);
+            zone(lr, [this] { proc.setPadLocked(selected, !proc.padLocked(selected)); toast(proc.padLocked(selected) ? "locked: build my kit keeps this pad" : "unlocked: build my kit may change this pad"); });
+            hx = lr.getX() - 14.f;
+        }
+        if (matched)
+        {
+            const juce::String big = juce::String(juce::roundToInt(md.before)) + juce::String(juce::CharPointer_UTF8(" \xe2\x86\x92 [")) + juce::String(juce::roundToInt(md.after)) + "]";
+            const float bw = ui::textW(ui::mono(22.f, true), big);
+            g.setColour(ui::white); g.setFont(ui::mono(22.f, true));
+            g.drawText(big, juce::Rectangle<float>(hx - bw, C.getY() + 4.f, bw, 30.f), juce::Justification::centredRight);
+            g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+            g.drawText("like the loop", juce::Rectangle<float>(hx - bw - 130.f, C.getY() + 10.f, 122.f, 20.f), juce::Justification::centredRight);
+        }
+        // the three sources: the loop's (learned), the best real hit, yours
+        const float cw = (C.getWidth() - 20.f) / 3.f, cy = C.getY() + 48.f, ch = 62.f;
+        for (int k = 0; k < 3; ++k)
+        {
+            const auto r = juce::Rectangle<float>(C.getX() + k * (cw + 10.f), cy, cw, ch);
+            const bool on = src == k && (k < 2 || hasC);
+            g.setColour(on ? ui::cardOn : ui::card); g.fillRoundedRectangle(r, 10.f);
+            if (on) { g.setColour(ui::white); g.drawRoundedRectangle(r.reduced(0.5f), 10.f, 1.f); }
+            else if (hot(r)) { g.setColour(ui::dark); g.drawRoundedRectangle(r.reduced(0.5f), 10.f, 1.f); }
+            juce::String kind, title, act;
+            if (k == 0) { kind = "the loop's  .  from " + juce::String(pd.hits) + " hits"; title = "learned sound"; }
+            if (k == 1) { kind = "best real hit"; title = "cleanest hit, others removed"; }
+            if (k == 2) { kind = hasC ? (on ? "yours  .  playing" : "yours") : "yours"; title = hasC ? pd.userName + (pd.layered() ? " + " + pd.layerName : juce::String()) : juce::String("choose from your samples"); }
+            if (on && k < 2) kind << "  .  playing";
+            const int kk = k;
+            zone(r, [this, kk, hasC] { if (kk == 2 && !hasC) { setPage(pSamples); return; } setSource(selected, kk); });
+            g.setColour(ui::dim); g.setFont(ui::inter(11.f));
+            g.drawText(kind, juce::Rectangle<float>(r.getX() + 12.f, r.getY() + 8.f, r.getWidth() - 24.f, 14.f), juce::Justification::centredLeft, true);
+            g.setColour(ui::white); g.setFont(ui::inter(13.f, 500));
+            const auto tr = juce::Rectangle<float>(r.getX() + 12.f, r.getY() + 23.f, r.getWidth() - 24.f, 18.f);
+            g.drawText(title, tr, juce::Justification::centredLeft, true);
+            if (k == 2 && hasC) zone(tr.withWidth(std::min(tr.getWidth(), ui::textW(ui::inter(13.f, 500), title) + 4.f)), [this] { setPage(pSamples); });
+            // small actions under the title
+            float ax = r.getX() + 12.f; const float ay = r.getY() + 42.f;
+            auto act2 = [&](const juce::String& t, std::function<void()> click, std::function<void()> drag = {})
             {
-                g.setOpacity(1.f);
-                g.drawImage(skin.padOff, r, juce::RectanglePlacement::stretchToFit);
-                if (has)
+                const auto f = ui::mono(10.f);
+                const auto ar = juce::Rectangle<float>(ax, ay, ui::textW(f, t) + 2.f, 14.f);
+                g.setColour(hot(ar) ? ui::white : ui::dim); g.setFont(f); g.drawText(t, ar, juce::Justification::centredLeft);
+                zone(ar.expanded(2.f, 3.f), std::move(click), std::move(drag));
+                ax = ar.getRight() + 12.f;
+            };
+            if (k == 0) act2("show its hits on the loop", [this] { setPage(pSource); });
+            if (k == 1) act2(juce::CharPointer_UTF8("\xe2\x96\xb6 hear it"), [this] { setSource(selected, 1); });
+            if (k == 2 && hasC)
+            {
+                const auto path = pd.userPath;
+                act2("open folder", [path] { juce::File f(path); if (f.existsAsFile()) f.revealToUser(); });
+                act2("drag original", [] {}, [this, path] { juce::File f(path); if (f.existsAsFile()) juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, this); });
+                act2("change", [this] { setPage(pSamples); });
+            }
+            if (k == 2 && !hasC) act2("or drop a file on the pad", [this] { setPage(pSamples); });
+        }
+        // right of the sound editor: raw / matched, the shape, the layer
+        const float rx = C.getRight() - 262.f, ry = C.getY() + 128.f;
+        if (matched)
+        {
+            const float amt = proc.apvts.getRawParameterValue("mamt" + juce::String(selected))->load();
+            segmented(g, juce::Rectangle<float>(rx, ry, 262.f, 30.f), { "raw", "matched" }, amt > 0.5f ? 1 : 0, [this, md](int i) { setMatched(i == 1, md); });
+        }
+        else if (hasC)
+        {
+            const auto mr = chip(g, rx, ry, proc.isMatching() ? "matching ..." : "match to the loop", cAccent, [this] { if (!proc.isMatching()) { proc.startMatch(selected); toast("matching to the loop ..."); } }, 30.f, 12.f);
+            juce::ignoreUnused(mr);
+        }
+        else { g.setColour(ui::dim); g.setFont(ui::inter(11.f)); g.drawFittedText("the loop's own sound. choose a sample of yours and it is matched to this.", juce::Rectangle<float>(rx, ry, 262.f, 30.f).toNearestInt(), juce::Justification::topLeft, 2); }
+        {
+            float x = rx; const float y = ry + 40.f;
+            const auto f = ui::mono(10.f);
+            const juce::String t1 = "drag edges, fades, gain  .  ";
+            g.setColour(ui::faint); g.setFont(f); g.drawText(t1, juce::Rectangle<float>(x, y, ui::textW(f, t1) + 2.f, 14.f), juce::Justification::centredLeft);
+            x += ui::textW(f, t1);
+            const auto rr = juce::Rectangle<float>(x, y, ui::textW(f, "reset") + 2.f, 14.f);
+            g.setColour(hot(rr) ? ui::white : ui::dim); g.drawText("reset", rr, juce::Justification::centredLeft);
+            zone(rr.expanded(2.f), [this] { shape.resetAll(); toast("the shape is back as it was"); });
+        }
+        if (hasC)
+        {
+            const float y = ry + 62.f;
+            g.setFont(ui::inter(11.f));
+            if (pd.layered())
+            {
+                const juce::String a = "+ layer ";
+                g.setColour(ui::dim); g.drawText(a, juce::Rectangle<float>(rx, y, 60.f, 16.f), juce::Justification::centredLeft);
+                const float aw = ui::textW(ui::inter(11.f), a);
+                g.setColour(ui::white); g.drawText(pd.layerName, juce::Rectangle<float>(rx + aw, y, 262.f - aw, 16.f), juce::Justification::centredLeft, true);
+                float x = rx;
+                for (auto [t, id] : { std::pair<const char*, int> { "change", 1 }, { "remove", 2 } })
                 {
-                    const auto& lit = skin.litPad(c);
-                    if (lit.isValid()) { g.setOpacity(std::min(1.f, (i == selected ? 0.85f : 0.45f) + 0.4f * lv)); g.drawImage(lit, r, juce::RectanglePlacement::stretchToFit); g.setOpacity(1.f); }
+                    const auto r = juce::Rectangle<float>(x, y + 18.f, ui::textW(ui::inter(11.f), t) + 2.f, 16.f);
+                    g.setColour(hot(r) ? ui::orange : ui::white); g.drawText(t, r, juce::Justification::centredLeft);
+                    zone(r.expanded(2.f), [this, id] { if (id == 1) { proc.startLayer(selected); toast("looking for another layer ..."); } else proc.removeLayer(selected); });
+                    x = r.getRight() + 12.f;
                 }
             }
             else
             {
-                g.setColour(juce::Colour(0xff1c1e23)); g.fillRoundedRectangle(r, 10.f);
-                if (has) { g.setGradientFill(juce::ColourGradient(c.withAlpha(i == selected ? 0.28f : 0.14f), 0, r.getY(), juce::Colours::transparentBlack, 0, r.getBottom(), false)); g.fillRoundedRectangle(r, 10.f); }
-                g.setColour(juce::Colour(0xff0c0d10)); g.drawRoundedRectangle(r.reduced(0.5f), 10.f, 1.f);
-            }
-            if (has && lv > 0.02f) { g.setColour(c.withAlpha(0.22f * lv)); g.fillRoundedRectangle(r.reduced(4), 9.f); }
-            if (i == selected) { g.setColour(c.withAlpha(has ? 0.9f : 0.4f)); g.drawRoundedRectangle(r.reduced(1.f), 10.f, 1.5f); }
-            if (has) { g.setColour(c.withAlpha(0.25f)); g.fillRoundedRectangle(r.getX() + 12, r.getY() + 8, 48, 7, 3.f); }
-            g.setColour(has ? c.withAlpha(0.6f + 0.4f * lv) : juce::Colour(0xff2c2f36));
-            g.fillRoundedRectangle(r.getX() + 14, r.getY() + 10, 44, 3, 1.5f);
-            g.setColour(has ? ui::text : ui::faint); g.setFont(ui::font(13.f, true, 0.2f));
-            g.drawText(has ? res->pads[(size_t) i].name : juce::String("-"), juce::Rectangle<float>(r.getX() + 14, r.getBottom() - 42, 90, 16).toNearestInt(), juce::Justification::centredLeft);
-            if (!has) continue;
-            if (proc.padIsSilent(i))
-            {
-                g.setColour(c.withAlpha(0.8f)); g.setFont(ui::font(8.5f, true, 0.15f));
-                g.drawText("NO SOUND - CLICK TO ADD", juce::Rectangle<float>(r.getX() + 14, r.getY() + 22, r.getWidth() - 20, 12).toNearestInt(), juce::Justification::centredLeft);
-            }
-            g.setColour(ui::dim); g.setFont(ui::font(9.5f, true, 0.1f));
-            g.drawText(juce::MidiMessage::getMidiNoteName(res->pads[(size_t) i].note, true, true, 3), juce::Rectangle<float>(r.getX() + 14, r.getBottom() - 24, 60, 12).toNearestInt(), juce::Justification::centredLeft);
-            if (padHasSugg(i))
-            {   // < 2/30 >
-                const auto sr = suggRect(i).toFloat();
-                const int n = proc.suggestionCount(i), k = proc.suggestionIndex(i);
-                g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(sr, 5.f);
-                g.setColour(ui::panelEdge.brighter(0.2f)); g.drawRoundedRectangle(sr.reduced(0.5f), 5.f, 1.f);
-                g.setFont(ui::font(11.f, true)); g.setColour(k > 0 ? ui::text : ui::faint);
-                g.drawText("<", sr.withWidth(20.f).toNearestInt(), juce::Justification::centred);
-                g.setColour(k + 1 < n ? ui::text : ui::faint);
-                g.drawText(">", sr.withTrimmedLeft(sr.getWidth() - 20.f).toNearestInt(), juce::Justification::centred);
-                g.setFont(ui::font(9.f, true)); g.setColour(ui::dim);
-                g.drawText(k >= 0 ? juce::String(k + 1) + "/" + juce::String(n) : "-/" + juce::String(n), sr.reduced(18.f, 0.f).toNearestInt(), juce::Justification::centred);
-            }
-            if (padHasSugg(i) || proc.padLocked(i))
-            {   // the lock: shut = BUILD MY KIT keeps this pad
-                const auto lr = lockRect(i).toFloat();
-                const bool on = proc.padLocked(i);
-                g.setColour(on ? ui::amber : juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(lr, 4.f);
-                g.setColour(on ? ui::amber : ui::panelEdge.brighter(0.2f)); g.drawRoundedRectangle(lr.reduced(0.5f), 4.f, 1.f);
-                const auto body = juce::Rectangle<float>(lr.getCentreX() - 4.5f, lr.getCentreY() - 1.f, 9.f, 6.5f);
-                const auto ink = on ? juce::Colour(0xff1a1205) : ui::dim;
-                g.setColour(ink); g.fillRoundedRectangle(body, 1.2f);
-                juce::Path sh; const float cx = lr.getCentreX(), top = lr.getCentreY() - 5.5f;
-                sh.startNewSubPath(cx - 3.f, body.getY());
-                sh.lineTo(cx - 3.f, top + 2.5f); sh.quadraticTo(cx - 3.f, top, cx, top); sh.quadraticTo(cx + 3.f, top, cx + 3.f, top + 2.5f);
-                sh.lineTo(cx + 3.f, on ? body.getY() : top + 3.5f);
-                g.strokePath(sh, juce::PathStrokeType(1.4f));
-            }
-            const auto ab = abRect(i).toFloat();
-            const int src = proc.padSource(i), nsrc = padHasC(i) ? 3 : 2;
-            g.setColour(juce::Colours::black.withAlpha(0.35f)); g.fillRoundedRectangle(ab, 5.f);
-            g.setColour(ui::panelEdge.brighter(0.2f)); g.drawRoundedRectangle(ab.reduced(0.5f), 5.f, 1.f);
-            g.setFont(ui::font(10.f, true));
-            const float cw = ab.getWidth() / nsrc;
-            for (int k = 0; k < nsrc; ++k)
-            {
-                g.setColour(src == k ? ui::amber : ui::dim);
-                g.drawText(juce::String::charToString((juce::juce_wchar) ('A' + k)), juce::Rectangle<float>(ab.getX() + k * cw, ab.getY(), cw, ab.getHeight()).toNearestInt(), juce::Justification::centred);
-                if (k > 0) { g.setColour(ui::panelEdge.brighter(0.2f)); g.drawVerticalLine((int) (ab.getX() + k * cw), ab.getY() + 4, ab.getBottom() - 4); }
+                const auto r = juce::Rectangle<float>(rx, y, ui::textW(ui::inter(11.f), "+ add a layer (a second sample of yours)") + 2.f, 16.f);
+                g.setColour(hot(r) ? ui::white : ui::dim); g.drawText("+ add a layer (a second sample of yours)", r, juce::Justification::centredLeft);
+                zone(r.expanded(2.f), [this] { if (!proc.isMatching()) { proc.startLayer(selected); toast("looking for a second sample ..."); } });
             }
         }
-        if (hoverPad >= 0 && hoverPad < ds::kPads)                        // dropping a sample here: it becomes "C"
+        // bottom row: the parts of the match, then the suggestions
+        const float by = C.getBottom() - 30.f;
+        float x = C.getX();
+        if (matched)
         {
-            const auto r = padRect(hoverPad).toFloat();
-            g.setColour(ui::amber.withAlpha(0.15f)); g.fillRoundedRectangle(r, 10.f);
-            g.setColour(ui::amber); g.drawRoundedRectangle(r.reduced(1.f), 10.f, 2.f);
-            g.setFont(ui::font(10.f, true, 0.25f)); g.drawText(padHasSound(hoverPad) ? "DROP = YOUR SAMPLE (C)" : "DROP = NEW SOUND", r.withTrimmedTop(r.getHeight() * 0.35f).withHeight(14.f).toNearestInt(), juce::Justification::centred);
+            bool glide = false; for (float v : md.glide) glide = glide || std::abs(v) > 0.05f;
+            struct P { const char* n; int part; bool can, on; };
+            const P parts[] = { { "eq", 0, true, md.useEq }, { "shape", 1, true, md.useShape }, { "pitch", 3, true, md.usePitch }, { "length", 4, md.en < 1999.f, md.useLen },
+                                { "room", 2, md.roomMix > 0, md.useRoom }, { "drop", 5, glide, md.useGlide }, { "drive", 6, md.driveDb > 0.05f, md.useDrive },
+                                { "width", 7, std::abs(md.widthDb) > 0.05f, md.useWidth } };
+            for (auto& p : parts)
+            {
+                const int part = p.part; const bool on = p.on;
+                const auto r = chip(g, x, by, p.n, !p.can ? cDashed : on ? cOn : cOutline, p.can ? std::function<void()>([this, part, on] { proc.setMatchPart(selected, part, !on); }) : std::function<void()>());
+                x = r.getRight() + 6.f;
+            }
+            const auto r = chip(g, x + 4.f, by, juce::CharPointer_UTF8("\xe2\x86\xbb match again"), cNormal, [this] { if (!proc.isMatching()) { proc.startMatch(selected); toast("matching to the loop ..."); } });
+            x = r.getRight();
         }
-    }
-
-    void knobLabel(juce::Graphics& g, juce::Slider& s, const juce::String& name, int dy = 4)
-    {
-        if (!s.isVisible()) return;
-        const auto b = s.getBounds();
-        g.setColour(ui::text.withAlpha(0.9f)); g.setFont(ui::font(9.5f, true, 0.22f));
-        g.drawText(name, b.getX() - 30, b.getBottom() + dy, b.getWidth() + 60, 12, juce::Justification::centred);
-        g.setColour(ui::dim.brighter(0.15f)); g.setFont(ui::font(9.5f, false, 0.05f));
-        g.drawText(s.getTextFromValue(s.getValue()), b.getX() - 30, b.getBottom() + dy + 13, b.getWidth() + 60, 12, juce::Justification::centred);
-    }
-
-    void drawRight(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
-    {
-        const bool has = res && res->pads[(size_t) selected].valid;
-        const ds::Pad empty;
-        const auto& pd = has ? res->pads[(size_t) selected] : empty;
-        g.setColour(has ? ui::text : ui::faint); g.setFont(ui::font(15.f, true, 0.25f));
-        g.drawText(has ? pd.name + "  -  " + juce::MidiMessage::getMidiNoteName(pd.note, true, true, 3) : "PAD " + juce::String(selected + 1),
-                   670, 236, 200, 20, juce::Justification::centredLeft);
-        if (has)
+        const int ns = proc.suggestionCount(selected);
+        if (ns > 0)
         {
-            g.setColour(ui::padColour(pd.name)); g.fillEllipse(958, 242, 8, 8);
-            g.setColour(ui::dim); g.setFont(ui::font(9.f, true, 0.12f));
-            g.drawText(juce::String(pd.hits) + " HITS", 860, 236, 90, 20, juce::Justification::centredRight);
+            const int k = proc.suggestionIndex(selected);
+            float rx2 = C.getRight();
+            if (k + 1 < ns)
+            {
+                const auto nx = juce::File(proc.suggestionPath(selected, k + 1)).getFileNameWithoutExtension();
+                const float af = proc.suggestionAfter(selected, k + 1);
+                const auto r = chip(g, rx2, by, nx.substring(0, 22) + (af >= 0 ? "  " + juce::String(juce::roundToInt(af)) : juce::String()), cNormal, [this] { proc.stepSuggestion(selected, 1); }, 24.f, 11.f, true);
+                rx2 = r.getX() - 8.f;
+            }
+            const auto nr = juce::Rectangle<float>(rx2 - 18.f, by + 2.f, 18.f, 20.f);
+            g.setColour(k + 1 < ns ? ui::white : ui::line); g.setFont(ui::mono(13.f)); g.drawText(juce::CharPointer_UTF8("\xe2\x80\xba"), nr, juce::Justification::centred);
+            zone(nr, [this] { proc.stepSuggestion(selected, 1); });
+            const juce::String cnt = (k >= 0 ? juce::String(k + 1) : juce::String("-")) + " / " + juce::String(ns);
+            const float cwid = ui::textW(ui::mono(11.f), cnt) + 8.f;
+            g.setColour(ui::dim2); g.setFont(ui::mono(11.f)); g.drawText(cnt, juce::Rectangle<float>(nr.getX() - cwid, by + 4.f, cwid, 16.f), juce::Justification::centred);
+            const auto pr = juce::Rectangle<float>(nr.getX() - cwid - 18.f, by + 2.f, 18.f, 20.f);
+            g.setColour(k > 0 ? ui::white : ui::line); g.setFont(ui::mono(13.f)); g.drawText(juce::CharPointer_UTF8("\xe2\x80\xb9"), pr, juce::Justification::centred);
+            zone(pr, [this] { proc.stepSuggestion(selected, -1); });
         }
-        g.setColour(ui::panelEdge);
-        g.drawHorizontalLine(258, 668.f, 966.f); g.drawHorizontalLine(354, 668.f, 966.f); g.drawHorizontalLine(432, 668.f, 966.f);
-        knobLabel(g, vol[(size_t) selected], "VOL"); knobLabel(g, pan[(size_t) selected], "PAN");
-        knobLabel(g, master, "MASTER", 1); knobLabel(g, sens, "SENS", 1); knobLabel(g, grid, "GRID", 1); knobLabel(g, bpm, "BPM", 1);
-        knobLabel(g, punch[(size_t) selected], "PUNCH", 1); knobLabel(g, sus[(size_t) selected], "SUSTAIN", 1); knobLabel(g, pitch[(size_t) selected], "PITCH", 1);
-        knobLabel(g, tone[(size_t) selected], "TONE", 1);
-        knobLabel(g, mamt[(size_t) selected], "MATCH", 1);
+    }
+    void setMatched(bool on, const MatchData& md)
+    {
+        auto* p = proc.apvts.getParameter("mamt" + juce::String(selected));
+        if (p == nullptr) return;
+        proc.undo.beginNewTransaction();
+        const float cur = p->convertFrom0to1(p->getValue());
+        if (!on) { if (cur > 0.5f) rawKeep[(size_t) selected] = cur; p->setValueNotifyingHost(p->convertTo0to1(0.f)); }
+        else { const float back = rawKeep[(size_t) selected] > 0.5f ? rawKeep[(size_t) selected] : 100.f * md.bestAmount; p->setValueNotifyingHost(p->convertTo0to1(back)); }
+        proc.audition(selected);
+    }
+    void drawEmptyPad(juce::Graphics& g)
+    {
+        const auto C = content;
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        g.drawText("Empty pad", juce::Rectangle<float>(C.getX(), C.getY(), 300.f, 38.f), juce::Justification::centredLeft);
+        g.setColour(ui::dim); g.setFont(ui::inter(12.f));
+        g.drawText("a sound of yours for it: what is it?", juce::Rectangle<float>(C.getX(), C.getY() + 60.f, 400.f, 16.f), juce::Justification::centredLeft);
+        float x = C.getX(), y = C.getY() + 86.f;
+        for (auto& t : DrumSlicerProcessor::padTypes())
+        {
+            const auto tt = t;
+            const auto w = ui::textW(ui::inter(11.f), ui::lower(t)) + 20.f;
+            if (x + w > C.getRight()) { x = C.getX(); y += 32.f; }
+            const auto r = chip(g, x, y, ui::lower(t), pendingType == t ? cOn : cOutline, [this, tt] { pendingType = tt; setPage(pSamples); });
+            x = r.getRight() + 8.f;
+        }
+        chip(g, C.getX(), y + 44.f, "from the file name  .  choose a sample", cNormal, [this] { pendingType.clear(); setPage(pSamples); }, 30.f, 12.f);
     }
 
-    void updateVisibility()
+    // ---------------------------------------------------------------- page: the pad's ···  (what it is, its hits) - no menus
+    void drawMore(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
     {
+        if (!res) { drawDropHere(g); return; }
+        const auto& pd = res->pads[(size_t) selected];
+        if (!pd.valid) { drawEmptyPad(g); return; }
+        const auto C = content;
+        g.setColour(ui::white); g.setFont(ui::inter(30.f, 300));
+        const auto nm = juce::String(pd.name.substring(0, 1)) + pd.name.substring(1).toLowerCase();
+        const float nw = ui::textW(ui::inter(30.f, 300), nm);
+        g.drawText(nm, juce::Rectangle<float>(C.getX(), C.getY(), nw + 4.f, 38.f), juce::Justification::centredLeft);
+        g.setColour(ui::dim2); g.setFont(ui::mono(12.f));
+        g.drawText(juce::MidiMessage::getMidiNoteName(pd.note, true, true, 3).toLowerCase() + "  .  " + juce::String(pd.hits) + " hits  .  " + juce::String(juce::CharPointer_UTF8("\xc2\xb7\xc2\xb7\xc2\xb7")),
+                   juce::Rectangle<float>(C.getX() + nw + 12.f, C.getY() + 12.f, 240.f, 18.f), juce::Justification::centredLeft);
+        chip(g, C.getRight(), C.getY() + 6.f, "back to the pad", cNormal, [this] { setPage(pPad); }, 26.f, 11.f, true);
+        auto row = [&](float y, const juce::String& label) { g.setColour(ui::dim); g.setFont(ui::inter(12.f)); g.drawText(label, juce::Rectangle<float>(C.getX(), y, 150.f, 24.f), juce::Justification::centredLeft); };
+        float y = C.getY() + 56.f;
+        row(y, "it is a");
+        float x = C.getX() + 160.f;
+        const auto cur = pd.name.upToFirstOccurrenceOf(" ", false, false);
+        for (auto& t : DrumSlicerProcessor::padTypes())
+        {
+            const auto tt = t;
+            const auto r = chip(g, x, y, ui::lower(t), cur == t ? cOn : cOutline, cur == t ? std::function<void()>() : std::function<void()>([this, tt] { proc.setPadType(selected, tt); toast("pad  " + ui::lower(proc.getResult()->pads[(size_t) selected].name)); }));
+            x = r.getRight() + 8.f;
+            if (x > C.getRight() - 60.f) { x = C.getX() + 160.f; y += 30.f; }
+        }
+        y += 40.f;
+        row(y, "move its " + juce::String(pd.hits) + " hits into");
+        x = C.getX() + 160.f;
+        bool anyOther = false;
+        for (int q = 0; q < ds::kPads; ++q)
+        {
+            if (q == selected || !res->pads[(size_t) q].valid) continue;
+            anyOther = true;
+            const auto& on = res->pads[(size_t) q].name;
+            const auto r = chip(g, x, y, juce::String(on.substring(0, 1)) + on.substring(1).toLowerCase(), cOutline,
+                                [this, q] { const auto into = proc.getResult()->pads[(size_t) q].name; proc.mergePad(selected, q); selectPad(q); toast("hits moved to  " + ui::lower(into)); setPage(pPad); });
+            x = r.getRight() + 8.f;
+        }
+        if (!anyOther) { g.setColour(ui::faint); g.setFont(ui::inter(11.f)); g.drawText("no other pad", juce::Rectangle<float>(x, y, 200.f, 24.f), juce::Justification::centredLeft); }
+        y += 40.f;
+        if (pd.user.getNumSamples() > 0)
+        {
+            row(y, "your sample");
+            chip(g, C.getX() + 160.f, y, "remove it  .  back to the loop's sound", cOutline, [this] { proc.clearPadSample(selected); toast("back to the loop's sound"); setPage(pPad); });
+        }
+        chip(g, C.getX(), C.getBottom() - 34.f, "clear the sound  .  hits stay", cNormal, [this] { proc.clearPadSound(selected); toast("no sound: choose one, the hits wait"); setPage(pPad); }, 30.f, 12.f);
+        g.setColour(ui::faint); g.setFont(ui::mono(10.f));
+        g.drawText("this page is the pad's menu  .  right-click a pad = here", juce::Rectangle<float>(C.getRight() - 360.f, C.getBottom() - 26.f, 360.f, 14.f), juce::Justification::centredRight);
+    }
+
+    // ---------------------------------------------------------------- knobs (right): they follow the page and the pad
+    juce::String knobId[4];
+    int knobBank = 1;
+    void rebindKnobs()
+    {
+        auto res = proc.getResult();
+        const bool src = page == pSource || !res;
+        const juce::String s(selected);
+        juce::String ids[4];
+        if (src) { ids[0] = "bpm"; ids[1] = "sens"; ids[2] = "quant"; ids[3] = "master"; }
+        else if (knobBank == 1) { ids[0] = "mamt" + s; ids[1] = "vol" + s; ids[2] = "pitch" + s; ids[3] = "tone" + s; }
+        else { ids[0] = "pan" + s; ids[1] = "punch" + s; ids[2] = "sus" + s; ids[3] = "atk" + s; }
+        for (int k = 0; k < 4; ++k)
+        {
+            auto& sl = knobs[(size_t) k];
+            if (ids[k] != knobId[k] && !sl.isMouseButtonDown())
+            {
+                knobAtt[(size_t) k].reset();
+                knobId[k] = ids[k];
+                if (auto* p = proc.apvts.getParameter(ids[k])) knobAtt[(size_t) k] = std::make_unique<juce::SliderParameterAttachment>(*p, sl, &proc.undo);
+                sl.textFromValueFunction = fmtFor(ids[k]);
+                sl.onDragEnd = ids[k] == "sens" ? std::function<void()>([this] { if (proc.getResult() != nullptr && proc.getSource() != nullptr) proc.reanalyse(); }) : std::function<void()>();
+                sl.getProperties().set("hero", ids[k].startsWith("mamt"));
+                sl.repaint();
+            }
+            const bool padKnob = !src;
+            const bool padOk = padKnob && res && res->pads[(size_t) selected].valid;
+            bool en = !padKnob || padOk;
+            if (ids[k].startsWith("mamt"))
+            {
+                const bool hasC = padOk && res->pads[(size_t) selected].user.getNumSamples() > 0;
+                en = hasC && proc.getMatch(selected).on && proc.padSource(selected) == 2;
+            }
+            if (sl.isEnabled() != en) sl.setEnabled(en);
+        }
+    }
+    static std::function<juce::String(double)> fmtFor(const juce::String& id)
+    {
+        if (id.startsWith("mamt")) return [](double v) { return "[" + juce::String(juce::roundToInt(v)) + "]"; };
+        if (id.startsWith("vol") || id == "master") return [](double v) { return v <= 0.0001 ? juce::String("-inf") : juce::String(juce::Decibels::gainToDecibels(v), 1); };
+        if (id.startsWith("pan")) return [](double v) { const int p = juce::roundToInt(v * 100); return p == 0 ? juce::String("c") : juce::String(p < 0 ? "l " : "r ") + juce::String(std::abs(p)); };
+        if (id.startsWith("pitch")) return [](double v) { return juce::String(v > 0 ? "+" : "") + juce::String(v, std::abs(v - std::round(v)) < 0.005 ? 0 : 1); };
+        if (id.startsWith("tone")) return [](double v) { return std::abs(v) < 0.05 ? juce::String("0") : juce::String(v > 0 ? "bright " : "dark ") + juce::String(std::abs(v), 1); };
+        if (id.startsWith("punch") || id.startsWith("sus")) return [](double v) { return juce::String(v > 0 ? "+" : "") + juce::String(v, 1); };
+        if (id.startsWith("atk")) return [](double v) { return juce::String(v, v < 10 ? 1 : 0) + " ms"; };
+        if (id == "sens" || id == "quant") return [](double v) { return juce::String(juce::roundToInt(v * 100)); };
+        if (id == "bpm") return [](double v) { return juce::String(v, 1); };
+        return [](double v) { return juce::String(v, 1); };
+    }
+    static juce::String knobName(const juce::String& id)
+    {
+        if (id.startsWith("mamt")) return "like the loop";
+        if (id.startsWith("vol")) return "volume";
+        if (id.startsWith("pitch")) return "pitch";
+        if (id.startsWith("tone")) return "tone";
+        if (id.startsWith("pan")) return "pan";
+        if (id.startsWith("punch")) return "punch";
+        if (id.startsWith("sus")) return "sustain";
+        if (id.startsWith("atk")) return "attack";
+        if (id == "bpm") return "tempo";
+        if (id == "sens") return "sensitivity";
+        if (id == "quant") return "how tight";
+        if (id == "master") return "master";
+        return id;
+    }
+    void drawKnobs(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
+    {
+        const bool src = page == pSource || !res;
+        g.setColour(ui::dim2); g.setFont(ui::mono(11.f));
+        g.drawText(src ? juce::String("analysis") : res->pads[(size_t) selected].valid ? ui::lower(res->pads[(size_t) selected].name) : juce::String("empty pad"),
+                   juce::Rectangle<float>(908.f, 72.f, 160.f, 16.f), juce::Justification::centredLeft);
+        if (!src)
+        {   // bank 1 | 2
+            const auto br = juce::Rectangle<float>(1146.f, 68.f, 60.f, 24.f);
+            g.setColour(juce::Colour(0xff0e0e10)); g.fillRoundedRectangle(br, 8.f);
+            for (int b = 1; b <= 2; ++b)
+            {
+                const auto r = juce::Rectangle<float>(br.getX() + 2.f + (b - 1) * 28.f, br.getY() + 2.f, 28.f, 20.f);
+                if (b == knobBank) { g.setColour(ui::chipOn); g.fillRoundedRectangle(r, 6.f); }
+                g.setColour(b == knobBank ? ui::white : ui::faint); g.setFont(ui::mono(10.f));
+                g.drawText(juce::String(b), r, juce::Justification::centred);
+                zone(r, [this, b] { knobBank = b; rebindKnobs(); });
+            }
+        }
+        for (int k = 0; k < 4; ++k)
+        {
+            const auto r = knobRect(k);
+            auto& sl = knobs[(size_t) k];
+            const juce::String nm = knobName(knobId[k]);
+            const juce::String val = sl.isEnabled() ? sl.getTextFromValue(sl.getValue()) : juce::String("--");
+            const auto f1 = ui::inter(12.f), f2 = ui::mono(12.f);
+            const float w1 = ui::textW(f1, nm + " "), w2 = ui::textW(f2, val);
+            const float x0 = r.getCentreX() - (w1 + w2) * 0.5f, y = r.getBottom() - 6.f;
+            g.setColour(sl.isEnabled() ? ui::label : ui::faint); g.setFont(f1); g.drawText(nm, juce::Rectangle<float>(x0, y, w1, 16.f), juce::Justification::centredLeft);
+            g.setColour(sl.isEnabled() ? ui::white : ui::faint); g.setFont(f2); g.drawText(val, juce::Rectangle<float>(x0 + w1, y, w2 + 2.f, 16.f), juce::Justification::centredLeft);
+        }
+        // loop | your kit: every pad on the loop's own sound, or back to yours
+        const auto sw = switchRect();
+        const bool kit = kitMode();
+        g.setColour(ui::dim); g.setFont(ui::inter(12.f));
+        g.drawText("loop", juce::Rectangle<float>(sw.getX() - 54.f, sw.getY(), 46.f, sw.getHeight()), juce::Justification::centredRight);
+        g.setColour(kit ? ui::white : ui::dim); g.setFont(ui::inter(12.f, kit ? 600 : 400));
+        g.drawText("your kit", juce::Rectangle<float>(sw.getRight() + 10.f, sw.getY(), 80.f, sw.getHeight()), juce::Justification::centredLeft);
+        g.setColour(juce::Colour(0xff0e0e10)); g.fillRoundedRectangle(sw, 15.f);
+        g.setColour(juce::Colours::black.withAlpha(0.6f)); g.drawRoundedRectangle(sw.reduced(0.5f), 15.f, 1.f);
+        const auto knob = juce::Rectangle<float>(24.f, 24.f).withCentre({ kit ? sw.getRight() - 15.f : sw.getX() + 15.f, sw.getCentreY() });
+        juce::Path kp; kp.addEllipse(knob);
+        ui::shadow(g, knob, 12.f, 0.5f, 2.f, 1.f, true);
+        g.setColour(res ? ui::white : ui::faint); g.fillPath(kp);
+        if (res) zone(sw.expanded(60.f, 0.f).withTrimmedRight(0), [this] { toggleKitMode(); });
+    }
+    std::array<int, ds::kPads> keptSrc { -1, -1, -1, -1, -1, -1, -1, -1 };
+    bool kitMode() const
+    {
+        auto r = proc.getResult(); if (!r) return false;
+        for (int i = 0; i < ds::kPads; ++i) if (r->pads[(size_t) i].valid && proc.padSource(i) == 2) return true;
+        return false;
+    }
+    void toggleKitMode()
+    {
+        auto r = proc.getResult(); if (!r) return;
+        if (kitMode())
+        {
+            for (int i = 0; i < ds::kPads; ++i) if (r->pads[(size_t) i].valid) { keptSrc[(size_t) i] = proc.padSource(i); proc.setPadSource(i, 0); }
+            toast("the loop's own sounds");
+        }
+        else
+        {
+            bool any = false;
+            for (int i = 0; i < ds::kPads; ++i)
+                if (r->pads[(size_t) i].valid)
+                {
+                    const bool hasC = r->pads[(size_t) i].user.getNumSamples() > 0;
+                    const int want = keptSrc[(size_t) i] >= 0 ? keptSrc[(size_t) i] : (hasC ? 2 : 0);
+                    if (want != proc.padSource(i) && (want < 2 || hasC)) proc.setPadSource(i, want);
+                    any = any || (want == 2 && hasC);
+                }
+            toast(any ? juce::String("your kit") : juce::String("no samples of yours yet: build my kit"));
+        }
+        shape.invalidate();
+    }
+
+    // ---------------------------------------------------------------- the keys (left): build my kit, play, undo, midi
+    void drawKeys(juce::Graphics& g, const std::shared_ptr<ds::Result>& res)
+    {
+        // BUILD MY KIT
+        {
+            const auto r = buildRect();
+            const bool can = res != nullptr && !proc.isMatching() && !proc.isBusy();
+            juce::Path p; p.addEllipse(r);
+            ui::glow(g, r, ui::orange, can ? 0.6f : 0.15f, 10.f, 14.f);
+            juce::ColourGradient gr(juce::Colour(0xffff7b47), r.getX() + r.getWidth() * 0.38f, r.getY() + r.getHeight() * 0.3f, juce::Colour(0xffd8440e), r.getRight(), r.getBottom(), true);
+            gr.addColour(0.55, juce::Colour(0xfff2541a));
+            g.setGradientFill(gr); g.fillPath(p);
+            if (!can) { g.setColour(juce::Colours::black.withAlpha(0.45f)); g.fillPath(p); }
+            if (hot(r) && can) { g.setColour(juce::Colours::white.withAlpha(0.08f)); g.fillPath(p); }
+            g.setColour(juce::Colours::white.withAlpha(0.25f)); g.drawEllipse(r.reduced(1.f), 1.f);
+            g.setColour(juce::Colours::white); g.setFont(ui::inter(14.f, 500));
+            juce::String t = "build\nmy kit";
+            if (proc.isBuilding()) t = "building\n" + proc.matchMessage().fromLastOccurrenceOf(" ", false, false).toLowerCase();
+            g.drawFittedText(t, r.toNearestInt(), juce::Justification::centred, 2, 1.f);
+            zone(r, [this] {
+                if (proc.getResult() == nullptr) { toast("analyse a loop first"); return; }
+                if (proc.isMatching() || proc.isBusy()) return;
+                proc.buildKit(); });
+        }
+        auto key = [&](int k, std::function<void(juce::Rectangle<float>)> drawIcon, std::function<void()> click, std::function<void()> drag = {})
+        {
+            const auto r = keyRect(k);
+            juce::Path p; p.addEllipse(r);
+            ui::shadow(g, r, 24.f, 0.8f, 6.f, 4.f, true);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff343437), r.getX() + r.getWidth() * 0.38f, r.getY() + r.getHeight() * 0.3f, juce::Colour(0xff1f1f22), r.getRight(), r.getBottom(), true));
+            g.fillPath(p);
+            if (hot(r)) { g.setColour(juce::Colours::white.withAlpha(0.06f)); g.fillPath(p); }
+            g.setColour(juce::Colours::white.withAlpha(0.08f)); g.drawEllipse(r.reduced(0.5f), 1.f);
+            drawIcon(r);
+            zone(r, std::move(click), std::move(drag));
+        };
+        const bool srcPage = page == pSource || !res;
+        const bool playing = srcPage ? proc.isSourcePlaying() : proc.isMidiPlaying();
+        key(0, [&](juce::Rectangle<float> r) {
+            const auto c = r.getCentre();
+            g.setColour(playing ? ui::orange : ui::white);
+            if (playing) g.fillRoundedRectangle(juce::Rectangle<float>(11.f, 11.f).withCentre(c), 1.5f);
+            else { juce::Path t; t.addTriangle(c.x - 4.f, c.y - 6.5f, c.x - 4.f, c.y + 6.5f, c.x + 7.f, c.y); g.fillPath(t); } },
+            [this, srcPage] {
+                if (srcPage) { if (proc.getSource()) proc.playSource(!proc.isSourcePlaying()); }
+                else if (proc.getResult()) proc.playMidi(!proc.isMidiPlaying()); });
+        key(1, [&](juce::Rectangle<float> r) {
+            const bool can = proc.undo.canUndo();
+            juce::Path a; const auto c = r.getCentre();
+            a.startNewSubPath(c.x - 1.f, c.y - 6.f); a.lineTo(c.x - 6.f, c.y - 1.f); a.lineTo(c.x - 1.f, c.y + 4.f);
+            a.startNewSubPath(c.x - 6.f, c.y - 1.f); a.lineTo(c.x + 3.f, c.y - 1.f); a.quadraticTo(c.x + 7.f, c.y - 1.f, c.x + 7.f, c.y + 3.f); a.quadraticTo(c.x + 7.f, c.y + 7.f, c.x + 3.f, c.y + 7.f);
+            g.setColour(can ? ui::white : ui::faint); g.strokePath(a, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded)); },
+            [this] { if (proc.undo.canUndo()) { proc.undo.undo(); toast("undo  .  " + ui::lower(proc.undo.getUndoDescription().isNotEmpty() ? proc.undo.getUndoDescription() : juce::String("the last knob / shape move"))); shape.invalidate(); }
+                     else toast("nothing to undo  (knobs and the sound's shape can be undone)"); });
+        key(2, [&](juce::Rectangle<float> r) {
+            g.setColour(res ? ui::white : ui::faint); g.setFont(ui::mono(9.f));
+            g.drawText("midi", r.withTrimmedBottom(14.f).withTrimmedTop(8.f), juce::Justification::centred);
+            juce::Path a; const auto c = r.getCentre().translated(0.f, 6.f);
+            a.startNewSubPath(c.x, c.y - 4.f); a.lineTo(c.x, c.y + 3.f); a.startNewSubPath(c.x - 3.f, c.y); a.lineTo(c.x, c.y + 3.f); a.lineTo(c.x + 3.f, c.y);
+            g.strokePath(a, juce::PathStrokeType(1.2f)); },
+            [this] { toast(proc.getResult() ? "drag this key onto a track in cubase" : "analyse a loop first"); },
+            [this] { auto f = proc.makeMidiFile(); if (f.existsAsFile()) juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, this); });
+        g.setColour(ui::faint); g.setFont(ui::mono(9.f));
+        g.drawText(srcPage ? "play the loop" : "play the pattern", juce::Rectangle<float>(keyRect(0).getCentreX() - 50.f, keyRect(0).getBottom() + 6.f, 100.f, 12.f), juce::Justification::centred);
+        g.drawText("drag", juce::Rectangle<float>(keyRect(2).getX(), keyRect(2).getBottom() + 6.f, 48.f, 12.f), juce::Justification::centred);
+    }
+
+    // ---------------------------------------------------------------- the 8 pads
+    bool padHasSound(int i) const { auto r = proc.getResult(); return r && i >= 0 && i < ds::kPads && r->pads[(size_t) i].valid && !proc.padIsSilent(i); }
+    void drawPads(juce::Graphics& g, const std::shared_ptr<ds::Result>& res, double now)
+    {
+        const double sinceEnd = now - buildEnd;
         for (int i = 0; i < ds::kPads; ++i)
-            for (auto* k : { &vol[(size_t) i], &pan[(size_t) i], &punch[(size_t) i], &sus[(size_t) i], &pitch[(size_t) i], &tone[(size_t) i], &mamt[(size_t) i] }) k->setVisible(i == selected);
-        shape.pad = selected; shape.invalidate();
+        {
+            const auto r = padRect(i);
+            const bool has = res && res->pads[(size_t) i].valid;
+            const bool sel = i == selected && res != nullptr, hov = i == hoverPad && has;
+            const auto& pd = has ? res->pads[(size_t) i] : emptyPad;
+            float lv = levels[(size_t) i];
+            if (buildEnd > 0 && sinceEnd < 900 && has) lv = std::max(lv, (float) std::max(0.0, 1.0 - std::abs(sinceEnd - 300.0 - 50.0 * i) / 200.0));   // a blink when the kit is built
+            juce::Path p; p.addRoundedRectangle(r, 16.f);
+            ui::shadow(g, r.reduced(4.f, 0.f), 16.f, 0.7f, 10.f, 5.f);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff2b2b2e).brighter(hov ? 0.04f : 0.f), 0, r.getY(), juce::Colour(0xff212124), 0, r.getBottom(), false));
+            g.fillPath(p);
+            g.setColour(juce::Colours::white.withAlpha(0.07f)); g.drawHorizontalLine((int) r.getY() + 1, r.getX() + 14.f, r.getRight() - 14.f);
+            if (sel) { g.setColour(ui::white); g.strokePath(p, juce::PathStrokeType(1.5f)); }
+            else if (hov) { g.setColour(juce::Colour(0xff4a4a4d)); g.strokePath(p, juce::PathStrokeType(1.f)); }
+            if (dropPad == i) { g.setColour(ui::orange); g.strokePath(p, juce::PathStrokeType(2.f)); }
+            ui::glyph(g, has ? pd.name : "-", juce::Rectangle<float>(r.getX() + 14.f, r.getY() + 14.f, 13.f, 13.f), has ? ui::white : ui::line);
+            // name + what it plays
+            const juce::String nm = has ? juce::String(pd.name.substring(0, 1)) + pd.name.substring(1).toLowerCase() : juce::String("-");
+            juce::String sub;
+            const int src = has ? proc.padSource(i) : 0;
+            if (!has) sub = res ? "empty  .  click to add" : "";
+            else if (proc.padIsSilent(i)) sub = "no sound  .  click to add";
+            else if (src == 2 && pd.user.getNumSamples() > 0) sub = pd.userName + (pd.layered() ? " + " + pd.layerName : juce::String());
+            else sub = src == 1 ? "best hit" : "the loop's sound";
+            const bool showSugg = hov && proc.suggestionCount(i) > 0;
+            g.setColour(has ? ui::white : ui::faint); g.setFont(ui::inter(16.f, 500));
+            g.drawText(nm, juce::Rectangle<float>(r.getX() + 16.f, r.getBottom() - 50.f, r.getWidth() - 32.f, 22.f), juce::Justification::centredLeft, true);
+            if (!showSugg) { g.setColour(ui::dim2); g.setFont(ui::inter(10.f)); g.drawText(sub, juce::Rectangle<float>(r.getX() + 16.f, r.getBottom() - 30.f, r.getWidth() - 32.f, 14.f), juce::Justification::centredLeft, true); }
+            // level bar
+            const auto bar = juce::Rectangle<float>(r.getX() + 16.f, r.getBottom() - 10.f, r.getWidth() - 32.f, 3.f);
+            if (lv > 0.03f) { g.setColour(ui::orange.withAlpha(0.35f * lv)); g.fillRoundedRectangle(bar.expanded(2.f, 2.f), 3.f); g.setColour(ui::orange.withAlpha(0.4f + 0.6f * lv)); }
+            else g.setColour(sel ? ui::white : juce::Colour(0xff38383b));
+            g.fillRoundedRectangle(bar, 1.5f);
+            if (!has) continue;
+            // the corner: lock (always seen when locked), m / s on hover
+            const bool lk = proc.padLocked(i), mu = proc.mute[(size_t) i].load(), so = proc.solo[(size_t) i].load();
+            float cx = r.getRight() - 14.f;
+            auto small = [&](const juce::String& t, bool on, juce::Colour onCol, std::function<void()> click)
+            {
+                const auto br = juce::Rectangle<float>(cx - 24.f, r.getY() + 10.f, 24.f, 22.f);
+                g.setColour(on ? onCol : juce::Colour(0xff343437).brighter(hot(br) ? 0.1f : 0.f)); g.fillRoundedRectangle(br, 6.f);
+                g.setColour(on ? juce::Colour(0xff0b0b0c) : ui::white); g.setFont(ui::inter(10.f, 600)); g.drawText(t, br, juce::Justification::centred);
+                zone(br, std::move(click));
+                cx = br.getX() - 6.f;
+            };
+            if (hov || so) small("s", so, ui::orange, [this, i] { proc.solo[(size_t) i] = !proc.solo[(size_t) i].load(); });
+            if (hov || mu) small("m", mu, ui::white, [this, i] { proc.mute[(size_t) i] = !proc.mute[(size_t) i].load(); });
+            if (hov || lk)
+            {
+                const auto br = juce::Rectangle<float>(cx - 24.f, r.getY() + 10.f, 24.f, 22.f);
+                if (hov) { g.setColour(juce::Colour(0xff343437).brighter(hot(br) ? 0.1f : 0.f)); g.fillRoundedRectangle(br, 6.f); }
+                ui::lockIcon(g, br.withSizeKeepingCentre(12.f, 12.f), lk ? ui::orange : ui::white, lk);
+                zone(br, [this, i] { proc.setPadLocked(i, !proc.padLocked(i)); toast(proc.padLocked(i) ? "locked: build my kit keeps this pad" : "unlocked: build my kit may change this pad"); });
+            }
+            if (showSugg)
+            {   // ‹ the sample · n / N · % ›
+                const int n = proc.suggestionCount(i), k = proc.suggestionIndex(i);
+                const auto row = juce::Rectangle<float>(r.getX() + 14.f, r.getY() + 44.f, r.getWidth() - 28.f, 28.f);
+                const auto lb = row.withWidth(24.f).withSizeKeepingCentre(24.f, 24.f), rb = row.withTrimmedLeft(row.getWidth() - 24.f).withSizeKeepingCentre(24.f, 24.f);
+                for (auto [b, dir, can] : { std::tuple<juce::Rectangle<float>, int, bool> { lb, -1, k > 0 }, { rb, 1, k + 1 < n } })
+                {
+                    g.setColour(juce::Colour(0xff343437).brighter(hot(b) ? 0.1f : 0.f)); g.fillEllipse(b);
+                    g.setColour(can ? ui::white : ui::faint); g.setFont(ui::mono(13.f));
+                    g.drawText(dir < 0 ? juce::CharPointer_UTF8("\xe2\x80\xb9") : juce::CharPointer_UTF8("\xe2\x80\xba"), b, juce::Justification::centred);
+                    const int d = dir;
+                    zone(b, [this, i, d] { proc.stepSuggestion(i, d); });
+                }
+                const auto mid = row.reduced(28.f, 0.f);
+                g.setColour(ui::white); g.setFont(ui::inter(11.f));
+                g.drawText(sub, mid.withHeight(14.f), juce::Justification::centred, true);
+                const auto md = proc.getMatch(i);
+                g.setColour(ui::dim); g.setFont(ui::mono(10.f));
+                g.drawText((k >= 0 ? juce::String(k + 1) : juce::String("-")) + " / " + juce::String(n) + (md.on ? "  .  " + juce::String(juce::roundToInt(md.after)) + "%" : juce::String()),
+                           mid.withTrimmedTop(14.f), juce::Justification::centred);
+            }
+        }
     }
+
+    void setSource(int pad, int src) { proc.setPadSource(pad, src); proc.audition(pad); shape.invalidate(); rebindKnobs(); repaint(); }
 
     DrumSlicerProcessor& proc;
-    ui::Skin skin;
     ui::Look look;
-    int selected = 0, shownVersion = -1;
-    bool hover = false, wasBusy = false;
-    int hoverPad = -1;
+    Page page = pSource;
+    int idle = 0;
+    int selected = 0, shownVersion = -1, hoverPad = -1, dropPad = -1, browsedPad = -1, patBar = 0;
+    bool dropping = false, analysing = false, wasBuilding = false;
+    const ds::Result* lastRes = nullptr;
+    double settleStart = 0, analyseStart = 0, buildStart = 0, buildEnd = 0;
+    float scoreFrom = 0, shownScore = 0, tightShown = 0;
     std::array<float, 8> levels {};
-    std::vector<std::pair<float, float>> peaks;
-    juce::int64 v0 = 0, v1 = 0, pk0 = -1, pk1 = -1;   // the part of the file in view (samples)
+    std::array<float, 8> rawKeep {};
+    juce::String pendingType, lastMatchMsg, lastStatus, soundSig, toastText;
+    juce::uint32 toastUntil = 0;
+    const ds::Pad emptyPad;
+    // source page view
+    std::vector<float> peaks;
+    juce::int64 v0 = 0, v1 = 0, pk0 = -1, pk1 = -1;
     juce::uint64 viewId = 0, peaksId = 0, gmaxId = 0;
     float gmax = 1.f;
-    int dragWhat = 0;                                // 1 = START, 2 = END
-    bool wasPlaying = false;
-
-    std::array<juce::Slider, ds::kPads> vol, pan, punch, sus, pitch, tone, mamt;
-    juce::Slider master, sens, grid, bpm;
-    std::vector<std::unique_ptr<juce::SliderParameterAttachment>> atts;
-    juce::TextButton loadBtn, reBtn, exportBtn, kitsBtn, browseBtn, matchBtn, buildBtn;
-    KitBrowser kitBrowser { proc };
-    SampleBrowser samples { proc };
-    juce::String lastMatchMsg, lastStatus;
-    int browsedPad = -1;
-    juce::String toastText; juce::uint32 toastUntil = 0; bool wasToasting = false;
-    std::array<juce::TextButton, 3> modeBtn;
-    std::array<juce::TextButton, 3> srcBtn;
-    ui::DragButton dragMidi, dragWav;
-    ui::PlayButton playMidi;
+    int dragWhat = 0;
+    std::array<juce::Slider, 4> knobs;
+    std::array<std::unique_ptr<juce::SliderParameterAttachment>, 4> knobAtt;
     ShapeView shape;
+    SampleBrowser samples;
+    KitsPage kitsPage;
+    HoldButton delPad;
     juce::TooltipWindow tips { this, 700 };
     std::unique_ptr<juce::FileChooser> chooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DrumSlicerPanel)
 };
 
-// resizable window (fixed 5:3), the panel is scaled - everything stays sharp because it is drawn in code
+// resizable window (fixed aspect), the device is scaled - everything stays sharp because it is drawn in code
 class DrumSlicerEditor : public juce::AudioProcessorEditor
 {
 public:
@@ -2013,13 +2553,11 @@ public:
     {
         addAndMakeVisible(panel);
         setResizable(true, true);
-        setResizeLimits(700, 420, 2000, 1200);
-        if (auto* c = getConstrainer()) c->setFixedAspectRatio(1000.0 / 600.0);
-        const int w = juce::jlimit(700, 2000, (int) proc.apvts.state.getProperty("uiWidth", 1000));
-        setSize(w, juce::roundToInt(w * 0.6));
+        setResizeLimits(868, 504, 2480, 1440);
+        if (auto* c = getConstrainer()) c->setFixedAspectRatio((double) DrumSlicerPanel::W / DrumSlicerPanel::H);
+        const int w = juce::jlimit(868, 2480, (int) proc.apvts.state.getProperty("uiWidth2", 1240));
+        setSize(w, juce::roundToInt(w * (double) DrumSlicerPanel::H / DrumSlicerPanel::W));
     }
-    // Cubase sometimes puts a just-inserted instrument's window behind its own (until the instrument button is
-    // pressed): when the window first shows, its frame is brought to the front - once, and only if it is not there
     void parentHierarchyChanged() override
     {
         if (raised || getPeer() == nullptr) return;
@@ -2027,17 +2565,15 @@ public:
         for (int ms : { 120, 600 })
             juce::Timer::callAfterDelay(ms, [sp = juce::Component::SafePointer<DrumSlicerEditor>(this)] { if (sp != nullptr) sp->raiseFrame(); });
     }
-    void raiseFrame()
-    {
-        if (auto* peer = getPeer()) rekitRaiseFrame(peer->getNativeHandle());
-    }
+    void raiseFrame() { if (auto* peer = getPeer()) rekitRaiseFrame(peer->getNativeHandle()); }
     bool raised = false;
     void resized() override
     {
-        panel.setBounds(0, 0, 1000, 600);
-        panel.setTransform(juce::AffineTransform::scale((float) getWidth() / 1000.f));
-        proc.apvts.state.setProperty("uiWidth", getWidth(), nullptr);
+        panel.setBounds(0, 0, DrumSlicerPanel::W, DrumSlicerPanel::H);
+        panel.setTransform(juce::AffineTransform::scale((float) getWidth() / (float) DrumSlicerPanel::W));
+        proc.apvts.state.setProperty("uiWidth2", getWidth(), nullptr);
     }
+    DrumSlicerPanel& getPanel() { return panel; }
 private:
     DrumSlicerProcessor& proc;
     DrumSlicerPanel panel;

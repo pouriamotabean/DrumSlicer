@@ -52,7 +52,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
 }
 
 DrumSlicerProcessor::DrumSlicerProcessor()
-    : AudioProcessor(makeBuses()), apvts(*this, nullptr, "STATE", makeLayout())
+    : AudioProcessor(makeBuses()), apvts(*this, &undo, "STATE", makeLayout())
 {
     for (auto& a : previewPad) a = 0;
     for (auto& a : padLevel) a = 0.f;
@@ -387,6 +387,7 @@ bool DrumSlicerProcessor::isBusesLayoutSupported(const BusesLayout& l) const
 void DrumSlicerProcessor::startVoice(int pad, float g, int wait, bool audition)
 {
     if (pad < 0 || pad >= ds::kPads || !audioRes || !audioShaped || audioShaped->buf[(size_t) pad].getNumSamples() == 0) return;
+    if (!audition && !padAudible(pad)) return;        // m / s
     const double ratio = audioRes->sr / hostSR;
     const double step = ratio * std::pow(2.0, pPitch[(size_t) pad]->load() / 12.0);
     wait += (int) std::lround(audioShaped->offset[(size_t) pad] / step);    // a trimmed start keeps the hit on time
@@ -580,6 +581,7 @@ void DrumSlicerProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::Midi
             if (seqPos >= sq.loopTicks - 1e-9) seqPos = 0;
             if (used <= 0 && seqPos != 0) break;
         }
+        seqFrac = (float) (seqPos / sq.loopTicks);
     }
     int cur = 0;
     for (const auto meta : midi)

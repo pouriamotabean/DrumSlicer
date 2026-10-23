@@ -88,3 +88,17 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 | pad type, move hits into another pad, clear sound, delete pad | pad ··· page (delete = hold) |
 | empty pad: add a sound | click it = samples page filtered for that type; drop a file still works |
 | m / s | pad hover (new in 2.0) |
+
+## v2.0.0 — built (ReKit 2, its own plugin next to ReKit 1.14)
+- Separate plugin: PRODUCT_NAME "ReKit 2", PLUGIN_CODE Rkt2, installer ReKit2-Setup (own AppId; ReKit.vst3 is left alone).
+  1.14 stays on the branch `rekit-1.14`. Both share Documents/ReKit (kits, sample folders, the library).
+- Engine unchanged. Small processor additions for the UI: undo (UndoManager on the parameters), m / s per pad,
+  MIDI preview position, suggestion names / scores.
+- New editor (PluginEditor.h): the black device, display pages kit / source / pattern / pad (+ ···) / samples / kits,
+  no popup menus and no dialogs (hold to delete, "replace it?" on the save button), 4 knobs in 2 banks
+  (source page: tempo / sensitivity / how tight / master), keys: build my kit, play, undo, midi (drag).
+- Fonts embedded: Inter + Space Mono (OFL, Assets/fonts).
+- Seen in the test (engine, not UI): after BUILD MY KIT a pad can show "88 -> 84" (matched lower than its sample
+  as it was) - the never-worse rule of MATCH is not applied inside BUILD. To look at in 2.0.x.
+- Honest limits: undo covers knobs and the sound's shape (not sample choices: < > and the pad page do those);
+  the build animation shows the real % but the rows lock in together at the end (the engine reports one %).

@@ -51,7 +51,7 @@ public:
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
-    const juce::String getName() const override { return "ReKit"; }
+    const juce::String getName() const override { return "ReKit 2"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -201,7 +201,21 @@ public:
         return k != juce::File() ? k.getFileName() : o.isNotEmpty() ? o : getLoopFile().getFileNameWithoutExtension();
     }
 
+    // ReKit 2: the undo key (knobs and the sound editor: every parameter change, one step per gesture)
+    juce::UndoManager undo;
     juce::AudioProcessorValueTreeState apvts;
+    // ReKit 2: m / s on a pad (the pattern, host notes and clicks all follow it; not saved)
+    std::array<std::atomic<bool>, 8> mute {}, solo {};
+    bool padAudible(int pad) const
+    {
+        bool any = false; for (auto& s : solo) any = any || s.load();
+        return any ? solo[(size_t) pad].load() : !mute[(size_t) pad].load();
+    }
+    float midiPlayFrac() const { return seqFrac.load(); }   // where the MIDI preview is in its turn (0..1)
+    juce::String suggestionPath(int pad, int idx) const
+    { std::lock_guard<std::mutex> g(suggLock); return pad >= 0 && pad < ds::kPads && idx >= 0 && idx < (int) sugg[(size_t) pad].paths.size() ? sugg[(size_t) pad].paths[(size_t) idx] : juce::String(); }
+    float suggestionAfter(int pad, int idx) const
+    { std::lock_guard<std::mutex> g(suggLock); return pad >= 0 && pad < ds::kPads && idx >= 0 && idx < (int) sugg[(size_t) pad].after.size() ? sugg[(size_t) pad].after[(size_t) idx] : -1.f; }
     juce::SharedResourcePointer<ds::Library> library;     // your one-shot archive (one for all ReKit windows)
     std::array<std::atomic<int>, 8>   previewPad;
     std::array<std::atomic<float>, 8> padLevel;
@@ -258,6 +272,7 @@ private:
     void rebuildSeq();                               // message thread: when the result / mode / tempo changed
     std::atomic<bool> midiPlay { false }, midiRestart { false };
     double seqPos = 0;                               // ticks (audio thread)
+    std::atomic<float> seqFrac { 0.f };
     std::shared_ptr<const ds::Source> source, audioSource;
     std::atomic<juce::int64> selS { 0 }, selE { 0 }, srcSeek { -1 };
     std::atomic<bool> srcPlay { false };
