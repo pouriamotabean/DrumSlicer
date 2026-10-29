@@ -272,6 +272,7 @@ public:
         std::vector<std::array<double, 10>> F; for (double o : on) F.push_back(feats(o));
         const int K = std::min<int>(std::max(2, nPads - 3 + extraClusters), (int) on.size());
         auto lab = kmeans(F, K);
+        if (std::getenv("DP_FLUX")) for (size_t i = 0; i < on.size(); ++i) { auto fs = fluxShares(on[i]); std::fprintf(stderr, "flux %.3f c%d hi %.2f lo %.2f\n", on[i] / sr, lab[i], fs.first, fs.second); }
         Lw = (int) (0.8 * sr); Lf = nframes(Lw);
         const int h0 = (int) (0.06 * sr);
         for (int j = 0; j < K; ++j)
@@ -571,6 +572,21 @@ private:
         std::vector<double> res;
         for (int o : outv) if (res.empty() || o - res.back() > (int) (0.008 * sr)) res.push_back(o);
         return res;
+    }
+
+    // what a hit adds: band power of the 23 ms after the onset minus the 23 ms before it (a hat on a kick's
+    // ringing tail adds only highs). Shares of the added power above 4 kHz and below 250 Hz.
+    std::pair<double, double> fluxShares(double onset) const
+    {
+        const int L = 1024; const int o = rnd(onset);
+        auto bands = [&](int s0) { std::vector<cd> z((size_t) L);
+            for (int i = 0; i < L; ++i) { const double w = 0.5 - 0.5 * std::cos(2 * PI * i / (L - 1)); const int j = s0 + i; z[(size_t) i] = (j >= 0 && j < N) ? cd(mono[(size_t) j] * w, 0) : cd(); }
+            fftOf(L).run(z.data(), false);
+            std::array<double, 3> e {}; for (int k = 1; k <= L / 2; ++k) { const double f = k * sr / L, p = std::norm(z[(size_t) k]); e[f < 250 ? 0 : (f < 4000 ? 1 : 2)] += p; }
+            return e; };
+        const auto a = bands(o - L / 4), b = bands(o - L - L / 4);   // after (from a bit before the onset) / before
+        double d[3], t = 1e-20; for (int q = 0; q < 3; ++q) { d[q] = std::max(0.0, a[(size_t) q] - b[(size_t) q]); t += d[q]; }
+        return { d[2] / t, d[0] / t };
     }
 
     std::array<double, 10> feats(double onset) const
@@ -1296,7 +1312,7 @@ private:
         double low = 0, body = 0, high = 0, cen = 0, flat = 0, f0 = 0, dec = 0;   // from the learned sound
         double rise = 0, d20 = 0; int bursts = 1;                                // from its cleanest real hit
         std::array<double, 52> prof {};                                          // 26 bands x (attack, body), dB
-        double weight = 0; bool hatlike = false;
+        double weight = 0; bool hatlike = false; double highA = 0, lowA = 0;   // high / low share of the first 40 ms
     };
     SFeat featuresOf(size_t c, const Buf& yAll) const
     {
@@ -1347,6 +1363,8 @@ private:
             }
             double mx = -1e9; for (double v : F.prof) mx = std::max(mx, v);
             for (double& v : F.prof) v = std::max(v - mx, -60.0);
+            double ta = 1e-30; for (int q = 0; q < 26; ++q) { const double e = std::pow(10.0, F.prof[(size_t) q] / 10); ta += e; if (q >= 21) F.highA += e; if (q <= 4) F.lowA += e; }
+            F.highA /= ta; F.lowA /= ta;
         }
         double g2 = 0, gmax = 0; for (double g : s.g) { g2 += g * g; gmax = std::max(gmax, g); }
         double en = 0; for (double v : m) en += v * v;
@@ -1451,6 +1469,19 @@ private:
             else if (f.d20 <= 30 && f.low < 0.2 && f.cen >= 1000) L[c] = "rim";
             else L[c] = "mid";
         }
+        // a kick adds low end. A "kick" whose hits add next to nothing below 250 Hz learned its low end from the
+        // ringing of the real kick under it: it is percussion (or a hat when what it adds is mostly highs)
+        if (!std::getenv("DP_NO_LOWRULE"))
+            for (size_t c = 0; c < n; ++c)
+            {
+                if (L[c] != "kick" && L[c] != "tom") continue;
+                if (snd[c].t.size() < 3) continue;
+                std::vector<double> lo, hi; for (double t : snd[c].t) { auto fs = fluxShares(t); hi.push_back(fs.first); lo.push_back(fs.second); }
+                const double ml = median(lo), mh = median(hi);
+                if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "low rule s%zu %s: hits add low %.2f high %.2f\n", c, L[c].c_str(), ml, mh);
+                if (ml >= 0.15) continue;
+                L[c] = mh >= 0.5 ? "chat" : "mid";
+            }
         // the strongest mid sound is the snare (when the loop has a kick, or it is noisy like a snare)
         bool hasKick = false; for (auto& l : L) hasKick |= l == "kick";
         int dom = -1; for (size_t c = 0; c < n; ++c) if (L[c] == "mid" && (dom < 0 || F[c].weight > F[(size_t) dom].weight)) dom = (int) c;
@@ -1528,8 +1559,8 @@ private:
             for (size_t c = 0; c < n; ++c) { std::fprintf(stderr, "dist s%zu:", c); for (size_t d = 0; d < n; ++d) std::fprintf(stderr, " %5.1f", profDist(F[c], F[d])); std::fprintf(stderr, "\n"); }
         if (std::getenv("DP_DEBUG"))
             for (size_t c = 0; c < n; ++c)
-                std::fprintf(stderr, "label s%zu %-6s w %.3f low %.2f body %.2f high %.2f cen %5.0f f0 %4.0f flat %.3f dec %.2f | rise %2.0f bursts %d d20 %3.0f\n", c, L[c].c_str(), F[c].weight,
-                             F[c].low, F[c].body, F[c].high, F[c].cen, F[c].f0, F[c].flat, F[c].dec, F[c].rise, F[c].bursts, F[c].d20);
+                std::fprintf(stderr, "label s%zu %-6s w %.3f low %.2f body %.2f high %.2f cen %5.0f f0 %4.0f flat %.3f dec %.2f | rise %2.0f bursts %d d20 %3.0f hA %.2f lA %.2f n %zu\n", c, L[c].c_str(), F[c].weight,
+                             F[c].low, F[c].body, F[c].high, F[c].cen, F[c].f0, F[c].flat, F[c].dec, F[c].rise, F[c].bursts, F[c].d20, F[c].highA, F[c].lowA, snd[c].t.size());
         return L;
     }
 
@@ -1983,6 +2014,52 @@ private:
         out.notes = std::move(keep);
     }
 
+    // one stroke found twice (a flammed kick split in two, a hat's ring found again): the same drum again within
+    // 30 ms becomes one note - only where the loop says so: the model of that spot may not get worse (a clap
+    // learned as two bursts keeps both notes)
+    void mergeDoubles(Output& out) const
+    {
+        if (std::getenv("DP_NO_DEDUP")) return;
+        Buf y; render(out.pads, out.notes, y, N);
+        auto& nts = out.notes; std::vector<bool> gone(nts.size(), false); int merged = 0;
+        for (size_t i = 0; i < nts.size(); ++i)
+        {
+            if (gone[i]) continue;
+            size_t j = i + 1; while (j < nts.size() && (gone[j] || nts[j].pad != nts[i].pad)) ++j;
+            if (j >= nts.size() || nts[j].time - nts[i].time >= 0.030 * sr) continue;
+            const auto& s = out.pads[(size_t) nts[i].pad].audio;
+            const int w0 = std::max(0, (int) nts[i].time - (int) (0.01 * sr)), w1 = std::min(N, (int) nts[j].time + (int) (0.2 * sr));
+            // variants: 0 keep both, 1 first only (its velocity), 2 first with the stronger velocity, 3 second only
+            const double vi = nts[i].velocity, vj = nts[j].velocity;
+            const double vA[4] = { vi, vi, std::max(vi, vj), 0 }, vB[4] = { vj, 0, 0, vj };
+            double E[4] = { 0, 0, 0, 0 };
+            for (int ch = 0; ch < 2; ++ch)
+                for (int t = w0; t < w1; ++t)
+                {
+                    const int ki = t - (int) std::floor(nts[i].time + 0.5), kj = t - (int) std::floor(nts[j].time + 0.5);
+                    const double si = (ki >= 0 && ki < s.n) ? s.c[ch][(size_t) ki] : 0.0, sj = (kj >= 0 && kj < s.n) ? s.c[ch][(size_t) kj] : 0.0;
+                    const double rest = y.c[ch][(size_t) t] - vi / 100.0 * si - vj / 100.0 * sj;
+                    for (int v = 0; v < 4; ++v) { const double r = x.c[ch][(size_t) t] - rest - vA[v] / 100.0 * si - vB[v] / 100.0 * sj; E[v] += r * r; }
+                }
+            int best = 1; for (int v = 2; v < 4; ++v) if (E[v] < E[best]) best = v;
+            if (E[best] > E[0]) continue;
+            ++merged;
+            for (int ch = 0; ch < 2; ++ch)               // the model follows the change (for the next pair)
+                for (int t = w0; t < w1; ++t)
+                {
+                    const int ki = t - (int) std::floor(nts[i].time + 0.5), kj = t - (int) std::floor(nts[j].time + 0.5);
+                    const double si = (ki >= 0 && ki < s.n) ? s.c[ch][(size_t) ki] : 0.0, sj = (kj >= 0 && kj < s.n) ? s.c[ch][(size_t) kj] : 0.0;
+                    y.c[ch][(size_t) t] += (vA[best] - vi) / 100.0 * si + (vB[best] - vj) / 100.0 * sj;
+                }
+            if (best == 3) gone[i] = true; else { nts[i].velocity = (int) vA[best]; gone[j] = true; }
+        }
+        std::vector<NoteOut> keep; for (size_t i = 0; i < nts.size(); ++i) if (!gone[i]) keep.push_back(nts[i]);
+        nts = std::move(keep);
+        std::vector<int> cnt(out.pads.size(), 0); for (auto& n : nts) cnt[(size_t) n.pad]++;
+        for (size_t p = 0; p < out.pads.size(); ++p) out.pads[p].hits = cnt[p];
+        if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "doubles merged: %d\n", merged);
+    }
+
     void dbgHear(const char* tag)
     {
         if (!std::getenv("DP_DEBUG")) return;
@@ -2122,6 +2199,7 @@ private:
         }
         std::sort(out.notes.begin(), out.notes.end(), [](const NoteOut& a, const NoteOut& b) { return a.time < b.time; });
         if (!std::getenv("DP_NO_JUNK")) dropJunkNotes(out, sr);
+        mergeDoubles(out);
         std::vector<double> times; for (auto& n : out.notes) times.push_back(n.time);
         out.bpm = estimateBpm(times, N, sr);
         {   // 60 or 120? both fit the 1/16 grid (a slower one always fits a little better): kick and snare

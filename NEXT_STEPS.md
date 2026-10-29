@@ -134,6 +134,15 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.4.0
+- Engine: a "kick" whose hits add nothing below 250 Hz (it learned its low end from the ringing of the real kick)
+  is relabelled hat / percussion. Mumbai 93: null 13% -> 62%; zodiac 43% -> 67%; 808 loop 42% -> 46%;
+  breakbeat now gets its hat pad and the right tempo (96, was 192).
+- Engine: double notes of one drum within 30 ms are merged only where the model of that spot does not get worse
+  (claps learned as two bursts keep both). Duplicates over 13 loops: 79 -> 25.
+- Regression set: 13 loops (tools/peel_cli + run.sh). Known: Mumbai top band 49.6 -> 41.1 (rest much better),
+  breakbeat null 57.3 -> 55.5 (hat pad found instead).
+
 ## v2.3.4
 - First run: "where should ReKit keep its data?" (choose a folder = what is there now moves with it, or keep Documents/ReKit). Later: kits page > data folder. Location in <app data>/ReKit/location.txt.
 
