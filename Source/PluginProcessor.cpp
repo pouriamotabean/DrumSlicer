@@ -1373,6 +1373,8 @@ static MatchData computeMatch(const juce::AudioBuffer<float>& A, const std::arra
         const auto Cf = atRate(shapeShot(C, sr, sp, o2, &m), std::pow(2.0, v[10] / 12.0));
         const float lT = mt::loudnessOf(T, sr) + vA[12], lC = mt::loudnessOf(Cf, sr);
         m.gainDb = (lC > -100.f && lT > -100.f) ? juce::jlimit(-24.f, 12.f, std::round((lT - lC) * 10.f) / 10.f) : 0.f;
+        const float lR = mt::loudnessOf(C, sr);
+        m.gainRawDb = (lR > -100.f && lT > -100.f) ? juce::jlimit(-24.f, 12.f, std::round((lT - lR) * 10.f) / 10.f) : 0.f;
     }
     return m;
 }
@@ -1635,7 +1637,7 @@ void DrumSlicerProcessor::buildKit()
         std::vector<juce::String> paths;
         // results
         std::vector<float> after; std::vector<MatchData> md; std::vector<int> order; int chosen = -1;
-        LayerFound layer; juce::AudioBuffer<float> chosenAudio; std::vector<juce::String> partners;
+        LayerFound layer; juce::AudioBuffer<float> chosenAudio; std::vector<juce::String> partners, extra;
     };
     auto jobs = std::make_shared<std::vector<Job>>();
     std::vector<juce::String> taken;                     // files that locked pads (or other pads) already use
@@ -1666,6 +1668,18 @@ void DrumSlicerProcessor::buildKit()
         }
         std::shared_ptr<const ds::LibIndex> holder;
         for (auto& m : library->nearest(target, r->sr, pd.name, 30, holder)) if (m.e != nullptr) j.paths.push_back(m.e->path);
+        if (j.fam == ds::famSnare)
+        {   // a snare and a clap played together in the loop: the nearest claps AND the nearest snares of yours may
+            // layer (the layer step takes one only where the pair clearly sounds nearer than one sample alone)
+            int nc = 0, ns = 0;
+            for (auto& m : library->nearest(target, r->sr, pd.name, 120, holder))
+            {
+                if (m.e == nullptr) continue;
+                const auto fn = juce::File(m.e->path).getFileName().toLowerCase();
+                const bool clap = fn.contains("clap"), snare = fn.contains("snare") || fn.contains("snr");
+                if ((clap && nc < 6) || (snare && !clap && ns < 6)) { j.extra.push_back(m.e->path); (clap ? nc : ns)++; }
+            }
+        }
         if (!j.paths.empty()) jobs->push_back(std::move(j));
     }
     if (jobs->empty()) { std::lock_guard<std::mutex> g(matchLock); matchMsg = "BUILD MY KIT: NOTHING TO BUILD (EVERY PAD IS LOCKED)"; return; }
@@ -1710,7 +1724,8 @@ void DrumSlicerProcessor::buildKit()
                             auto& m = j.md[i];
                             if (m.before > m.after + 0.5f)
                             {   // never worse: as it is, it is nearer than matched -> it plays as it is
-                                m.after = m.before; m.bestAmount = 0.f; m.pitch = 0.f; m.en = 2000.f; m.gainDb = 0.f;
+                                m.after = m.before; m.bestAmount = 0.f; m.pitch = 0.f; m.en = 2000.f;
+                                m.gainDb = m.gainRawDb;          // ... but as loud as the loop's sound (it played at its own level: a kick far too loud / quiet)
                             }
                             j.after[i] = m.after;
                         }
@@ -1747,6 +1762,10 @@ void DrumSlicerProcessor::buildKit()
                         for (int i : j.order)
                             if (i != j.chosen && j.after[(size_t) i] > 0 && std::find(used.begin(), used.end(), j.paths[(size_t) i]) == used.end())
                                 j.partners.push_back(j.paths[(size_t) i]);   // (not a sample another pad plays)
+                        for (const auto& x : j.extra)
+                            if (x != j.paths[(size_t) j.chosen] && std::find(j.partners.begin(), j.partners.end(), x) == j.partners.end()
+                                && std::find(used.begin(), used.end(), x) == used.end())
+                                j.partners.push_back(x);
                         j.layer = findLayer(*j.A, j.vA, j.chosenAudio, j.B.get(), j.neutral, *stats, *j.ref, sr, j.fam, j.partners,
                                             [a] { return a->load(); }, nullptr, &j.md[(size_t) j.chosen]);
                     });

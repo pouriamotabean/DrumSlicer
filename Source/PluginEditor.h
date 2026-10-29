@@ -1246,10 +1246,16 @@ public:
         const int hz = zoneAt(e.position);
         const auto hr = hz >= 0 ? zones[(size_t) hz].r : juce::Rectangle<float>();
         if (hp != hoverPad || hr != hotRect) { hoverPad = hp; hotRect = hr; repaint(); }
+        if (page == pPattern)
+        {   // over a hit: its velocity shows, the cursor says it can be moved (sideways) or set louder (up / down)
+            int ph = -1; if (auto r = proc.getResult()) if (patLanes().expanded(6.f, 8.f).contains(e.position)) ph = patHitAt(*r, e.position);
+            if (ph != patHover) { patHover = ph; repaint(); }
+            if (ph >= 0) { setMouseCursor(juce::MouseCursor::UpDownLeftRightResizeCursor); return; }
+        }
         const int h = page == pSource ? handleAt(e.position.x, e.position.y) : 0;
         setMouseCursor(h != 0 ? juce::MouseCursor::LeftRightResizeCursor : hz >= 0 && zones[(size_t) hz].click ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
-    void mouseExit(const juce::MouseEvent&) override { if (hoverPad >= 0 || !hotRect.isEmpty()) { hoverPad = -1; hotRect = {}; repaint(); } }
+    void mouseExit(const juce::MouseEvent&) override { if (hoverPad >= 0 || !hotRect.isEmpty() || patHover >= 0) { hoverPad = -1; hotRect = {}; patHover = -1; repaint(); } }
     // a scrollbar under a zoomed view: drag the handle (or click beside it) to move along
     int scrolling = 0; double scrollGrab = 0;     // 1 = pattern, 2 = source
     juce::Rectangle<float> patScrollRect() const { const auto L = patLanes(); return { L.getX(), L.getBottom() + 4.f, L.getWidth(), 6.f }; }
@@ -1589,7 +1595,7 @@ private:
        #ifdef JucePlugin_VersionString
         const juce::String ver = JucePlugin_VersionString;
        #else
-        const juce::String ver = "2.5.0";
+        const juce::String ver = "2.6.0";
        #endif
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
         g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
@@ -2101,7 +2107,7 @@ private:
     static float laneY(juce::Rectangle<float> L, int k) { return L.getY() + 8.f + k * (L.getHeight() - 16.f) / 7.f; }
     double pv0 = 0, pv1 = 0; juce::uint64 pvId = 0; bool patSnap = true;
     std::vector<ds::Hit> patEdit; int patIdx = -1, patMode = 0; bool patEditing = false, patChanged = false;
-    juce::Point<float> patDown; double patT0 = 0; int patV0 = 100, patSel = -1;
+    juce::Point<float> patDown, patMouse; double patT0 = 0; int patV0 = 100, patSel = -1, patHover = -1; float patVAcc = 0;
     double step16(const ds::Result& r) const { return 60.0 / std::max(1.0, r.bpm) * r.sr / 4.0; }
     void fixPatView(const ds::Result& r)
     {
@@ -2161,7 +2167,7 @@ private:
         auto r = proc.getResult(); if (!r) return;
         grabKeyboardFocus();
         const int h = patHitAt(*r, e.position);
-        patEdit = r->hits; patEditing = true; patChanged = false; patDown = e.position; patMode = 0;
+        patEdit = r->hits; patEditing = true; patChanged = false; patDown = patMouse = e.position; patMode = 0; patVAcc = 0;
         if (h >= 0 && e.mods.isPopupMenu())
         {   // right-click = remove it
             patEdit.erase(patEdit.begin() + h); patChanged = true; patIdx = -1; patSel = -1; return;
@@ -2182,17 +2188,27 @@ private:
     {
         auto r = proc.getResult(); if (!r || !patEditing || patIdx < 0 || patIdx >= (int) patEdit.size()) return;
         const auto d = e.position - patDown;
-        if (patMode == 0 && std::max(std::abs(d.x), std::abs(d.y)) > 4.f) patMode = std::abs(d.x) >= std::abs(d.y) ? 1 : 2;
+        if (patMode == 0 && std::max(std::abs(d.x), std::abs(d.y)) > 4.f)
+        {
+            patMode = std::abs(d.x) >= std::abs(d.y) ? 1 : 2;
+            setMouseCursor(patMode == 1 ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::UpDownResizeCursor);
+        }
+        const float dy = e.position.y - patMouse.y; patMouse = e.position;
         auto& h = patEdit[(size_t) patIdx];
         const double len = std::max(1, r->loop.getNumSamples());
         if (patMode == 1) { h.time = juce::jlimit(0.0, len - 1.0, snapT(*r, patT0 + (tOf(e.position.x) - tOf(patDown.x)), e.mods.isAltDown())); patChanged = true; }
-        if (patMode == 2) { h.velocity = juce::jlimit(1, 127, patV0 - juce::roundToInt(d.y * 0.8f)); patChanged = true; }
+        if (patMode == 2)
+        {   // the velocity follows the mouse: 1 per pixel up / down, SHIFT = fine (1 per 4 pixels)
+            patVAcc -= dy * (e.mods.isShiftDown() ? 0.25f : 1.f);
+            h.velocity = juce::jlimit(1, 127, patV0 + juce::roundToInt(patVAcc)); patChanged = true;
+        }
         repaint();
     }
     void patternUp()
     {
         if (patEditing && patChanged) { proc.editHits(patEdit); patSel = -1; }
-        patEditing = false; patIdx = -1;
+        patEditing = false; patIdx = -1; patMode = 0;
+        setMouseCursor(patHover >= 0 ? juce::MouseCursor::UpDownLeftRightResizeCursor : juce::MouseCursor::NormalCursor);
     }
     void deleteSelectedHit()
     {
@@ -2303,6 +2319,19 @@ private:
                 if (playX > 0 && x <= playX && playX - x < 12.f) { g.setColour(ui::orange.withAlpha(0.35f)); g.fillEllipse(juce::Rectangle<float>(w + 8.f, w + 8.f).withCentre({ x, y })); c = ui::orange; }
                 g.setColour(c); g.fillEllipse(juce::Rectangle<float>(w, w).withCentre({ x, y }));
                 if (edited || selHit) { g.setColour(ui::orange); g.drawEllipse(juce::Rectangle<float>(w + 6.f, w + 6.f).withCentre({ x, y }), 1.5f); }
+                if (edited && patMode == 2)
+                {   // setting the velocity: a meter beside the hit and the value at the mouse
+                    const float mh = 34.f, mx = x + w * 0.5f + 7.f;
+                    g.setColour(ui::dark); g.fillRoundedRectangle(mx, y - mh * 0.5f, 4.f, mh, 2.f);
+                    g.setColour(ui::orange); g.fillRoundedRectangle(mx, y + mh * 0.5f - mh * v, 4.f, mh * v, 2.f);
+                    g.setFont(ui::mono(13.f));
+                    g.drawText(juce::String(h.velocity), juce::Rectangle<float>(patMouse.x + 12.f, patMouse.y - 9.f, 40.f, 18.f), juce::Justification::centredLeft);
+                }
+                else if (!patEditing && (int) i == patHover)
+                {
+                    g.setFont(ui::mono(10.f)); g.setColour(ui::white.withAlpha(0.8f));
+                    g.drawText("v" + juce::String(h.velocity), juce::Rectangle<float>(x - 30.f, y - w * 0.5f - 15.f, 60.f, 12.f), juce::Justification::centred);
+                }
                 if (edited)
                 {
                     const double secs = h.time / r.sr, beats = h.time / (s * 4.0);

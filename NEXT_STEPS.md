@@ -134,6 +134,14 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.6.0
+- BUILD loudness bug: when your sample plays as it is (matching would sound further away), its GAIN was reset to 0
+  dB - it played at its own level (kick far too loud / quiet). Now it is still brought to the loop sound's loudness.
+- BUILD layers: a snare pad also tries your nearest claps and snares as the layer (clap + snare of the loop);
+  taken only where the pair is clearly nearer than one sample.
+- Pattern velocity: over a hit the cursor changes and its velocity shows; drag up / down = velocity follows the
+  mouse (1 per pixel, SHIFT fine), a meter beside the hit and the value at the mouse.
+
 ## v2.5.0
 - Tempo: a loop is 1/2/4/8/16 bars - a tempo giving 12 or 6 bars is a triplet-grid error (ZEN 116: 174 -> 116).
 - Tempo: a number in the file name ("_66_", "110bpm") that is the found tempo or 1/2, 2, 2/3, 3/2 of it wins.
