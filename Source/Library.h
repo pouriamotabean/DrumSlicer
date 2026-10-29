@@ -362,7 +362,13 @@ inline float distance(const Feat& q, const Feat& c, const LibIndex& ix, Family f
     d += k.hard * (0.6f * z(fHard) + 0.25f * z(fPunch) + 0.15f * z(fAttack));
     d += k.bright * (0.5f * z(fBright) + 0.25f * z(fAir) + 0.25f * z(fCentB));
     d += k.sub * z(fSub);
-    d += k.noise * z(fNoise);
+    {   // a hat more metallic (more ringing tones, less noise) or harsher in the air than the loop's sounds wrong
+        // at once; one a bit softer and smoother hardly does: for hats the wrong direction counts three times
+        float zn = z(fNoise);
+        if (fam == famHat && c[fNoise] < q[fNoise]) zn *= 3.f;
+        d += k.noise * zn;
+        if (fam == famHat && c[fAir] > q[fAir]) d += k.bright * 0.25f * 2.f * z(fAir);
+    }
     if (q[fPitchConf] > 0.5f && c[fPitchConf] > 0.5f)
     {
         float semis = std::abs(q[fPitch] - c[fPitch]) * 12.f;

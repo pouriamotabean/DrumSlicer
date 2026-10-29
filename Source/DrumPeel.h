@@ -1459,10 +1459,15 @@ private:
         F.clear(); for (size_t c = 0; c < n; ++c) F.push_back(featuresOf(c, yAll));
         std::vector<std::string> L(n);
         double wmax = 0; for (auto& f : F) wmax = std::max(wmax, f.weight);
+        // the slow-attack hat sounds together play dense (16ths: 4 or more a second): a shaker (one shaker can be
+        // learned as several sounds)
+        bool slowDense = false;
+        { size_t k = 0; for (size_t c = 0; c < n; ++c) if (F[c].hatlike && F[c].rise >= 13) k += snd[c].t.size(); slowDense = k >= 4.0 * N / sr; }
         for (size_t c = 0; c < n; ++c)
         {
             const auto& f = F[c];
-            if (f.hatlike) L[c] = f.dec >= 0.6 ? "cymbal" : (f.rise >= 13 ? "shaker" : (f.dec < 0.15 ? "chat" : "ohat"));
+            // a slow attack is a shaker when it plays dense (16ths); a soft hat on the 8ths has one too
+            if (f.hatlike) L[c] = f.dec >= 0.6 ? "cymbal" : (f.rise >= 20 || (f.rise >= 13 && slowDense) ? "shaker" : (f.dec < 0.15 ? "chat" : "ohat"));
             else if ((f.bursts >= 3 && f.flat >= 0.12 && f.cen >= 900 && f.low < 0.5)
                      || (f.bursts >= 2 && f.flat >= 0.2 && f.cen >= 1000 && f.cen <= 7000 && f.low < 0.1 && f.body < 0.15)) L[c] = "clap";   // several bursts of noise
             else if (f.low > 0.45) L[c] = (f.f0 >= 110 && f.low < 0.8) ? "tom" : "kick";   // a low sound with a clear higher pitch: a tom
@@ -2224,6 +2229,14 @@ private:
                 if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "tempo (loop): grid %.2f -> %.2f\n", out.bpm, best);
                 out.bpm = best;
             }
+            // a loop is a whole number of bars, mostly 1, 2, 4, 8 or 16: a tempo that makes 12 or 6 bars of it
+            // is 3/2 of the real one (a triplet grid), one that makes 3 bars is 3/4 ...
+            auto pow2 = [&](double bpm) { const double b = N / sr * bpm / 240.0; const double l = std::log2(std::max(0.5, b));
+                                          return std::abs(b - std::round(b)) < 0.03 && std::abs(l - std::round(l)) < 0.01; };
+            if (!std::getenv("DP_NO_POW2") && !pow2(out.bpm))
+                for (double q : { 2.0 / 3.0, 1.5, 4.0 / 3.0, 0.75 })
+                    if (const double c = out.bpm * q; c >= 60 && c <= 180 && pow2(c))
+                    {   if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "tempo (bars): %.2f -> %.2f\n", out.bpm, c); out.bpm = c; break; }
         }
         Buf y; render(out.pads, out.notes, y, N);
         out.nullMatch = nullMatch(y); hearingMatch(y, out.hearing);

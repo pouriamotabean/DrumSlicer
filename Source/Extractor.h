@@ -632,6 +632,23 @@ inline std::shared_ptr<Result> analyseBuffer(juce::AudioBuffer<float> audio, dou
 
     auto r = std::make_shared<Result>();
     r->loop = std::move(audio); r->sr = sr; r->bpm = out.bpm; r->nullMatch = out.nullMatch;
+    {   // the file name often says the tempo ("..._66_drums", "110bpm"): a number there that is the found tempo
+        // or a simple ratio of it (half, double, 2/3, 3/2) is the real one
+        const auto nm = file.getFileNameWithoutExtension(); juce::String num;
+        for (int i = 0; i <= nm.length(); ++i)
+        {
+            const juce::juce_wchar ch = i < nm.length() ? nm[i] : 0;
+            if (juce::CharacterFunctions::isDigit(ch)) { num += juce::String::charToString(ch); continue; }
+            if (num.isNotEmpty() && num.length() <= 3)
+            {
+                const double n = num.getDoubleValue();
+                if (n >= 55 && n <= 200)
+                    for (double q : { 1.0, 0.5, 2.0, 2.0 / 3.0, 1.5 })
+                        if (std::abs(out.bpm * q - n) <= 0.01 * n) { r->bpm = n; break; }
+            }
+            num.clear();
+        }
+    }
     for (int i = 0; i < 5; ++i) r->hearing[i] = out.hearing[i];
     for (size_t p = 0; p < out.pads.size() && p < (size_t) kPads; ++p)
     {

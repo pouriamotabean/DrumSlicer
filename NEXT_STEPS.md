@@ -134,6 +134,14 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.5.0
+- Tempo: a loop is 1/2/4/8/16 bars - a tempo giving 12 or 6 bars is a triplet-grid error (ZEN 116: 174 -> 116).
+- Tempo: a number in the file name ("_66_", "110bpm") that is the found tempo or 1/2, 2, 2/3, 3/2 of it wins.
+- Hats: a soft hat (attack 13-20 ms) was named SHAKER; now a shaker only when the slow-attack sounds play dense
+  (4+ a second). Synthwave 110 gets its C-HAT pad (was SHAKER); percussion loop keeps SHAKER.
+- Matching hats: a candidate more metallic (less noise in the body) or harsher in the air than the loop's hat
+  counts three / two times as far; softer / smoother hardly matters.
+
 ## v2.4.0
 - Engine: a "kick" whose hits add nothing below 250 Hz (it learned its low end from the ringing of the real kick)
   is relabelled hat / percussion. Mumbai 93: null 13% -> 62%; zodiac 43% -> 67%; 808 loop 42% -> 46%;
