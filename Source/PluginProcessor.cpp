@@ -56,6 +56,10 @@ DrumSlicerProcessor::DrumSlicerProcessor()
     : AudioProcessor(makeBuses()), apvts(*this, &undo, "STATE", makeLayout())
 {
     for (auto& a : previewPad) a = 0;
+    {   // once per session (all instances): old analyses to the bin, in the background
+        static std::atomic<bool> pruned { false };
+        if (ds::rootChosen() && !pruned.exchange(true)) std::thread([] { ds::pruneCaches(); }).detach();
+    }
     for (auto& a : padLevel) a = 0.f;
     pMaster = apvts.getRawParameterValue("master"); pBpm = apvts.getRawParameterValue("bpm");
     for (int i = 0; i < ds::kPads; ++i)

@@ -134,6 +134,17 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.9.0
+- Matching kicks: the loop's kick carries the hats / snare on it as extra highs - one of yours with fewer highs is
+  hardly further away. Truth test: the real kick ranked first in 5 of 6 loops (was 2); BUILD exact 4 / 6 (was 3).
+- Matching an open hat cut by the next closed one: what comes after the cut does not count. Real open hat now
+  ranked first in both trap loops; BUILD picks an open hat (was a closed one).
+- Undo key glows orange for 4 s after BUILD MY KIT (you can go back).
+- Old analyses: once per session the folders of loops not used for 30 days, past the 40 newest, go to the bin
+  (Kits and the library index never). Projects keep their kits inside them.
+- Engine "drumpeel-6": a loop opened from disk that was analysed by an older engine is analysed again (2.4 - 2.8
+  improvements reach loops analysed before). Projects are unchanged.
+
 ## v2.8.0
 - BUILD: snare + clap pairs. For a snare pad, every snare of yours with the claps that fit best, summed at 4 mix
   ratios; taken when clearly (1.5) nearer than one sample. Truth test: rimshot_street + clap jam_one found exactly.

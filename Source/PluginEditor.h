@@ -1411,6 +1411,7 @@ public:
         if (building && !wasBuilding) { buildStart = now; scoreFrom = kitScore(); setPage(pKit); }
         if (!building && wasBuilding) { buildEnd = now; scoreFrom = shownScore; }
         wasBuilding = building;
+        if (buildEnd > 0 && now - buildEnd < 4500) repaint();          // the undo key glows a while after a build
         // the sounds changed (a sample, a match, a suggestion): undo steps of the knobs before it would not fit any more
         {
             juce::String sig;
@@ -1595,7 +1596,7 @@ private:
        #ifdef JucePlugin_VersionString
         const juce::String ver = JucePlugin_VersionString;
        #else
-        const juce::String ver = "2.8.0";
+        const juce::String ver = "2.9.0";
        #endif
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
         g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
@@ -2880,7 +2881,10 @@ private:
             juce::Path a; const auto c = r.getCentre();
             a.startNewSubPath(c.x - 1.f, c.y - 6.f); a.lineTo(c.x - 6.f, c.y - 1.f); a.lineTo(c.x - 1.f, c.y + 4.f);
             a.startNewSubPath(c.x - 6.f, c.y - 1.f); a.lineTo(c.x + 3.f, c.y - 1.f); a.quadraticTo(c.x + 7.f, c.y - 1.f, c.x + 7.f, c.y + 3.f); a.quadraticTo(c.x + 7.f, c.y + 7.f, c.x + 3.f, c.y + 7.f);
-            g.setColour(can ? ui::white : ui::faint); g.strokePath(a, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded)); },
+            const double since = juce::Time::getMillisecondCounterHiRes() - buildEnd;
+            const bool glow = proc.canUndoBuild() && !proc.undo.canUndo() && buildEnd > 0 && since < 4000;   // just built: "you can go back"
+            if (glow) { const float k = 0.5f + 0.5f * std::sin((float) since * 0.006f); g.setColour(ui::orange.withAlpha(0.18f * k)); g.fillEllipse(juce::Rectangle<float>(30.f, 30.f).withCentre(c)); }
+            g.setColour(glow ? ui::orange : can ? ui::white : ui::faint); g.strokePath(a, juce::PathStrokeType(1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded)); },
             [this] { if (proc.undo.canUndo()) { proc.undo.undo(); toast("undo"); shape.invalidate(); }
                      else if (proc.canUndoBuild()) { proc.undoBuild(); shape.invalidate(); }
                      else toast("nothing to undo"); });

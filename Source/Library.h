@@ -357,10 +357,17 @@ inline float distance(const Feat& q, const Feat& c, const LibIndex& ix, Family f
     const W& k = w[fam];
     auto z = [&](int i) { const float d = (q[(size_t) i] - c[(size_t) i]) / ix.sd[(size_t) i]; return d * d; };
     float d = 0;
-    d += k.len * (0.7f * z(fLen) + 0.3f * z(fLen10));
-    d += k.tail * 0.5f * (z(fTail) + z(fRoom));
-    d += k.hard * (0.6f * z(fHard) + 0.25f * z(fPunch) + 0.15f * z(fAttack));
-    d += k.bright * (0.5f * z(fBright) + 0.25f * z(fAir) + 0.25f * z(fCentB));
+    // a hat from the loop that ends abruptly (an open hat cut by the next closed one: it falls 20 and 40 dB at the
+    // same moment) is longer in truth: one of yours that rings on is hardly further away
+    const bool cutHat = fam == famHat && q[fTail] - q[fLen] < 0.3f;
+    auto zl = [&](int i) { const float zz = z(i); return cutHat && c[(size_t) i] > q[(size_t) i] ? 0.05f * zz : zz; };
+    d += k.len * (0.7f * zl(fLen) + 0.3f * zl(fLen10));
+    d += k.tail * 0.5f * (zl(fTail) + zl(fRoom));
+    // a kick taken from a loop carries the hats / snare that sound with it as extra highs: one of yours with fewer
+    // highs than it is hardly further away (with more it is)
+    auto zk = [&](int i) { const float zz = z(i); return fam == famKick && c[(size_t) i] < q[(size_t) i] ? 0.25f * zz : zz; };
+    d += k.hard * (0.6f * zk(fHard) + 0.25f * z(fPunch) + 0.15f * z(fAttack));
+    d += k.bright * (0.5f * zk(fBright) + 0.25f * zk(fAir) + 0.25f * z(fCentB));
     d += k.sub * z(fSub);
     {   // a hat more metallic (more ringing tones, less noise) or harsher in the air than the loop's sounds wrong
         // at once; one a bit softer and smoother hardly does: for hats the wrong direction counts three times
@@ -382,13 +389,17 @@ inline float distance(const Feat& q, const Feat& c, const LibIndex& ix, Family f
     // a hat taken from a loop keeps little below ~1 kHz (what is there is mostly the kick's / snare's leftovers,
     // so it is taken away): for hats the bands down there hardly count
     auto hatLow = [&](double hz) { return fam == famHat && hz < 1000.0 ? 0.15f : 1.f; };
-    float bd = 0; for (int i = 0; i < kBands; ++i) { const float x = (q[(size_t) (fBands + i)] - c[(size_t) (fBands + i)]) / 10.f; bd += hatLow(30.0 * std::pow(16000.0 / 30.0, (i + 0.5) / kBands)) * er.band[(size_t) i] * x * x; }
+    // (and a kick's highs, where yours has less: see above)
+    auto kickHigh = [&](double hz, float qv, float cv) { return fam == famKick && hz > 2000.0 && cv < qv ? 0.25f : 1.f; };
+    float bd = 0; for (int i = 0; i < kBands; ++i) { const double hz = 30.0 * std::pow(16000.0 / 30.0, (i + 0.5) / kBands); const float qv = q[(size_t) (fBands + i)], cv = c[(size_t) (fBands + i)], x = (qv - cv) / 10.f; bd += hatLow(hz) * kickHigh(hz, qv, cv) * er.band[(size_t) i] * x * x; }
     d += 0.6f * k.timbre * bd / kBands * 4.f;
     float sd2 = 0;
     for (int t = 0; t < kShapeT; ++t)
-        for (int b = 0; b < kShapeB; ++b) { const int i = fShape + t * kShapeB + b; const float x = (q[(size_t) i] - c[(size_t) i]) / 10.f; sd2 += hatLow(40.0 * std::pow(16000.0 / 40.0, (b + 0.5) / kShapeB)) * er.shape[(size_t) b] * x * x; }
+        for (int b = 0; b < kShapeB; ++b) { const int i = fShape + t * kShapeB + b; const double hz = 40.0 * std::pow(16000.0 / 40.0, (b + 0.5) / kShapeB); const float x = (q[(size_t) i] - c[(size_t) i]) / 10.f;
+            const float cutW = cutHat && t * 40.0 > std::pow(2.0, (double) q[fLen]) && c[(size_t) i] > q[(size_t) i] ? 0.05f : 1.f;   // after the cut: unknown
+            sd2 += cutW * hatLow(hz) * kickHigh(hz, q[(size_t) i], c[(size_t) i]) * er.shape[(size_t) b] * x * x; }
     d += k.shape * sd2 / (kShapeB * kShapeT) * 4.f;
-    d += k.texture * (0.45f * z(fRough) + 0.2f * z(fGrain) + 0.35f * z(fBursts));
+    d += k.texture * (fam == famKick ? 0.25f : 1.f) * (0.45f * z(fRough) + 0.2f * z(fGrain) + 0.35f * z(fBursts));   // (a kick's "texture" is mostly those highs)
     if (tags != nullptr)
     {   // how it differs from the pad, in the words you would use
         const float dl = c[fLen] - q[fLen];

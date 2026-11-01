@@ -14,7 +14,7 @@
 namespace ds
 {
 static constexpr int kPads = 8;
-static const char* kEngineVersion = "drumpeel-5";
+static const char* kEngineVersion = "drumpeel-6";
 
 struct Pad
 {
@@ -227,8 +227,32 @@ inline juce::File shotFileIn(const juce::File& dir, const juce::File& loop, cons
 }
 inline juce::File cacheInfoIn(const juce::File& dir, const juce::File& loop) { return dir.getChildFile(loop.getFileNameWithoutExtension() + "_drumslicer.txt"); }
 inline juce::File cacheInfo(const juce::File& loop) { return cacheInfoIn(cacheDir(loop), loop); }
-// same file = same size + same modification time. The engine version is written too, but an older analysis
-// is still used: a project keeps sounding the way it did (RE-ANALYSE uses the new engine)
+// old analyses: a folder per loop ever analysed grows without end. The 40 used most recently stay, and anything
+// used in the last 30 days; older ones go to the bin (a project keeps its kit inside it: nothing breaks, the loop
+// is analysed again if it is opened from disk). Kits you saved (Kits/) and the library index are never touched.
+inline int pruneCaches()
+{
+    const auto r = root(); if (!r.isDirectory()) return 0;
+    struct D { juce::File dir; juce::Time t; };
+    std::vector<D> v;
+    for (const auto& e : juce::RangedDirectoryIterator(r, false, "*", juce::File::findDirectories))
+    {
+        const auto d = e.getFile(); const auto n = d.getFileName();
+        if (n == "Kits" || n == "Index" || n.startsWithChar('.')) continue;
+        const auto infos = d.findChildFiles(juce::File::findFiles, false, "*_drumslicer.txt");
+        if (infos.isEmpty()) continue;                                   // not an analysis folder: not ours to judge
+        juce::Time t = d.getLastModificationTime(); for (const auto& f : infos) t = std::max(t, f.getLastModificationTime());
+        v.push_back({ d, t });
+    }
+    std::sort(v.begin(), v.end(), [](const D& a, const D& b) { return a.t > b.t; });
+    const auto cut = juce::Time::getCurrentTime() - juce::RelativeTime::days(30);
+    int gone = 0;
+    for (size_t i = 40; i < v.size(); ++i) if (v[i].t < cut && v[i].dir.moveToTrash()) ++gone;
+    return gone;
+}
+
+// same file = same size + same modification time. The engine version is written too: an analysis by an older
+// engine is done again (projects keep sounding the way they did: their kit is stored inside them)
 inline juce::String sourceKey(const juce::File& loop)
 {
     return juce::String(loop.getSize()) + "|" + juce::String(loop.getLastModificationTime().toMilliseconds());
@@ -358,6 +382,9 @@ inline std::shared_ptr<Result> loadCacheFrom(const juce::File& dir, const juce::
     if (!info.existsAsFile()) return nullptr;
     juce::StringArray lines; lines.addLines(info.loadFileAsString());
     if (lines.isEmpty() || !keyMatches(lines[0], loop, region)) return nullptr;
+    // an analysis by an older engine: a loop opened from disk is analysed again (a project keeps its own kit -
+    // it is stored inside the project, not here)
+    if (!lines.contains("engine=" + juce::String(kEngineVersion))) return nullptr;
     auto r = std::make_shared<Result>();
     r->loop = audio; r->sr = sr; r->fromCache = true; r->region = region;
     if (!parseInfo(lines, *r, [&](const juce::String& n, bool b) { return shotFileIn(dir, loop, n, b); })) return nullptr;
