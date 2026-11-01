@@ -134,6 +134,19 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.7.0
+- Truth bench (tools/gtbench): 12 loops made from the user's OLIVER one-shots, pattern and samples known.
+- Kick: a woody / clicky kick was renamed by the low-end rule; now a kick is "a sound that raises the low end"
+  (46 ms before / after, +6 dB) - kicks found: 100 % (was 2 loops with none).
+- Kick + snare on the same beat (pop 2 and 4): the combined sound is split into the kick and a snare; four-on-the-
+  floor loop: null 70 % -> 99 %, snare found.
+- Percussion whose hits add only highs is a hat (live hats). Hat hits learned on the snare / kick pad move to the
+  hat pad where that models the spot as well (the user's stem loop: snare 6 -> 4 hits, hats 11 -> 13, exact).
+- Matching hats: the bands below 1 kHz hardly count (the loop's hat loses them to the leftovers cleanup): the
+  trap loop now picks the real hat (was a snap).
+- Library test (6 loops, exact sample found): hats 4/6 (rest the same series), kicks 3/6, snares 2/6.
+- Tried and left off: a gentler hat cleanup (hurt 4 hat loops) and a tail gate (hurt real loops' room).
+
 ## v2.6.0
 - BUILD loudness bug: when your sample plays as it is (matching would sound further away), its GAIN was reset to 0
   dB - it played at its own level (kick far too loud / quiet). Now it is still brought to the loop sound's loudness.

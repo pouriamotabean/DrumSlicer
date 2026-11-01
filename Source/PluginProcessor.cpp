@@ -1733,6 +1733,9 @@ void DrumSlicerProcessor::buildKit()
                     }
                     j.order.resize(j.paths.size()); for (size_t i = 0; i < j.order.size(); ++i) j.order[i] = (int) i;
                     std::stable_sort(j.order.begin(), j.order.end(), [&j](int x, int y) { return j.after[(size_t) x] > j.after[(size_t) y]; });
+                    if (std::getenv("REKIT_DEBUG"))
+                        for (size_t q = 0; q < std::min<size_t>(6, j.order.size()); ++q)
+                        { const int i = j.order[q]; std::fprintf(stderr, "build %s: %5.1f -> %5.1f  %s\n", j.name.toRawUTF8(), j.md[(size_t) i].before, j.after[(size_t) i], juce::File(j.paths[(size_t) i]).getFileName().toRawUTF8()); }
                 });
             for (auto& t : th) t.join();
         }

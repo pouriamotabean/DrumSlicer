@@ -379,11 +379,14 @@ inline float distance(const Feat& q, const Feat& c, const LibIndex& ix, Family f
     else if ((q[fPitchConf] > 0.5f) != (c[fPitchConf] > 0.5f)) d += k.pitch * 0.6f;
     float td = 0; for (int i = fTimbre; i < fTimbre + kTimbre; ++i) td += z(i);
     d += k.timbre * td / kTimbre;
-    float bd = 0; for (int i = 0; i < kBands; ++i) { const float x = (q[(size_t) (fBands + i)] - c[(size_t) (fBands + i)]) / 10.f; bd += er.band[(size_t) i] * x * x; }
+    // a hat taken from a loop keeps little below ~1 kHz (what is there is mostly the kick's / snare's leftovers,
+    // so it is taken away): for hats the bands down there hardly count
+    auto hatLow = [&](double hz) { return fam == famHat && hz < 1000.0 ? 0.15f : 1.f; };
+    float bd = 0; for (int i = 0; i < kBands; ++i) { const float x = (q[(size_t) (fBands + i)] - c[(size_t) (fBands + i)]) / 10.f; bd += hatLow(30.0 * std::pow(16000.0 / 30.0, (i + 0.5) / kBands)) * er.band[(size_t) i] * x * x; }
     d += 0.6f * k.timbre * bd / kBands * 4.f;
     float sd2 = 0;
     for (int t = 0; t < kShapeT; ++t)
-        for (int b = 0; b < kShapeB; ++b) { const int i = fShape + t * kShapeB + b; const float x = (q[(size_t) i] - c[(size_t) i]) / 10.f; sd2 += er.shape[(size_t) b] * x * x; }
+        for (int b = 0; b < kShapeB; ++b) { const int i = fShape + t * kShapeB + b; const float x = (q[(size_t) i] - c[(size_t) i]) / 10.f; sd2 += hatLow(40.0 * std::pow(16000.0 / 40.0, (b + 0.5) / kShapeB)) * er.shape[(size_t) b] * x * x; }
     d += k.shape * sd2 / (kShapeB * kShapeT) * 4.f;
     d += k.texture * (0.45f * z(fRough) + 0.2f * z(fGrain) + 0.35f * z(fBursts));
     if (tags != nullptr)
