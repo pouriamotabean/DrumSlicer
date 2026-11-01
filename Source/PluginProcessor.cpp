@@ -1558,6 +1558,61 @@ static LayerFound findLayer(const juce::AudioBuffer<float>& A, const std::array<
     return out;
 }
 
+// a snare and a clap (or two snares) played together in the loop: the pair of your samples that, summed, comes
+// nearest to A - not built around the one sample nearest alone (that one is often neither of the two)
+struct PairFound { MatchData m; juce::AudioBuffer<float> L, base; int b = -1, p = -1; };
+static PairFound findPair(const juce::AudioBuffer<float>& A, const std::array<float, DrumSlicerProcessor::kShapeN>& vA,
+                          const juce::AudioBuffer<float>* B, const std::array<float, DrumSlicerProcessor::kShapeN>& neutral,
+                          const ds::LibIndex& stats, const ds::Pad& ref, double sr, ds::Family fam,
+                          const std::vector<juce::String>& bases, const std::vector<juce::String>& partners, const std::function<bool()>& alive)
+{
+    PairFound out;
+    int off = 0;
+    const auto T = atRate(shapeShot(A, sr, shapeFrom(vA), off), std::pow(2.0, vA[10] / 12.0));
+    ds::Feat fT; ds::fingerprint(T, sr, fT);
+    const auto LT = mt::bandLevels(T, sr);
+    auto load = [&](const std::vector<juce::String>& v) { std::vector<juce::AudioBuffer<float>> o(v.size());
+        for (size_t i = 0; i < v.size(); ++i) if (!ds::loadUserShot(juce::File(v[i]), ref, sr, o[i])) o[i].setSize(0, 0); return o; };
+    const auto bb = load(bases), pp = load(partners);
+    struct Cand { float quick; int b, p; float ratio; };
+    std::vector<Cand> cands;
+    auto tryPair = [&](size_t i, size_t k) {
+        if (bb[i].getNumSamples() == 0 || pp[k].getNumSamples() == 0 || bases[i] == partners[k]) return;
+        for (const auto& c : cands) if (c.b == (int) i && c.p == (int) k) return;
+        for (float ratio : { 0.4f, 0.7f, 1.0f, 1.4f })
+        {
+            juce::AudioBuffer<float> c2; c2.makeCopyOf(pp[k]); c2.applyGain(ratio);
+            const auto L = layerOf(bb[i], c2, sr, 0.0, LT);
+            ds::Feat f; if (!ds::fingerprint(L, sr, f)) continue;
+            cands.push_back({ ds::scoreOf(ds::distance(fT, f, stats, fam)), (int) i, (int) k, ratio });
+        } };
+    // 1. the nearest snares with every clap: which claps belong; 2. every snare with those claps (the snare
+    // of a pair is often far from A alone - the clap hides it)
+    for (size_t i = 0; i < std::min<size_t>(8, bb.size()) && alive(); ++i) for (size_t k = 0; k < pp.size(); ++k) tryPair(i, k);
+    {
+        std::vector<int> topP; auto c1 = cands; std::sort(c1.begin(), c1.end(), [](const Cand& x, const Cand& y) { return x.quick > y.quick; });
+        for (const auto& c : c1) if (std::find(topP.begin(), topP.end(), c.p) == topP.end()) { topP.push_back(c.p); if (topP.size() >= 2) break; }
+        for (size_t i = 0; i < bb.size() && alive(); ++i) for (int k : topP) tryPair(i, (size_t) k);
+    }
+    std::sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) { return x.quick > y.quick; });
+    out.m.after = -1.f;
+    for (size_t k = 0; k < std::min<size_t>(4, cands.size()) && alive(); ++k)
+    {
+        const auto& cd = cands[k];
+        juce::AudioBuffer<float> c2; c2.makeCopyOf(pp[(size_t) cd.p]); c2.applyGain(cd.ratio);
+        auto L = layerOf(bb[(size_t) cd.b], c2, sr, 0.0, LT);
+        L.applyGain(juce::Decibels::decibelsToGain(juce::jlimit(-12.f, 12.f, mt::loudnessOf(A, sr) - mt::loudnessOf(L, sr))));
+        const float pk = std::max(L.getMagnitude(0, 0, L.getNumSamples()), L.getMagnitude(1, 0, L.getNumSamples()));
+        if (pk > 0.99f) L.applyGain(0.99f / pk);
+        auto m = computeMatch(A, vA, L, neutral, neutral, MatchData(), false, sr, fam, stats, B);
+        if (m.before > m.after + 0.5f) { m.after = m.before; m.bestAmount = 0.f; m.pitch = 0.f; m.en = 2000.f; m.gainDb = m.gainRawDb; }
+        if (std::getenv("REKIT_DEBUG")) std::fprintf(stderr, "pair %s + %s x%.1f: quick %.1f -> %.1f\n", juce::File(bases[(size_t) cd.b]).getFileName().toRawUTF8(),
+                                                     juce::File(partners[(size_t) cd.p]).getFileName().toRawUTF8(), cd.ratio, cd.quick, m.after);
+        if (m.after > out.m.after) { out.m = m; out.L = std::move(L); out.b = cd.b; out.p = cd.p; out.base.makeCopyOf(bb[(size_t) cd.b]); }
+    }
+    return out;
+}
+
 void DrumSlicerProcessor::startLayer(int pad)
 {
     auto r = getResult();
@@ -1637,7 +1692,7 @@ void DrumSlicerProcessor::buildKit()
         std::vector<juce::String> paths;
         // results
         std::vector<float> after; std::vector<MatchData> md; std::vector<int> order; int chosen = -1;
-        LayerFound layer; juce::AudioBuffer<float> chosenAudio; std::vector<juce::String> partners, extra;
+        LayerFound layer; juce::AudioBuffer<float> chosenAudio; std::vector<juce::String> partners, extra, pairBases, pairParts; PairFound pair;
     };
     auto jobs = std::make_shared<std::vector<Job>>();
     std::vector<juce::String> taken;                     // files that locked pads (or other pads) already use
@@ -1678,6 +1733,8 @@ void DrumSlicerProcessor::buildKit()
                 const auto fn = juce::File(m.e->path).getFileName().toLowerCase();
                 const bool clap = fn.contains("clap"), snare = fn.contains("snare") || fn.contains("snr");
                 if ((clap && nc < 6) || (snare && !clap && ns < 6)) { j.extra.push_back(m.e->path); (clap ? nc : ns)++; }
+                if (snare && !clap && j.pairBases.size() < 40) j.pairBases.push_back(m.e->path);
+                if (clap && j.pairParts.size() < 8) j.pairParts.push_back(m.e->path);
             }
         }
         if (!j.paths.empty()) jobs->push_back(std::move(j));
@@ -1771,6 +1828,12 @@ void DrumSlicerProcessor::buildKit()
                                 j.partners.push_back(x);
                         j.layer = findLayer(*j.A, j.vA, j.chosenAudio, j.B.get(), j.neutral, *stats, *j.ref, sr, j.fam, j.partners,
                                             [a] { return a->load(); }, nullptr, &j.md[(size_t) j.chosen]);
+                        if (!j.pairBases.empty() && !j.pairParts.empty())
+                        {   // a snare + clap pair of yours, when it is clearly nearer than the best so far
+                            auto pr = findPair(*j.A, j.vA, j.B.get(), j.neutral, *stats, *j.ref, sr, j.fam, j.pairBases, j.pairParts, [a] { return a->load(); });
+                            const float sofar = j.layer.path >= 0 ? j.layer.best.after : j.md[(size_t) j.chosen].after;
+                            if (pr.b >= 0 && pr.m.after > sofar + 1.5f && std::find(used.begin(), used.end(), j.pairBases[(size_t) pr.b]) == used.end()) j.pair = std::move(pr);
+                        }
                     });
             for (auto& t : th) t.join();
         }
@@ -1790,6 +1853,13 @@ void DrumSlicerProcessor::buildKit()
                 pd.user = j.layer.path >= 0 ? j.layer.L : j.chosenAudio;
                 pd.userName = f.getFileNameWithoutExtension(); pd.userPath = f.getFullPathName();
                 pd.clearLayer();
+                if (j.pair.b >= 0)
+                {   // a pair: its snare is "yours", the clap the layer on it
+                    const juce::File fb(j.pairBases[(size_t) j.pair.b]), fp(j.pairParts[(size_t) j.pair.p]);
+                    pd.user = j.pair.L; pd.userName = fb.getFileNameWithoutExtension(); pd.userPath = fb.getFullPathName();
+                    pd.userBase.makeCopyOf(j.pair.base); pd.layerName = fp.getFileNameWithoutExtension(); pd.layerPath = fp.getFullPathName();
+                    ++built; continue;
+                }
                 if (j.layer.path >= 0 && j.layer.path < (int) j.partners.size())
                 {   // layered: your sample alone is kept under it (REMOVE LAYER)
                     const juce::File f2(j.partners[(size_t) j.layer.path]);
@@ -1811,7 +1881,7 @@ void DrumSlicerProcessor::buildKit()
                     sg.locked = false;
                 }
                 resetShape(j.pad, 2);
-                const auto& m = j.layer.path >= 0 ? j.layer.best : j.md[(size_t) j.chosen];
+                const auto& m = j.pair.b >= 0 ? j.pair.m : j.layer.path >= 0 ? j.layer.best : j.md[(size_t) j.chosen];
                 sum += m.after;
                 applyMatch(j.pad, m, j.neutral, {}, false);
             }

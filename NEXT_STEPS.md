@@ -134,6 +134,14 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.8.0
+- BUILD: snare + clap pairs. For a snare pad, every snare of yours with the claps that fit best, summed at 4 mix
+  ratios; taken when clearly (1.5) nearer than one sample. Truth test: rimshot_street + clap jam_one found exactly.
+- Open hats: in a hat pad, accented hits that still ring 40 - 70 ms on get an O-HAT pad (their re-found ringing
+  removed); kept only where the loop is modelled at least as well. Trap loops: open hats 0/6 -> 6/6.
+- 16 real loops: identical to 2.7. Truth bench: hits 81.4 -> 82.6 %, names 39 -> 41 of 48.
+- Known: an open hat cut by the next closed hat is short - the library pick for it is then a closed hat.
+
 ## v2.7.0
 - Truth bench (tools/gtbench): 12 loops made from the user's OLIVER one-shots, pattern and samples known.
 - Kick: a woody / clicky kick was renamed by the low-end rule; now a kick is "a sound that raises the low end"

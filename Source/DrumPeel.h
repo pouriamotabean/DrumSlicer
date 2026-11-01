@@ -2213,6 +2213,96 @@ private:
         for (int ch = 0; ch < 2; ++ch) for (int i = s0; i < b.n; ++i) b.c[ch][(size_t) i] *= std::pow(10.0, slope * (i - s0) / (double) w / 20.0);
     }
 
+    // an open hat inside a hat pad (trap: the closed hats run on 16ths, now and then one rings open): its hits
+    // still ring 40 - 70 ms after the onset where the closed ones are gone. They get an O-HAT pad of their own,
+    // its sound taken from the cleanest of them (everything else the model has there taken away)
+    void splitOpenHats(Output& out) const
+    {
+        if (std::getenv("DP_NO_OHAT")) return;
+        for (const auto& pd : out.pads) if (pd.name.rfind("O-HAT", 0) == 0) return;
+        auto hatPad = [&](int q) { const auto& n2 = out.pads[(size_t) q].name; return n2.find("HAT") != std::string::npos || n2.rfind("SHAKER", 0) == 0 || n2.rfind("CRASH", 0) == 0 || n2.rfind("RIDE", 0) == 0; };
+        // the next real note after one: a quieter hat note in its first 80 ms is its own ringing found again
+        auto nextAfter = [&](const NoteOut& nt) { double nx = N;
+            for (const auto& m : out.notes) if (m.time > nt.time + 0.02 * sr && !(hatPad(m.pad) && m.velocity < nt.velocity && m.time - nt.time < 0.08 * sr)) nx = std::min(nx, m.time);
+            return nx; };
+        auto hiE = [&](int a, int b) { double e = 0; for (int i = std::max(2, a); i < std::min(N, b); ++i) { const double d = mono[(size_t) i] - 2 * mono[(size_t) (i - 1)] + mono[(size_t) (i - 2)]; e += d * d; } return e; };
+        const size_t np = out.pads.size();
+        for (size_t p = 0; p < np; ++p)
+        {
+            const std::string nm = out.pads[p].name;
+            if (nm.find("HAT") == std::string::npos && nm.rfind("SHAKER", 0) != 0) continue;
+            std::vector<size_t> idx; std::vector<double> ring;
+            for (size_t i = 0; i < out.notes.size(); ++i)
+            {
+                if (out.notes[i].pad != (int) p) continue;
+                const int t = (int) out.notes[i].time;
+                // the next note (an open hat can only ring until then)
+                if (nextAfter(out.notes[i]) - t < 0.075 * sr) continue;
+                const double a = hiE(t, t + (int) (0.02 * sr)), b = hiE(t + (int) (0.04 * sr), t + (int) (0.07 * sr));
+                idx.push_back(i); ring.push_back(10.0 * std::log10((b / 1.5 + 1e-20) / (a + 1e-20)));
+            }
+            if (idx.size() < 4) continue;
+            std::vector<double> sr2 = ring; std::sort(sr2.begin(), sr2.end()); const double med = sr2[sr2.size() / 2];
+            // ...and is played: louder than the pad's usual hit (a quiet note in something else's ringing is no open hat)
+            std::vector<int> vel; for (size_t i : idx) vel.push_back(out.notes[i].velocity); std::sort(vel.begin(), vel.end());
+            const int vmed = vel[vel.size() / 2];
+            std::vector<size_t> open; for (size_t k = 0; k < idx.size(); ++k) if (ring[k] >= med + 10.0 && ring[k] >= -14.0 && out.notes[idx[k]].velocity >= std::max(40, (int) (1.3 * vmed))) open.push_back(idx[k]);
+            {   // one that rings because an open hat right before it (quieter, < 80 ms after) does is that one's ring
+                std::vector<size_t> o2;
+                for (size_t i : open)
+                {
+                    bool ringOf = false;
+                    for (size_t k : open) if (k != i && out.notes[k].time < out.notes[i].time && out.notes[i].time - out.notes[k].time < 0.08 * sr && out.notes[k].velocity > out.notes[i].velocity) ringOf = true;
+                    if (!ringOf) o2.push_back(i);
+                }
+                open = o2;
+            }
+            if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "open hats in %s: median ring %.1f dB, %zu of %zu ring\n", nm.c_str(), med, open.size(), idx.size());
+            if (open.size() < 2 || open.size() > 0.4 * idx.size()) continue;
+            // the sound: the one that rings most, until the next note (at most 0.8 s), the rest of the model taken away
+            // (its own ringing found again as notes goes first)
+            std::vector<bool> drop(out.notes.size(), false);
+            for (size_t i : open) for (size_t k = 0; k < out.notes.size(); ++k)
+            { const auto& m = out.notes[k]; if (k != i && hatPad(m.pad) && m.time > out.notes[i].time && m.time - out.notes[i].time < 0.08 * sr && m.velocity < out.notes[i].velocity
+                                               && std::find(open.begin(), open.end(), k) == open.end()) drop[k] = true; }
+            {   std::vector<NoteOut> kept; std::vector<size_t> remap(out.notes.size(), SIZE_MAX);
+                for (size_t k = 0; k < out.notes.size(); ++k) if (!drop[k]) { remap[k] = kept.size(); kept.push_back(out.notes[k]); }
+                for (auto& i : open) i = remap[i];
+                out.notes = std::move(kept); }
+            Buf y; render(out.pads, out.notes, y, N);
+            size_t bi = open[0]; double bp = -1e9, bpk = 0;
+            for (size_t i : open)
+            {   // the loudest one that rings (and its peak, the velocity scale)
+                const int t = (int) out.notes[i].time; double pk = 0; for (int k = t; k < std::min(N, t + (int) (0.02 * sr)); ++k) pk = std::max(pk, std::abs(mono[(size_t) k]));
+                const double rr = 10.0 * std::log10((hiE(t + (int) (0.04 * sr), t + (int) (0.07 * sr)) + 1e-20) / (hiE(t, t + (int) (0.02 * sr)) + 1e-20));
+                const double sc = out.notes[i].velocity + rr;            // loud first (a stray note in a ring is quiet), then ringing
+                if (sc > bp) { bp = sc; bi = i; bpk = pk; }
+            }
+            const auto& S = out.pads[p].audio; const int t0 = (int) out.notes[bi].time;
+            const double nxt = nextAfter(out.notes[bi]);
+            const int len = (int) std::min(0.8 * sr, nxt - t0), fade = (int) (0.01 * sr);
+            PadOut o; o.name = "O-HAT"; o.note = 46; o.audio.resize(len);
+            const double v0 = out.notes[bi].velocity / 100.0;
+            for (int ch = 0; ch < 2; ++ch)
+                for (int k = 0; k < len && t0 + k < N; ++k)
+                {
+                    const double own = k < S.n ? v0 * S.c[ch][(size_t) k] : 0.0;
+                    double g = k > len - fade ? (len - k) / (double) fade : 1.0;
+                    o.audio.c[ch][(size_t) k] = g * (x.c[ch][(size_t) (t0 + k)] - (y.c[ch][(size_t) (t0 + k)] - own));
+                }
+            const double pk = std::max(1e-9, o.audio.peak()); o.audio.scale(0.9 / pk); o.best = o.audio; o.bestTime = t0;
+            const int pi = (int) out.pads.size(); out.pads.push_back(std::move(o));
+            for (size_t i : open)
+            {   // as loud as its own hit in the loop, on the scale of the one the sound was taken from
+                const int t = (int) out.notes[i].time; double pkI = 0;
+                for (int k = t; k < std::min(N, t + (int) (0.02 * sr)); ++k) pkI = std::max(pkI, std::abs(mono[(size_t) k]));
+                out.notes[i].pad = pi; out.notes[i].velocity = std::clamp((int) std::lround(100.0 * pkI / std::max(1e-9, bpk) * pk / 0.9), 1, 127);
+            }
+        }
+        std::vector<int> c2(out.pads.size(), 0); for (auto& n : out.notes) c2[(size_t) n.pad]++;
+        for (size_t p = 0; p < out.pads.size(); ++p) out.pads[p].hits = c2[p];
+    }
+
     void dbgHear(const char* tag)
     {
         if (!std::getenv("DP_DEBUG")) return;
@@ -2354,6 +2444,20 @@ private:
         std::sort(out.notes.begin(), out.notes.end(), [](const NoteOut& a, const NoteOut& b) { return a.time < b.time; });
         if (!std::getenv("DP_NO_JUNK")) dropJunkNotes(out, sr);
         moveHatHits(out);
+        {   // an O-HAT pad only where it models the loop at least as well (around the hits it changes)
+            Output o2 = out; splitOpenHats(o2);
+            if (o2.pads.size() > out.pads.size())
+            {
+                Buf y1, y2; render(out.pads, out.notes, y1, N); render(o2.pads, o2.notes, y2, N);
+                std::vector<bool> w((size_t) N, false);
+                for (const auto& nt : o2.notes) if (nt.pad == (int) out.pads.size()) for (int i = (int) nt.time - (int) (0.01 * sr); i < (int) nt.time + (int) (0.15 * sr); ++i) if (i >= 0 && i < N) w[(size_t) i] = true;
+                double e1 = 0, e2 = 0;
+                for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < N; ++i) if (w[(size_t) i])
+                { const double a = x.c[ch][(size_t) i] - y1.c[ch][(size_t) i], b = x.c[ch][(size_t) i] - y2.c[ch][(size_t) i]; e1 += a * a; e2 += b * b; }
+                if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "open hat pad: error %.4g -> %.4g\n", e1, e2);
+                if (e2 <= e1) out = std::move(o2);
+            }
+        }
         mergeDoubles(out);
         std::vector<double> times; for (auto& n : out.notes) times.push_back(n.time);
         out.bpm = estimateBpm(times, N, sr);
