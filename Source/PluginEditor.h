@@ -1097,6 +1097,7 @@ class DrumSlicerPanel : public juce::Component, public juce::FileDragAndDropTarg
 public:
     enum Page { pKit = 0, pSource, pPattern, pPad, pMore, pSamples, pKits, pLoops, pSetup };
     static constexpr int W = 1240, H = 720;
+    std::function<void(int)> onSizeStep;          // the window: one size step smaller (-1) / bigger (+1)
 
     explicit DrumSlicerPanel(DrumSlicerProcessor& p) : proc(p), shape(p), samples(p), loops(p, true), kitsPage(p)
     {
@@ -1596,12 +1597,23 @@ private:
        #ifdef JucePlugin_VersionString
         const juce::String ver = JucePlugin_VersionString;
        #else
-        const juce::String ver = "2.9.1";
+        const juce::String ver = "2.9.2";
        #endif
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
         g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
         g.setColour(ui::faint); g.setFont(ui::inter(10.5f, 400, 0.02f));
         g.drawText("by pouria motabean", 34, 44, 160, 13, juce::Justification::centredLeft);
+        {   // window size: - 100% +  (50 - 200 %, the next window opens at it too)
+            const int pct = getParentComponent() != nullptr ? juce::roundToInt(100.0 * getParentComponent()->getWidth() / W) : 100;
+            const auto rm = juce::Rectangle<float>(150.f, 26.f, 18.f, 18.f), rp = juce::Rectangle<float>(208.f, 26.f, 18.f, 18.f);
+            g.setFont(ui::mono(10.f));
+            g.setColour(hot(rm) ? ui::white : ui::faint); g.drawText("-", rm, juce::Justification::centred);
+            g.setColour(hot(rm) || hot(rp) ? ui::soft : ui::faint); g.drawText(juce::String(pct) + "%", juce::Rectangle<float>(166.f, 26.f, 44.f, 18.f), juce::Justification::centred);
+            g.setColour(hot(rp) ? ui::white : ui::faint); g.drawText("+", rp, juce::Justification::centred);
+            zone(rm, [this] { if (onSizeStep) onSizeStep(-1); });
+            zone(rp, [this] { if (onSizeStep) onSizeStep(+1); });
+            if (hot(rm) || hot(rp)) hint = "window size (also: drag the corner)";
+        }
         juce::String st;
         const bool busy = proc.isBusy() || proc.isMatching();
         if (proc.isBusy()) st = ui::lower(proc.getStatus());
@@ -3026,9 +3038,26 @@ public:
     {
         addAndMakeVisible(panel);
         setResizable(true, true);
-        setResizeLimits(868, 504, 2480, 1440);
+        setResizeLimits(620, 360, 2480, 1440);
         if (auto* c = getConstrainer()) c->setFixedAspectRatio((double) DrumSlicerPanel::W / DrumSlicerPanel::H);
-        const int w = juce::jlimit(868, 2480, (int) proc.apvts.state.getProperty("uiWidth2", 1240));
+        // the size you used last (any project), else this project's, else 100 %
+        int w = (int) proc.apvts.state.getProperty("uiWidth2", 1240);
+        if (sizeFile().existsAsFile()) w = sizeFile().loadFileAsString().getIntValue();
+        setWidth(w);
+        panel.onSizeStep = [this](int dir) {
+            static const int steps[] = { 50, 60, 70, 80, 90, 100, 110, 125, 150, 175, 200 };
+            const int pct = juce::roundToInt(100.0 * getWidth() / DrumSlicerPanel::W);
+            int to = pct;
+            if (dir > 0) { for (int s : steps) if (s > pct) { to = s; break; } }
+            else for (int i = 10; i >= 0; --i) if (steps[i] < pct) { to = steps[i]; break; }
+            setWidth(DrumSlicerPanel::W * to / 100); saveSize(); };
+    }
+    ~DrumSlicerEditor() override { saveSize(); }
+    static juce::File sizeFile() { return ds::locationFile().getSiblingFile("window.txt"); }
+    void saveSize() { sizeFile().getParentDirectory().createDirectory(); sizeFile().replaceWithText(juce::String(getWidth())); }
+    void setWidth(int w)
+    {
+        w = juce::jlimit(620, 2480, w > 0 ? w : 1240);
         setSize(w, juce::roundToInt(w * (double) DrumSlicerPanel::H / DrumSlicerPanel::W));
     }
     void parentHierarchyChanged() override

@@ -134,6 +134,10 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.9.2
+- Window size 50 - 200 %: - / + next to the version (steps 50 60 70 80 90 100 110 125 150 175 200), the corner
+  still drags freely. The size you used last opens next time (any project).
+
 ## v2.9.1
 - "by pouria motabean" under the rekit logo.
 
