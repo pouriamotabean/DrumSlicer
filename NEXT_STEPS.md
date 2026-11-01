@@ -134,6 +134,9 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.9.1
+- "by pouria motabean" under the rekit logo.
+
 ## v2.9.0
 - Matching kicks: the loop's kick carries the hats / snare on it as extra highs - one of yours with fewer highs is
   hardly further away. Truth test: the real kick ranked first in 5 of 6 loops (was 2); BUILD exact 4 / 6 (was 3).

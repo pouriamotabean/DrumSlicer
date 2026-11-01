@@ -1596,10 +1596,12 @@ private:
        #ifdef JucePlugin_VersionString
         const juce::String ver = JucePlugin_VersionString;
        #else
-        const juce::String ver = "2.9.0";
+        const juce::String ver = "2.9.1";
        #endif
         g.setColour(ui::faint); g.setFont(ui::mono(10.f));
         g.drawText(ver, 96, 28, 60, 16, juce::Justification::centredLeft);
+        g.setColour(ui::faint); g.setFont(ui::inter(10.5f, 400, 0.02f));
+        g.drawText("by pouria motabean", 34, 44, 160, 13, juce::Justification::centredLeft);
         juce::String st;
         const bool busy = proc.isBusy() || proc.isMatching();
         if (proc.isBusy()) st = ui::lower(proc.getStatus());
