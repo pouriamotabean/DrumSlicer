@@ -134,6 +134,19 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.9.5  (engine drumpeel-7)
+- The user's 116 bpm loop (snare on every other kick, offbeat hats, a percussion layer): was 114.5 bpm, pads
+  C-HAT / KICK / TOM, snares missing. Now 116 bpm, C-HAT / KICK 16 / SNARE 8 (MIDI), exactly the pattern.
+  - Tempo: least-squares fit of the hits to the grid; the loop-length snap only within 0.4 % (an mp3 / tail made
+    the file longer than 4 bars); whole bpm when within 0.25 %.
+  - A "tom" whose low end is the kick's own note and whose upper part is a snare body is a kick + snare: split.
+  - Snare on every other kick: a missing one on a kick is added where it models the loop better (5 % on the
+    snare's own rhythm, 15 % elsewhere).
+  - MIDI file only: a kick / snare / clap twice within 25 ms is one note (the analysis keeps both).
+- Tests: 16 real loops identical to 2.9.3, 12 truth loops identical, stem loop identical, mixdown better
+  (null 50.9 -> 52.2, snare 33 -> 42). Tried and dropped: merging those doubles in the analysis (cost 3 loops
+  up to 1.3 %).
+
 ## v2.9.4
 - Setup: if Cubase (or any app) has ReKit 2 loaded, setup now asks to close it instead of "DeleteFile failed; code 5".
 

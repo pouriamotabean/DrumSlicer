@@ -14,7 +14,7 @@
 namespace ds
 {
 static constexpr int kPads = 8;
-static const char* kEngineVersion = "drumpeel-6";
+static const char* kEngineVersion = "drumpeel-7";
 
 struct Pad
 {
@@ -715,7 +715,20 @@ inline juce::MemoryBlock midiBytes(const Result& r, double bpm, int mode, double
     if (mode == kSync && r.bpm > 0) bpm = r.bpm;      // one beat of the loop = one beat of the project
     dp::Output o; o.sr = r.sr;
     for (const auto& p : r.pads) { dp::PadOut po; po.note = p.note; po.name = p.name.toStdString(); o.pads.push_back(po); }
-    for (const auto& h : r.hits) o.notes.push_back({ h.time, h.pad, h.velocity });
+    // the MIDI you take is what you hear: a kick / snare / clap twice within 25 ms (a layered stroke found twice)
+    // is one note - the stronger velocity, the earlier time. (The analysis keeps both: it models the loop better.)
+    std::vector<Hit> hs = r.hits;
+    std::sort(hs.begin(), hs.end(), [](const Hit& a, const Hit& b) { return a.time < b.time; });
+    std::vector<int> last(r.pads.size(), -1);
+    for (const auto& h : hs)
+    {
+        const bool body = h.pad >= 0 && h.pad < (int) r.pads.size()
+                          && (r.pads[(size_t) h.pad].name.startsWith("KICK") || r.pads[(size_t) h.pad].name.startsWith("SNARE") || r.pads[(size_t) h.pad].name.startsWith("CLAP"));
+        if (body && last[(size_t) h.pad] >= 0 && h.time - o.notes[(size_t) last[(size_t) h.pad]].time < 0.025 * r.sr)
+        { auto& f = o.notes[(size_t) last[(size_t) h.pad]]; f.velocity = std::max(f.velocity, h.velocity); continue; }
+        if (h.pad >= 0 && h.pad < (int) r.pads.size()) last[(size_t) h.pad] = (int) o.notes.size();
+        o.notes.push_back({ h.time, h.pad, h.velocity });
+    }
     o.bpm = r.bpm;
     const auto bytes = dp::makeMidiFile(o, bpm, 480, !tight, 0.0, tight, strength);
     return juce::MemoryBlock(bytes.data(), bytes.size());

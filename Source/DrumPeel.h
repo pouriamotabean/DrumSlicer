@@ -458,8 +458,20 @@ public:
             s = s / std::max<size_t>(1, times.size()) + 1e-4 * std::abs(b - 120) / 60;
             if (s < bestS) { bestS = s; bestB = b; }
         }
+        if (!std::getenv("DP_OLD_BPM") && times.size() >= 8)
+        {   // the 0.05 bpm steps and the penalty are coarse: the grid that fits the hits best, by least squares
+            // (each hit on its nearest 1/16, a start and a step fitted)
+            const double g = 60.0 / bestB / 4 * sr;
+            double sk = 0, st = 0, skk = 0, skt = 0; int m = 0;
+            for (double t : times) { const double k = std::round(t / g); if (std::abs(t - k * g) > 0.25 * g) continue; sk += k; st += t; skk += k * k; skt += k * t; ++m; }
+            const double den = m * skk - sk * sk;
+            if (m >= 8 && den > 0) { const double g2 = (m * skt - sk * st) / den; const double b2 = 60.0 / (g2 * 4 / sr); if (std::abs(b2 - bestB) / bestB < 0.03) bestB = b2; }
+        }
+        // a loop of whole bars: its length gives the exact tempo - when it agrees closely (an mp3 / a tail makes the
+        // file a little longer than its bars: then the hits decide)
         const double L = n / sr; const double bars = std::round(L * bestB / 240.0);
-        if (bars >= 1 && std::abs(bars * 240.0 / L - bestB) / bestB < 0.01) bestB = bars * 240.0 / L;
+        if (bars >= 1 && std::abs(bars * 240.0 / L - bestB) / bestB < (std::getenv("DP_OLD_BPM") ? 0.01 : 0.004)) bestB = bars * 240.0 / L;
+        else if (!std::getenv("DP_OLD_BPM") && std::abs(bestB - std::round(bestB)) < 0.0025 * bestB) bestB = std::round(bestB);   // songs are made at whole bpm
         return bestB;
     }
 
@@ -1613,6 +1625,13 @@ private:
                     for (int i = 0; i < std::min(n, o->n); ++i) o->c[ch][(size_t) i] = w[(size_t) i].real() / n;
                 }
             } };
+        auto lowPeakHz = [&](const Buf& B, double* subShare) {    // the strongest frequency 30 - 100 Hz (and the share under 100 Hz)
+            std::vector<cd> z((size_t) n); for (int i = 0; i < std::min(n, B.n); ++i) z[(size_t) i] = cd(0.5 * (B.c[0][(size_t) i] + B.c[1][(size_t) i]), 0);
+            fftOf(n).run(z.data(), false);
+            double bp = 0, tot = 1e-30, sub = 0; int bk = 0;
+            for (int k = 1; k < n / 2; ++k) { const double f = k * sr / n, pw = std::norm(z[(size_t) k]); tot += pw; if (f < 100) sub += pw; if (f >= 30 && f < 100 && pw > bp) { bp = pw; bk = k; } }
+            if (subShare) *subShare = sub / tot;
+            return bk * sr / n; };
         const size_t n0 = snd.size();
         for (const char* lab : { "kick", "snare" })
         {
@@ -1621,16 +1640,39 @@ private:
             const double rk = hk / std::max(1e-30, lk);
             for (size_t c = 0; c < n0; ++c)
             {
-                if ((int) c == ld || L[c] != lab || snd[c].t.size() < 2) continue;
+                // (a "tom" whose low end is the kick's own note is a kick with a snare on it: its higher pitch is the
+                // snare's body - a snare on every other kick of a four-on-the-floor)
+                bool tomOnKick = false;
+                if (lab[0] == 'k' && L[c] == "tom" && !std::getenv("DP_NO_TOMCOMBO"))
+                {   // under 100 Hz it holds a real share, at the kick's note (a tom's own note is higher)
+                    const Buf Tt = full(c); double sub = 0; const double pk = lowPeakHz(Tt, &sub), pkK = lowPeakHz(full((size_t) ld), nullptr);
+                    tomOnKick = pk > 0 && pkK > 0 && sub >= 0.25 && std::abs(std::log2(pk / pkK)) < 0.3;
+                    if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "tom s%zu: under 100 Hz %.0f %% at %.0f Hz, kick at %.0f Hz%s\n", c, 100 * sub, pk, pkK, tomOnKick ? "  -> a kick + snare" : "");
+                }
+                if ((int) c == ld || (L[c] != lab && !tomOnKick) || snd[c].t.size() < 2) continue;
                 const Buf Tc = full(c); Buf up(Lw), dn(Lw); double lc, hc; bands(Tc, lc, hc, &up, &dn);
                 const double rc = hc / std::max(1e-30, lc);
                 // a kick variant with far more mid / high than the kick: a snare on it; a snare variant with far more low
-                const bool combo = lab[0] == 'k' ? (rc >= 4.0 * rk && hc >= 0.2 * (hc + lc)) : (rc <= 0.25 * rk && lc >= 0.4 * (hc + lc));
+                if (tomOnKick)
+                {   // ...and what is over the kick is a snare (its body), not a hat that leaked onto a kick sound
+                    double hi = 0, mid = 0, tot = 1e-30;
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        std::vector<cd> z((size_t) n); for (int i = 0; i < std::min(n, up.n); ++i) z[(size_t) i] = cd(up.c[ch][(size_t) i], 0);
+                        fftOf(n).run(z.data(), false);
+                        for (int k = 1; k < n / 2; ++k) { const double f = k * sr / n, pw = std::norm(z[(size_t) k]); tot += pw; if (f > 5000) hi += pw; if (f >= 150 && f < 1000) mid += pw; }
+                    }
+                    if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "  over the kick: %.0f %% body (150 - 1000 Hz), %.0f %% highs\n", 100 * mid / tot, 100 * hi / tot);
+                    if (hi > 0.4 * tot || mid < 0.2 * tot) tomOnKick = false;
+                    if (!tomOnKick) continue;                            // a tom it stays
+                }
+                const bool combo = lab[0] == 'k' ? (rc >= 4.0 * rk && (hc >= 0.2 * (hc + lc) || (tomOnKick && hc >= 0.05 * (hc + lc)))) : (rc <= 0.25 * rk && lc >= 0.4 * (hc + lc));
                 if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "combo s%zu %s: leader s%d  mid/low %.3f vs %.3f%s\n", c, lab, ld, rc, rk, combo ? "  -> split" : "");
                 if (!combo) continue;
                 Snd s2 = snd[c]; s2.Tn.zero(); s2.noisy = false; s2.mask.clear();
                 if (lab[0] == 'k') { s2.T = up; snd[c].T = dn; } else { s2.T = dn; snd[c].T = up; }
                 snd[c].Tn.zero();
+                if (tomOnKick) L[c] = "kick";                            // what stays is the kick
                 snd.push_back(std::move(s2)); L.push_back(lab[0] == 'k' ? "snare" : "kick");
                 F.push_back(F[c]);
             }
@@ -2116,7 +2158,12 @@ private:
                     for (int v = 0; v < 4; ++v) { const double r = x.c[ch][(size_t) t] - rest - vA[v] / 100.0 * si - vB[v] / 100.0 * sj; E[v] += r * r; }
                 }
             int best = 1; for (int v = 2; v < 4; ++v) if (E[v] < E[best]) best = v;
-            if (E[best] > E[0]) continue;
+            // (off: doubles of a kick / snare within 25 ms are merged in the MIDI file instead - the model keeps them;
+            // tested 2.9.5: merging here cost 3 real loops up to 1.3 % of their match)
+            const auto& pn = out.pads[(size_t) nts[i].pad].name;
+            const bool body = std::getenv("DP_LOOSE_DOUBLES") && (pn.rfind("KICK", 0) == 0 || pn.rfind("SNARE", 0) == 0) && nts[j].time - nts[i].time < 0.025 * sr;
+            const bool tight = body && nts[j].time - nts[i].time < 0.02 * sr;     // under 20 ms: always one stroke
+            if (!tight && E[best] > (body ? 1.25 : 1.0) * E[0]) continue;
             ++merged;
             for (int ch = 0; ch < 2; ++ch)               // the model follows the change (for the next pair)
                 for (int t = w0; t < w1; ++t)
@@ -2356,6 +2403,60 @@ private:
         }
     }
 
+    // a snare on every other kick (pop): where one is missing - the kick took the whole stroke - a snare note is
+    // tried on that kick, its velocity fitted; it stays where it clearly models the loop better (15 %)
+    void addSnaresOnKicks(Output& out) const
+    {
+        if (std::getenv("DP_NO_SNAREFILL")) return;
+        int kp = -1, sp = -1; std::vector<int> cnt(out.pads.size(), 0); for (auto& n : out.notes) cnt[(size_t) n.pad]++;
+        for (size_t p = 0; p < out.pads.size(); ++p)
+        {
+            const auto& nm = out.pads[p].name;
+            if (nm.rfind("KICK", 0) == 0 && (kp < 0 || cnt[p] > cnt[(size_t) kp])) kp = (int) p;
+            if (nm.rfind("SNARE", 0) == 0 && (sp < 0 || cnt[p] > cnt[(size_t) sp])) sp = (int) p;
+        }
+        if (kp < 0 || sp < 0 || cnt[(size_t) sp] < 3) return;
+        std::vector<double> off, vel; int onK = 0;
+        for (const auto& sn : out.notes) if (sn.pad == sp)
+        {
+            vel.push_back(sn.velocity);
+            for (const auto& kn : out.notes) if (kn.pad == kp && std::abs(kn.time - sn.time) < 0.03 * sr) { ++onK; off.push_back(sn.time - kn.time); break; }
+        }
+        if (onK < 0.6 * cnt[(size_t) sp]) return;
+        std::sort(off.begin(), off.end()); std::sort(vel.begin(), vel.end());
+        const double dt = off[off.size() / 2], vmed = vel[vel.size() / 2];
+        // the snare's own rhythm (the usual distance between snares, from the first one): a missing snare there
+        // needs less proof (5 %) than one anywhere else (15 %)
+        std::vector<double> st, gaps; for (const auto& sn : out.notes) if (sn.pad == sp) st.push_back(sn.time);
+        for (size_t i = 1; i < st.size(); ++i) gaps.push_back(st[i] - st[i - 1]);
+        std::sort(gaps.begin(), gaps.end()); const double D = gaps.empty() ? 0 : gaps[gaps.size() / 2];
+        auto onRhythm = [&](double t) { if (D < 0.1 * sr) return false; const double ph = std::fmod(std::abs(t - st[0]), D); return std::min(ph, D - ph) < 0.04 * sr; };
+        Buf y; render(out.pads, out.notes, y, N);
+        const auto& S = out.pads[(size_t) sp].audio;
+        std::vector<NoteOut> add;
+        for (const auto& kn : out.notes)
+        {
+            if (kn.pad != kp) continue;
+            bool has = false; for (const auto& sn : out.notes) if (sn.pad == sp && std::abs(sn.time - kn.time) < 0.04 * sr) { has = true; break; }
+            if (has) continue;
+            const int t0 = (int) std::floor(kn.time + dt + 0.5), w0 = std::max(0, t0 - (int) (0.005 * sr)), w1 = std::min(N, t0 + (int) (0.15 * sr));
+            double ss = 0, rs = 0, e0 = 0;
+            for (int ch = 0; ch < 2; ++ch) for (int t = w0; t < w1; ++t)
+            { const int k = t - t0; const double sv = (k >= 0 && k < S.n) ? S.c[ch][(size_t) k] : 0.0, r = x.c[ch][(size_t) t] - y.c[ch][(size_t) t]; ss += sv * sv; rs += r * sv; e0 += r * r; }
+            if (ss <= 0) continue;
+            const double v = rs / ss;                                   // in units of velocity 100
+            if (v * 100.0 < 0.35 * vmed) continue;
+            const double e1 = e0 - 2 * v * rs + v * v * ss;
+            if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "snare on kick at %.3f s: v %.0f, error %.3g -> %.3g\n", kn.time / sr, v * 100, e0, e1);
+            if (e1 > (onRhythm(kn.time) ? 0.95 : 0.85) * e0) continue;
+            NoteOut nt; nt.time = t0; nt.pad = sp; nt.velocity = std::clamp((int) std::lround(v * 100.0), 1, 127); add.push_back(nt);
+        }
+        for (auto& a : add) out.notes.push_back(a);
+        std::sort(out.notes.begin(), out.notes.end(), [](const NoteOut& a, const NoteOut& b) { return a.time < b.time; });
+        std::vector<int> c2(out.pads.size(), 0); for (auto& n : out.notes) c2[(size_t) n.pad]++;
+        for (size_t p = 0; p < out.pads.size(); ++p) out.pads[p].hits = c2[p];
+    }
+
     void dbgHear(const char* tag)
     {
         if (!std::getenv("DP_DEBUG")) return;
@@ -2498,6 +2599,7 @@ private:
         if (!std::getenv("DP_NO_JUNK")) dropJunkNotes(out, sr);
         if (std::getenv("DP_KICKOFF")) kickOffSnare(out);   // (off: the loop's sound needs those lows - done for matching in the plugin)
         moveHatHits(out);
+        addSnaresOnKicks(out);
         {   // an O-HAT pad only where it models the loop at least as well (around the hits it changes)
             Output o2 = out; splitOpenHats(o2);
             if (o2.pads.size() > out.pads.size())
