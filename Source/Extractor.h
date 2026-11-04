@@ -526,6 +526,7 @@ inline bool renderKitPreview(const juce::File& kit, juce::AudioBuffer<float>& ou
     if (lines.isEmpty() || lines[0] != "kit=1") return false;
     juce::AudioFormatManager fm; fm.registerBasicFormats();
     std::array<juce::AudioBuffer<float>, kPads> shots; std::vector<Hit> hits; double bpm = 120; sr = 44100;
+    std::array<int, kPads> noteOf {}; noteOf.fill(-1);
     for (auto& l : lines)
     {
         const auto k = l.upToFirstOccurrenceOf("=", false, false), v = l.fromFirstOccurrenceOf("=", false, false);
@@ -535,6 +536,7 @@ inline bool renderKitPreview(const juce::File& kit, juce::AudioBuffer<float>& ou
         else if (k == "pad" && f.size() >= 2)
         {
             const int p = f[0].getIntValue(); if (p < 0 || p >= kPads) continue;
+            if (f.size() >= 3) noteOf[(size_t) p] = f[2].getIntValue();
             const auto base = f[1].removeCharacters(" ");
             auto file = kit.getChildFile(kit.getFileName() + "_" + base + ".wav");          // as heard (shaped)
             if (!file.existsAsFile()) file = kitData(kit).getChildFile(base + "_A.wav");
@@ -546,6 +548,28 @@ inline bool renderKitPreview(const juce::File& kit, juce::AudioBuffer<float>& ou
         else if (k == "hit" && f.size() >= 3) hits.push_back({ (double) f[0].getLargeIntValue(), f[1].getIntValue(), f[2].getIntValue() });
     }
     if (hits.empty() || sr <= 0) return false;
+    {   // saved with TIGHT on: the preview plays the tight pattern (as the plugin did when the kit was saved)
+        bool tight = false; double quant = 1.0;
+        if (auto xml = juce::parseXML(kitData(kit).getChildFile("settings.xml")))
+            for (auto* c : xml->getChildIterator())
+            {
+                const auto id = c->getStringAttribute("id");
+                if (id == "tight") tight = c->getDoubleAttribute("value") > 0.5;
+                else if (id == "quant") quant = c->getDoubleAttribute("value", 1.0);
+            }
+        if (tight && bpm > 0)
+        {
+            dp::Output o; o.sr = sr; o.bpm = bpm;
+            for (int p = 0; p < kPads; ++p) { dp::PadOut po; po.note = noteOf[(size_t) p]; o.pads.push_back(po); }
+            std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.time < b.time; });
+            for (const auto& h : hits) if (h.pad >= 0 && h.pad < kPads) o.notes.push_back({ h.time, h.pad, h.velocity });
+            const double beatLen = 60.0 / bpm * sr, start = hits.front().time;
+            std::vector<Hit> th;
+            for (const auto& b : dp::tightPattern(o, quant))
+                for (int p = 0; p < kPads; ++p) if (noteOf[(size_t) p] == b.note) { th.push_back({ start + b.beat * beatLen, p, b.vel }); break; }
+            if (!th.empty()) hits = std::move(th);
+        }
+    }
     const double t0 = hits.front().time;
     const int len = (int) (sr * juce::jlimit(3.0, 8.0, 2 * 240.0 / std::max(40.0, bpm)));      // two bars
     out.setSize(2, len + (int) sr); out.clear();

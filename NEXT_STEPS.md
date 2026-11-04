@@ -134,6 +134,11 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.9.6
+- Kit preview (kits page) plays the TIGHT pattern when the kit was saved with TIGHT on (it played the loose
+  hits). Tested: save with tight off / on, preview on the grid with tight, opening the kit brings TIGHT back,
+  pattern edits kept through project save / reopen. Engine unchanged.
+
 ## v2.9.5  (engine drumpeel-7)
 - The user's 116 bpm loop (snare on every other kick, offbeat hats, a percussion layer): was 114.5 bpm, pads
   C-HAT / KICK / TOM, snares missing. Now 116 bpm, C-HAT / KICK 16 / SNARE 8 (MIDI), exactly the pattern.
