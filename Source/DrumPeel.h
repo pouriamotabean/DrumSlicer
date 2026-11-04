@@ -2303,6 +2303,59 @@ private:
         for (size_t p = 0; p < out.pads.size(); ++p) out.pads[p].hits = c2[p];
     }
 
+    // pop: the snare always on a kick (2 and 4 of a four-on-the-floor). The snare's learned sound keeps the kick's
+    // low end then, and your snares are compared with "a snare with a kick in it". The kick's own lows (below
+    // ~150 Hz, as much as fits) come off the snare and go to the kick notes under it - the loop sounds the same
+    void kickOffSnare(Output& out) const
+    {
+        if (std::getenv("DP_NO_KICKOFF")) return;
+        int kp = -1, sp = -1; std::vector<int> cnt(out.pads.size(), 0); for (auto& n : out.notes) cnt[(size_t) n.pad]++;
+        for (size_t p = 0; p < out.pads.size(); ++p)
+        {
+            const auto& nm = out.pads[p].name;
+            if (nm.rfind("KICK", 0) == 0 && (kp < 0 || cnt[p] > cnt[(size_t) kp])) kp = (int) p;
+            if ((nm.rfind("SNARE", 0) == 0 || nm.rfind("CLAP", 0) == 0) && (sp < 0 || cnt[p] > cnt[(size_t) sp])) sp = (int) p;
+        }
+        if (kp < 0 || sp < 0) return;
+        std::vector<std::pair<size_t, size_t>> pairs;            // (snare note, kick note) together
+        for (size_t i = 0; i < out.notes.size(); ++i)
+        {
+            if (out.notes[i].pad != sp) continue;
+            for (size_t k = 0; k < out.notes.size(); ++k) if (out.notes[k].pad == kp && std::abs(out.notes[k].time - out.notes[i].time) < 0.01 * sr) { pairs.push_back({ i, k }); break; }
+        }
+        if (pairs.size() < 4 || pairs.size() < 0.7 * cnt[(size_t) sp]) return;
+        auto lowpass = [&](const Buf& b) {                      // below ~150 Hz (smooth 100 - 200)
+            const int n = 1 << 16; Buf o(b.n);
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                std::vector<cd> z((size_t) n); for (int i = 0; i < std::min(n, b.n); ++i) z[(size_t) i] = cd(b.c[ch][(size_t) i], 0);
+                fftOf(n).run(z.data(), false);
+                for (int k = 0; k < n; ++k) { const double f = std::min(k, n - k) * sr / n; z[(size_t) k] *= 1.0 - std::clamp((f - 100.0) / 100.0, 0.0, 1.0); }
+                fftOf(n).run(z.data(), true);
+                for (int i = 0; i < std::min(n, b.n); ++i) o.c[ch][(size_t) i] = z[(size_t) i].real() / n;
+            }
+            return o; };
+        auto& K = out.pads[(size_t) kp].audio; auto& S = out.pads[(size_t) sp].audio;
+        // what of the snare is below ~150 Hz: there a snare has little of its own; on a kick it is the kick's
+        // body and its falling pitch (a snare with a "glide" of 18 semitones). It goes; the kick notes under the
+        // snares get as much louder as that was (energy below 150 Hz, against the kick's own)
+        const Buf Sl = lowpass(S), Kl = lowpass(K);
+        const double eS = Sl.energy(), eAll = std::max(1e-30, S.energy()), eK = std::max(1e-30, Kl.energy());
+        if (std::getenv("DP_DEBUG")) std::fprintf(stderr, "kick off snare: %zu of %d snares on a kick, snare below 150 Hz %.0f %%\n", pairs.size(), cnt[(size_t) sp], 100.0 * eS / eAll);
+        if (eS < 0.15 * eAll) return;                            // a clean snare: nothing to take
+        for (Buf* bb : { &S, &out.pads[(size_t) sp].best })
+        {
+            const Buf L = lowpass(*bb);
+            for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < bb->n; ++i) bb->c[ch][(size_t) i] -= L.c[ch][(size_t) i];
+        }
+        const double ak = std::getenv("DP_KICKVEL") ? std::sqrt(eS / eK) : 0.0;
+        for (auto& pr : pairs)
+        {
+            auto& kn = out.notes[pr.second]; const auto& sn = out.notes[pr.first];
+            kn.velocity = std::clamp((int) std::lround(std::sqrt((double) kn.velocity * kn.velocity + ak * ak * sn.velocity * sn.velocity)), 1, 127);
+        }
+    }
+
     void dbgHear(const char* tag)
     {
         if (!std::getenv("DP_DEBUG")) return;
@@ -2443,6 +2496,7 @@ private:
         }
         std::sort(out.notes.begin(), out.notes.end(), [](const NoteOut& a, const NoteOut& b) { return a.time < b.time; });
         if (!std::getenv("DP_NO_JUNK")) dropJunkNotes(out, sr);
+        if (std::getenv("DP_KICKOFF")) kickOffSnare(out);   // (off: the loop's sound needs those lows - done for matching in the plugin)
         moveHatHits(out);
         {   // an O-HAT pad only where it models the loop at least as well (around the hits it changes)
             Output o2 = out; splitOpenHats(o2);

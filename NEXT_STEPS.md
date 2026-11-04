@@ -134,6 +134,16 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.9.3
+- From the user's 116 bpm mixdown (kick right, snare / hats "wrong colour" from the library):
+  - The snare sits on the kick (2 and 4 of a four-on-the-floor): its learned sound held the kick's body and
+    falling pitch (glide 18 st). BUILD now compares your snares with the snare above ~150 Hz when 60 %+ of its
+    hits sit on kicks (the loop's own sound is unchanged). Truth loop: tenderizer_lean picked (was concussor).
+  - Closed hats from a dense loop came out 10 - 15 dB thin at 0.5 - 3 kHz: BUILD compares your hats with the hat
+    coloured like its clean hits in the loop really sound (after - before each onset, at most 12 dB per band).
+    Not for open hats (taken straight from the loop).
+- Engine unchanged (16 real loops identical).
+
 ## v2.9.2
 - Window size 50 - 200 %: - / + next to the version (steps 50 60 70 80 90 100 110 125 150 175 200), the corner
   still drags freely. The size you used last opens next time (any project).

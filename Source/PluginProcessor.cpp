@@ -1483,6 +1483,78 @@ static juce::AudioBuffer<float> layerOf(const juce::AudioBuffer<float>& lo, cons
     return a;
 }
 
+// a hat learned from a dense loop can come out thinner (or fuller) than it sounds: what its own clean hits add to
+// the loop (spectrum just after each onset minus just before, other drums 90 ms away) is how it really sounds.
+// A copy of the hat with that colour (above 500 Hz, at most 12 dB per band) is what your hats are compared with.
+static void colourLikeLoop(juce::AudioBuffer<float>& A, const ds::Result& r, int pad)
+{
+    const int L = 2048; const double sr = r.sr; const int n = r.loop.getNumSamples();
+    std::vector<int> ts;
+    for (const auto& h : r.hits)
+    {
+        if (h.pad != pad) continue;
+        bool clean = true; for (const auto& o : r.hits) if (o.pad != pad && std::abs(o.time - h.time) < 0.09 * sr) { clean = false; break; }
+        if (clean && h.time > L + 128 && h.time + L < n) ts.push_back((int) h.time);
+    }
+    if (ts.size() < 6 || A.getNumSamples() < L) return;
+    juce::dsp::FFT fft(11);
+    auto spec = [&](auto get) { std::vector<float> w((size_t) 2 * L, 0.f); for (int i = 0; i < L; ++i) w[(size_t) i] = get(i) * (0.5f - 0.5f * std::cos(2.f * juce::MathConstants<float>::pi * i / (L - 1)));
+        fft.performFrequencyOnlyForwardTransform(w.data()); std::vector<double> p((size_t) L / 2); for (int k = 0; k < L / 2; ++k) p[(size_t) k] = (double) w[(size_t) k] * w[(size_t) k]; return p; };
+    auto mono = [&](int i) { float v = 0; for (int c = 0; c < r.loop.getNumChannels(); ++c) v += r.loop.getSample(c, i); return v / (float) r.loop.getNumChannels(); };
+    std::vector<double> D((size_t) L / 2, 0.0);
+    for (int t : ts)
+    {
+        const auto a = spec([&](int i) { return mono(t - 128 + i); }), b = spec([&](int i) { return mono(t - L - 128 + i); });
+        for (int k = 0; k < L / 2; ++k) D[(size_t) k] += std::max(0.0, a[(size_t) k] - b[(size_t) k]);
+    }
+    const int oA = mt::onsetOf(A);
+    const auto P = spec([&](int i) { const int j = std::max(0, oA - 128) + i; float v = 0; for (int c = 0; c < A.getNumChannels(); ++c) v += j < A.getNumSamples() ? A.getSample(c, j) : 0.f; return v; });
+    // third-octave bands 500 Hz - 16 kHz, relative to the 4 - 10 kHz level of each
+    std::vector<double> fc, g;
+    for (double f = 500.0; f < 16000.0; f *= std::pow(2.0, 1.0 / 3.0)) fc.push_back(f);
+    auto band = [&](const std::vector<double>& S, double lo, double hi) { double e = 1e-30; for (int k = 1; k < L / 2; ++k) { const double f = k * sr / L; if (f >= lo && f < hi) e += S[(size_t) k]; } return 10.0 * std::log10(e); };
+    const double refD = band(D, 4000, 10000), refP = band(P, 4000, 10000);
+    for (double f : fc) { const double lo = f / std::pow(2.0, 1.0 / 6.0), hi = f * std::pow(2.0, 1.0 / 6.0); g.push_back(juce::jlimit(-12.0, 12.0, (band(D, lo, hi) - refD) - (band(P, lo, hi) - refP))); }
+    // the EQ, on the whole sound (FFT, gain per bin between the bands)
+    int N2 = 1; while (N2 < A.getNumSamples()) N2 <<= 1;
+    const int order = (int) std::round(std::log2((double) N2)); juce::dsp::FFT big(order);
+    for (int c = 0; c < A.getNumChannels(); ++c)
+    {
+        std::vector<juce::dsp::Complex<float>> x((size_t) N2), y((size_t) N2);
+        for (int i = 0; i < A.getNumSamples(); ++i) x[(size_t) i] = { A.getSample(c, i), 0.f };
+        big.perform(x.data(), y.data(), false);
+        for (int k = 0; k < N2; ++k)
+        {
+            const double f = std::min(k, N2 - k) * sr / N2; double gd;
+            if (f <= fc.front()) gd = g.front(); else if (f >= fc.back()) gd = g.back();
+            else { size_t q = 0; while (q + 1 < fc.size() && fc[q + 1] < f) ++q; const double u = std::log(f / fc[q]) / std::log(fc[q + 1] / fc[q]); gd = g[q] * (1 - u) + g[q + 1] * u; }
+            y[(size_t) k] *= (float) std::pow(10.0, gd / 20.0);
+        }
+        big.perform(y.data(), x.data(), true);
+        for (int i = 0; i < A.getNumSamples(); ++i) A.setSample(c, i, x[(size_t) i].real());
+    }
+    if (std::getenv("REKIT_DEBUG")) { juce::String d; for (size_t q = 0; q < g.size(); q += 2) d << juce::roundToInt(fc[q]) << ":" << juce::roundToInt(g[q]) << " "; std::fprintf(stderr, "hat colour (%zu hits): %s\n", ts.size(), d.toRawUTF8()); }
+}
+// most (60 %+) of a snare pad's hits on a kick hit (within 10 ms): the snare of a four-on-the-floor
+static bool snareOnKick(const ds::Result& r, int pad)
+{
+    int kick = -1, best = 0;
+    for (int q = 0; q < ds::kPads; ++q) if (r.pads[(size_t) q].valid && r.pads[(size_t) q].name.startsWith("KICK") && r.pads[(size_t) q].hits > best) { best = r.pads[(size_t) q].hits; kick = q; }
+    if (kick < 0) return false;
+    int n = 0, on = 0;
+    for (const auto& h : r.hits)
+    {
+        if (h.pad != pad) continue; ++n;
+        for (const auto& k : r.hits) if (k.pad == kick && std::abs(k.time - h.time) < 0.01 * r.sr) { ++on; break; }
+    }
+    return n >= 4 && on >= 0.6 * n;
+}
+static void highPass150(juce::AudioBuffer<float>& b, double sr)
+{
+    mt::Biquad h1, h2; h1.setHPF(sr, 150.0); h2.setHPF(sr, 150.0);
+    for (int c = 0; c < b.getNumChannels(); ++c) { float* p = b.getWritePointer(c); for (int i = 0; i < b.getNumSamples(); ++i) p[i] = h2.process(h1.process(p[i], c), c); }
+}
+
 // the second sample that, layered with yours, comes nearest to A (path = -1: none is clearly nearer than yours alone)
 struct LayerFound { MatchData best, mine; juce::AudioBuffer<float> L; int path = -1; double fc = 0; bool low = true; };
 static LayerFound findLayer(const juce::AudioBuffer<float>& A, const std::array<float, DrumSlicerProcessor::kShapeN>& vA,
@@ -1717,6 +1789,13 @@ void DrumSlicerProcessor::buildKit()
         Job j; j.pad = p; j.name = pd.name; j.fam = ds::familyOf(pd.name);
         j.A = std::make_shared<juce::AudioBuffer<float>>(); j.A->makeCopyOf(target);
         j.B = std::make_shared<juce::AudioBuffer<float>>(); j.B->makeCopyOf(pd.best);
+        if (j.fam == ds::famSnare && snareOnKick(*r, p))
+        {   // pop: the snare always on a kick - what it holds below ~150 Hz is the kick (its body, its falling
+            // pitch). Your snares are compared with the snare without it
+            for (auto* b : { j.A.get(), j.B.get() }) highPass150(*b, r->sr);
+        }
+        if (j.fam == ds::famHat && !useB && !pd.name.startsWith("O-HAT") && !pd.name.startsWith("CRASH") && !pd.name.startsWith("RIDE")
+            && !std::getenv("REKIT_NO_COLOUR")) colourLikeLoop(*j.A, *r, p);   // (an open hat is taken straight from the loop already)
         j.ref = std::make_shared<ds::Pad>(); j.ref->audio.makeCopyOf(target); j.ref->valid = true;
         for (int k = 0; k < kShapeN; ++k)
             if (auto* q = apvts.getParameter(juce::String(shapeIds()[k]) + juce::String(p))) j.neutral[(size_t) k] = q->convertFrom0to1(q->getDefaultValue());
@@ -1726,12 +1805,12 @@ void DrumSlicerProcessor::buildKit()
             j.vA = slotOwner[(size_t) p] == sl ? shownShape(p) : (slots[(size_t) p][(size_t) sl].valid ? slots[(size_t) p][(size_t) sl].v : j.neutral);
         }
         std::shared_ptr<const ds::LibIndex> holder;
-        for (auto& m : library->nearest(target, r->sr, pd.name, 30, holder)) if (m.e != nullptr) j.paths.push_back(m.e->path);
+        for (auto& m : library->nearest(*j.A, r->sr, pd.name, 30, holder)) if (m.e != nullptr) j.paths.push_back(m.e->path);
         if (j.fam == ds::famSnare)
         {   // a snare and a clap played together in the loop: the nearest claps AND the nearest snares of yours may
             // layer (the layer step takes one only where the pair clearly sounds nearer than one sample alone)
             int nc = 0, ns = 0;
-            for (auto& m : library->nearest(target, r->sr, pd.name, 120, holder))
+            for (auto& m : library->nearest(*j.A, r->sr, pd.name, 120, holder))
             {
                 if (m.e == nullptr) continue;
                 const auto fn = juce::File(m.e->path).getFileName().toLowerCase();
