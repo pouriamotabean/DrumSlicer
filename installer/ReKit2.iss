@@ -1,7 +1,7 @@
 ; Windows installer for ReKit 2 (Inno Setup 6). Built by GitHub Actions: iscc installer\ReKit2.iss
 ; ReKit 2 is its own plugin: it installs NEXT TO ReKit 1.x (ReKit.vst3 stays, so both can be compared)
 #define AppName "ReKit 2"
-#define AppVersion "2.9.3"
+#define AppVersion "2.9.4"
 #define Publisher "Pouria Motabean"
 
 [Setup]
@@ -22,6 +22,11 @@ PrivilegesRequired=admin
 UninstallDisplayName={#AppName} {#AppVersion} (VST3)
 UninstallDisplayIcon={sys}\shell32.dll,168
 WizardStyle=modern
+
+; a host (Cubase) that has the plugin loaded keeps the .vst3 locked: setup offers to close it first
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll,*.vst3
+RestartApplications=no
 
 [Files]
 Source: "..\dist\ReKit 2.vst3\*"; DestDir: "{commoncf64}\VST3\ReKit 2.vst3"; Flags: recursesubdirs createallsubdirs ignoreversion

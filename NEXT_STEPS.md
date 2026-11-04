@@ -134,6 +134,9 @@ kit · source · pattern · pad (+ pad ···) · samples · kits.
 ## v2.3.3
 - FIX: reopening a project lost every sample of yours that had no layer (unembedResult cleared it; since 1.13). Tested: build, save, reopen = same samples, same sources, same matches.
 
+## v2.9.4
+- Setup: if Cubase (or any app) has ReKit 2 loaded, setup now asks to close it instead of "DeleteFile failed; code 5".
+
 ## v2.9.3
 - From the user's 116 bpm mixdown (kick right, snare / hats "wrong colour" from the library):
   - The snare sits on the kick (2 and 4 of a four-on-the-floor): its learned sound held the kick's body and
